@@ -1,21 +1,28 @@
+from typing import Literal
+
 import numpy as np
 from numba import float64, int64
 from numba.experimental import jitclass
 
 
 class Input:
-    def __init__(self, data: np.ndarray) -> None:
+    def __init__(
+        self, data: np.ndarray, calc_method: Literal["numpy", "numba"] = "numba"
+    ) -> None:
         # could dispatch float vs int types here
-        self.calc = self.Calc(data=data)
+        if calc_method == "numpy":
+            self.calc = self.Calc(data=data)
+        elif calc_method == "numba":
+            jit_class_spec = [
+                ("data", float64[:, :]),
+                ("current_index", int64),
+                ("current_values", float64[:]),
+            ]
+            self.calc = jitclass(self.Calc, jit_class_spec)(data=data)
+        else:
+            raise ValueError(f"Invalid value for calc_method: {calc_method}.")
         return
 
-    @jitclass(
-        [
-            ("data", float64[:, :]),
-            ("current_index", int64),
-            ("current_values", float64[:]),
-        ]
-    )
     class Calc:
         def __init__(self, data: np.ndarray) -> None:
             self.data = data
@@ -30,15 +37,35 @@ class Input:
 
 
 class Upper:
-    def __init__(self, forcing_0: np.ndarray, flow_initial: np.ndarray) -> None:
+    def __init__(
+        self,
+        forcing_0: np.ndarray,
+        flow_initial: np.ndarray,
+        calc_method: Literal["numpy", "numba"] = "numba",
+    ) -> None:
         self.forcing_0 = forcing_0
         self.flow = flow_initial.copy()
         self.flow_previous = self.flow.copy()
-        self.calc = self.Calc(
-            forcing_0=self.forcing_0,
-            flow=self.flow,
-            flow_previous=self.flow_previous,
-        )
+        self.calc_method = calc_method
+        if self.calc_method == "numpy":
+            self.calc = self.Calc(
+                forcing_0=self.forcing_0,
+                flow=self.flow,
+                flow_previous=self.flow_previous,
+            )
+        elif self.calc_method == "numba":
+            jit_class_spec = [
+                ("forcing_0", float64[:]),
+                ("flow", float64[:]),
+                ("flow_previous", float64[:]),
+            ]
+            self.calc = jitclass(self.Calc, jit_class_spec)(
+                forcing_0=self.forcing_0,
+                flow=self.flow,
+                flow_previous=self.flow_previous,
+            )
+        else:
+            raise ValueError(f"Invalid value for calc_method: {calc_method}.")
 
     @staticmethod
     def get_inputs() -> tuple:
@@ -48,13 +75,6 @@ class Upper:
     def get_variables() -> tuple:
         return ("flow", "flow_previous")
 
-    @jitclass(
-        [
-            ("forcing_0", float64[:]),
-            ("flow", float64[:]),
-            ("flow_previous", float64[:]),
-        ]
-    )
     class Calc:
         def __init__(
             self, forcing_0: np.ndarray, flow: np.ndarray, flow_previous: np.ndarray
@@ -74,15 +94,33 @@ class Upper:
 
 
 class Lower:
-    def __init__(self, flow: np.ndarray, storage_initial: np.ndarray) -> None:
+    def __init__(
+        self,
+        flow: np.ndarray,
+        storage_initial: np.ndarray,
+        calc_method: Literal["numpy", "numba"] = "numba",
+    ) -> None:
         self.flow = flow
         self.storage = storage_initial.copy()
         self.storage_previous = self.storage.copy()
-        self.calc = self.Calc(
-            flow=self.flow,
-            storage=self.storage,
-            storage_previous=self.storage_previous,
-        )
+        self.calc_method = calc_method
+        if self.calc_method == "numpy":
+            self.calc = self.Calc(
+                flow=self.flow,
+                storage=self.storage,
+                storage_previous=self.storage_previous,
+            )
+        elif self.calc_method == "numba":
+            jit_class_spec = [
+                ("flow", float64[:]),
+                ("storage", float64[:]),
+                ("storage_previous", float64[:]),
+            ]
+            self.calc = jitclass(self.Calc, jit_class_spec)(
+                flow=self.flow,
+                storage=self.storage,
+                storage_previous=self.storage_previous,
+            )
 
     @staticmethod
     def get_inputs() -> tuple:
@@ -92,13 +130,6 @@ class Lower:
     def get_variables() -> tuple:
         return ("storage", "storage_previous")
 
-    @jitclass(
-        [
-            ("flow", float64[:]),
-            ("storage", float64[:]),
-            ("storage_previous", float64[:]),
-        ]
-    )
     class Calc:
         def __init__(
             self,
@@ -171,7 +202,7 @@ class Model:
         for tt in range(self.n_times):
             self.advance()
             self.calculate(dt=dt)
-            verbose = True
+            verbose = False
             if verbose:
                 print(f"{tt=}")
                 print(f"{self.inputs['forcing_0'].calc.current_values=}")
@@ -182,18 +213,56 @@ class Model:
         return
 
 
+def timer(func):
+    """Use as a decorator to print the execution time of the passed function"""
+    import functools
+    from time import time
+
+    @functools.wraps(func)
+    def wrap_func(*args, **kwargs):
+        t1 = time()
+        result = func(*args, **kwargs)
+        t2 = time()
+        print(f"Function {func.__name__!r} executed in {(t2 - t1):.4f}s")
+        return result
+
+    return wrap_func
+
+
 if __name__ == "__main__":
     # do bi-weekly timestep with annual cylce
-    sin_data = np.sin(np.arange(0, np.pi * 2, np.pi * 2 / 26))
+    n_times = 500000
+    sin_data = np.sin(np.arange(0, np.pi * 2, np.pi * 2 / n_times))
     forcing_0 = Input(np.stack((sin_data + 15, sin_data + 25), axis=0))
 
     input_dict = {"forcing_0": forcing_0}
-    process_dict = {
-        "upper": {"class": Upper, "flow_initial": np.array([100.0, 200.0])},
-        "lower": {"class": Lower, "storage_initial": np.array([300.0, 700.0])},
-    }
 
-    dt = np.float64(1.0)
-    model = Model(process_dict, input_dict)
-    model.run(dt=dt)
-    asdff
+    for calc_method in ["numpy", "numba"]:
+        process_dict = {
+            "upper": {
+                "class": Upper,
+                "flow_initial": np.array([100.0, 200.0]),
+                "calc_method": calc_method,
+            },
+            "lower": {
+                "class": Lower,
+                "storage_initial": np.array([300.0, 700.0]),
+                "calc_method": calc_method,
+            },
+        }
+
+        dt = np.float64(1.0)
+
+        @timer
+        def init_model():
+            global model
+            model = Model(process_dict, input_dict)
+
+        @timer
+        def run_model():
+            global model
+            model.run(dt=dt)
+
+        print(f"{calc_method=}")
+        init_model()
+        run_model()
