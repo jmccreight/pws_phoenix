@@ -1,8 +1,23 @@
 from typing import Literal
 
 import numpy as np
-from numba import float64, int64
+from numba import float64, int64, typeof
 from numba.experimental import jitclass
+
+np.random.seed(42)
+
+
+# The dummy class only exists to be used in a jitclass context
+@jitclass
+class Dummy:
+    def __init__(self) -> None:
+        return
+
+    def advance(self) -> None:
+        return
+
+    def calculate(self, dt=np.float64) -> None:
+        return
 
 
 class Input:
@@ -33,6 +48,9 @@ class Input:
         def advance(self):
             self.current_index += np.int64(1)
             self.current_values[:] = self.data[self.current_index,]
+            return
+
+        def calculate(self, dt: np.float64):
             return
 
 
@@ -78,7 +96,10 @@ class Upper:
 
     class Calc:
         def __init__(
-            self, forcing_0: np.ndarray, flow: np.ndarray, flow_previous: np.ndarray
+            self,
+            forcing_0: np.ndarray,
+            flow: np.ndarray,
+            flow_previous: np.ndarray,
         ) -> None:
             self.forcing_0 = forcing_0
             self.flow = flow
@@ -101,7 +122,9 @@ class Upper:
         # )
         def calculate(self, dt: np.float64) -> None:
             for loc in range(self.n_loc):
-                self.flow[loc] = self.flow_previous[loc] * 0.95 + self.forcing_0[loc]
+                self.flow[loc] = (
+                    self.flow_previous[loc] * np.float64(0.95) + self.forcing_0[loc]
+                )
             return
 
 
@@ -156,6 +179,7 @@ class Lower:
             self.storage = storage
             self.storage_previous = storage_previous
             self.n_loc = len(self.flow)
+            return
 
         def advance(self) -> None:
             self.storage_previous[:] = self.storage
@@ -163,16 +187,20 @@ class Lower:
 
         def calculate(self, dt: np.float64) -> None:
             for loc in range(self.n_loc):
-                self.storage[loc] = (
-                    self.storage_previous[loc] * 0.95 + self.flow[loc] * 0.12
+                self.storage[loc] = (self.storage_previous[loc] * np.float64(0.95)) + (
+                    self.flow[loc] * np.float64(0.12)
                 )
             return
 
 
 class Model:
-    def __init__(self, process_dict: dict) -> None:
+    def __init__(
+        self,
+        process_dict: dict,
+        calc_method: Literal["numpy", "numba"] = "numpy",
+    ) -> None:
         self.process_dict = process_dict
-
+        self.calc_method = calc_method
         self.n_times = self.get_n_times()
 
         self.model_dict = {}
@@ -190,6 +218,29 @@ class Model:
                             init_dict[ii] = getattr(self.model_dict[pp], ii)
 
             self.model_dict[kk] = vv["class"](**init_dict)
+
+        if self.calc_method == "numpy":
+            self.calc = self.CalcNumpy(
+                inputs_dict=self.inputs_dict,
+                model_dict=self.model_dict,
+            )
+
+        elif self.calc_method == "numba":
+            n_max_classes = 20  # the number of args available in CalcNumba
+            # default to Dummy for all classes
+            inst_list_full = [Dummy() for ii in range(n_max_classes)]
+            spec = [(f"a{ii + 1}", typeof(vv)) for ii, vv in enumerate(inst_list_full)]
+
+            # fill the class_list and spec with inputs and model classes
+            inst_list = list(self.inputs_dict.values()) + list(self.model_dict.values())
+            for ii, vv in enumerate(inst_list):
+                inst_list_full[ii] = vv.calc
+                spec[ii] = (f"a{ii + 1}", typeof(vv.calc))
+
+            self.calc = jitclass(self.CalcNumba, spec)(*inst_list_full)
+
+        else:
+            raise ValueError(f"Invalid value: {calc_method=}.")
 
         return
 
@@ -211,29 +262,135 @@ class Model:
         raise ValueError("This should be unreachable.")
         return
 
-    def advance(self) -> None:
-        for vv in self.inputs_dict.values():
-            vv.calc.advance()
-        for vv in self.model_dict.values():
-            vv.calc.advance()
+    class CalcNumpy:
+        def __init__(self, inputs_dict: dict, model_dict: dict) -> None:
+            self.inputs_dict = inputs_dict
+            self.model_dict = model_dict
+            return
 
-    def calculate(self, dt: np.float64) -> None:
-        for vv in self.model_dict.values():
-            vv.calc.calculate(dt)
+        def advance(self) -> None:
+            for vv in self.inputs_dict.values():
+                vv.calc.advance()
+            for vv in self.model_dict.values():
+                vv.calc.advance()
 
-    def run(self, dt: np.float64) -> None:
-        for tt in range(self.n_times):
-            self.advance()
-            self.calculate(dt=dt)
-            verbose = False
-            if verbose:
-                print(f"{tt=}")
-                print(f"{self.inputs_dict['forcing_0'].calc.current_values=}")
-                print(f"{self.model_dict['upper'].calc.forcing_0=}")
-                print(f"{self.model_dict['upper'].calc.flow=}")
-                print(f"{self.model_dict['lower'].calc.flow=}")
-                print(f"{self.model_dict['lower'].calc.storage=}")
-        return
+        def calculate(self, dt: np.float64) -> None:
+            for vv in self.model_dict.values():
+                vv.calc.calculate(dt)
+
+        def run(self, dt: np.float64, n_steps: np.int32) -> None:
+            for tt in range(n_steps):
+                self.advance()
+                self.calculate(dt=dt)
+                verbose = False
+                if verbose:
+                    print(f"{tt=}")
+                    print(f"{self.inputs_dict['forcing_0'].calc.current_values=}")
+                    print(f"{self.model_dict['upper'].calc.forcing_0=}")
+                    print(f"{self.model_dict['upper'].calc.flow=}")
+                    print(f"{self.model_dict['lower'].calc.flow=}")
+                    print(f"{self.model_dict['lower'].calc.storage=}")
+            return
+
+    class CalcNumba:
+        def __init__(
+            self,
+            a1,
+            a2,
+            a3,
+            a4,
+            a5,
+            a6,
+            a7,
+            a8,
+            a9,
+            a10,
+            a11,
+            a12,
+            a13,
+            a14,
+            a15,
+            a16,
+            a17,
+            a18,
+            a19,
+            a20,
+        ) -> None:
+            self.a1 = a1
+            self.a2 = a2
+            self.a3 = a3
+            self.a4 = a4
+            self.a5 = a5
+            self.a6 = a6
+            self.a7 = a7
+            self.a8 = a8
+            self.a9 = a9
+            self.a10 = a10
+            self.a11 = a11
+            self.a12 = a12
+            self.a13 = a13
+            self.a14 = a14
+            self.a15 = a15
+            self.a16 = a16
+            self.a17 = a17
+            self.a18 = a18
+            self.a19 = a19
+            self.a20 = a20
+
+        def advance(self) -> None:
+            self.a1.advance()
+            self.a2.advance()
+            self.a3.advance()
+            self.a4.advance()
+            self.a5.advance()
+            self.a6.advance()
+            self.a7.advance()
+            self.a8.advance()
+            self.a9.advance()
+            self.a10.advance()
+            self.a11.advance()
+            self.a12.advance()
+            self.a13.advance()
+            self.a14.advance()
+            self.a15.advance()
+            self.a16.advance()
+            self.a17.advance()
+            self.a18.advance()
+            self.a19.advance()
+            self.a20.advance()
+
+            return
+
+        def calculate(self, dt: np.float64) -> None:
+            self.a1.calculate(dt)
+            self.a2.calculate(dt)
+            self.a3.calculate(dt)
+            self.a4.calculate(dt)
+            self.a5.calculate(dt)
+            self.a6.calculate(dt)
+            self.a7.calculate(dt)
+            self.a8.calculate(dt)
+            self.a9.calculate(dt)
+            self.a10.calculate(dt)
+            self.a11.calculate(dt)
+            self.a12.calculate(dt)
+            self.a13.calculate(dt)
+            self.a14.calculate(dt)
+            self.a15.calculate(dt)
+            self.a16.calculate(dt)
+            self.a17.calculate(dt)
+            self.a18.calculate(dt)
+            self.a19.calculate(dt)
+            self.a20.calculate(dt)
+
+            return
+
+        def run(self, dt: np.float64, n_steps: np.int32) -> None:
+            for tt in range(n_steps):
+                self.advance()
+                self.calculate(dt=dt)
+
+            return
 
 
 def timer(func):
@@ -255,7 +412,7 @@ def timer(func):
 if __name__ == "__main__":
     # construct input/forcing timeseries
     # do bi-weekly timestep with annual cylce
-    n_time = 5000
+    n_time = 365 * 60  # numpy: 60yrs is about 6min with 20k space
     n_space = 20000
     sin_data = np.sin(np.arange(0, np.pi * 2, np.pi * 2 / n_time))
     shifts = np.random.uniform(low=10, high=100, size=n_space)
@@ -267,9 +424,11 @@ if __name__ == "__main__":
     flow_initial_data = np.random.uniform(low=100, high=1000, size=n_space)
     storage_initial_data = np.random.uniform(low=100, high=500, size=n_space)
 
-    # output arrays, just to be stored to by the first calc_method
+    # output arrays, just  final time to be stored to by the first calc_method
     output_flow = forcing_0_data[0, :] * np.nan
     output_storage = forcing_0_data[0, :] * np.nan
+
+    dt = np.float64(1.0)
 
     calc_methods = ["numpy", "numba"]
     for calc_method in calc_methods:
@@ -291,17 +450,17 @@ if __name__ == "__main__":
             },
         }
 
-        dt = np.float64(1.0)
-
         @timer
         def init_model():
             global model
-            model = Model(process_dict)
+            model = Model(process_dict, calc_method=calc_method)
+            print(model.calc)
 
         @timer
-        def run_model():
+        def run_model(n_steps=n_time):
             global model
-            model.run(dt=dt)
+            # for numba the args must be positional, not kw
+            model.calc.run(dt, np.int32(n_steps))
 
         @timer
         def output_model():
@@ -311,6 +470,9 @@ if __name__ == "__main__":
             if calc_method == calc_methods[0]:
                 output_flow[:] = model.model_dict["upper"].flow
                 output_storage[:] = model.model_dict["lower"].storage
+                print(f"{output_flow.mean()}")
+                print(f"{output_storage.mean()}")
+
             else:
                 np.testing.assert_equal(output_flow, model.model_dict["upper"].flow)
                 np.testing.assert_equal(
