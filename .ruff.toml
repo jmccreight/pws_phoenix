@@ -1,0 +1,2 @@
+# ruff.toml or .ruff.toml
+line-length = 79 # Set your desired line length here
