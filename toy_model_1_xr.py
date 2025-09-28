@@ -8,8 +8,23 @@ from utils import timer
 
 np.random.seed(42)
 
-
 # TODO is there a fast index order in python, does it matter?
+# TODO: pass through an option to load on open?
+
+
+def open_xr(path: pl.Path) -> Union[xr.DataArray, xr.Dataset]:
+    """Return appropriate DataArray or Dataset given a file.
+
+    Args:
+        path: The path of the file to open.
+    """
+    ds = xr.open_dataset(path)
+    if len(ds.data_vars) == 1:
+        return ds[list(ds.data_vars)[0]]
+    else:
+        return ds
+
+
 class Parameters:
     def __init__(self, data: xr.Dataset):
         self.data = data
@@ -33,16 +48,21 @@ class Input:
             self._input_file = None
         # <
         if read_only:
-            self.data.values.flags.writeable = False
+            self.data.values.flags.writeable = True
+            # self.data.values.flags.writeable = False  # restore
         # <
-        self.current_index = np.int64(-1)
-        self.current_values = np.nan * self.data[0, :]
+        self._current_index = np.int64(-1)
+        self._current_values = np.nan * self.data[:, 0]
         return
 
     def advance(self) -> None:
-        self.current_index += np.int64(1)
-        self.current_values[:] = self.data[self.current_index, :]
+        self._current_index += np.int64(1)
+        self._current_values[:] = self.data[:, self._current_index]
         return
+
+    @property
+    def current_values(self):
+        return self._current_values
 
     @staticmethod
     def from_file(
@@ -78,29 +98,64 @@ class Process:
         self.data = xr.Dataset(coords=coords)
         # parameters
         for pp in self.get_parameters():
+            # in this case we want read-only copies??
             self[pp] = parameters[pp]
             self[pp].values.flags.writeable = False
         for ii in self.get_inputs():
-            val = kwargs[ii]
-            if isinstance(val, pl.Path):
-                val = xr.open_dataarray(val)
-            self[ii] = val
-            self[ii].values.flags.writeable = False
+            # Input object set on self?4
+            if isinstance(kwargs[ii], Input):
+                self[ii] = kwargs[ii].current_values
+                assert id(self[ii].values) == id(
+                    kwargs[ii].current_values.values
+                )
+            else:
+                self[ii] = kwargs[ii]
+                assert id(self[ii].values) == id(kwargs[ii].values)
+
+            # TODO write a test for the above references
         for oo in self.get_input_outputs():
-            self[oo] = kwargs[oo]
-        for vv in self.get_variables():
-            self[vv] = vv
-        for vv in self._get_private_variables():
-            self[vv] = vv
+            self[oo] = kwargs[oo].current_values
+            assert id(self[oo].values) == id(kwargs[oo].current_values.values)
+        for kk, vv in self.get_variables().items():
+            self[kk] = self._var_from_metadata(vv, **kwargs)
+        for kk, vv in self._get_private_variables().items():
+            self[kk] = self._var_from_metadata(vv)
         # <
         return
+
+    def _var_from_metadata(self, var_meta: dict, **kwargs) -> xr.DataArray:
+        # TODO move this map to constants somewhere
+        fill_value_map = {np.float64: np.nan}
+        sizes = self.data.sizes
+        dims = tuple([sizes[dd] for dd in var_meta["dims"]])
+        da = xr.DataArray(
+            data=np.full(
+                dims,
+                fill_value_map[var_meta["dtype"]],
+                dtype=var_meta["dtype"],
+            ),
+            dims=var_meta["dims"],
+            attrs=var_meta["metadata"],
+        )
+        if (
+            "initial" in var_meta.keys()
+            and var_meta["initial"] in kwargs.keys()
+        ):
+            da[:] = kwargs[var_meta["initial"]]
+        # <
+        return da
 
     def __getitem__(self, name: str) -> xr.DataArray:
         # TODO: may want to use getattr to get other properties?
         return self.data[name]
 
     def __setitem__(self, name: str, value: xr.DataArray) -> None:
-        self.data[name] = value
+        self.data[name] = value  # [name]
+        return
+
+    def __delitem__(self, name: str) -> None:
+        del self.data[name]
+        return
 
     @staticmethod
     def get_parameters() -> tuple:
@@ -152,10 +207,16 @@ class Upper(Process):
     @staticmethod
     def get_variables() -> dict:
         return {
-            "flow": {"dims": ("space",), "description": "flowy"},
+            "flow": {
+                "dims": ("space",),
+                "dtype": np.float64,
+                "metadata": {"description": "flowy"},
+                "initial": "flow_initial",
+            },
             "flow_previous": {
                 "dims": ("space",),
-                "description": "was flowy",
+                "dtype": np.float64,
+                "metadata": {"description": "was flowy"},
             },
         }
 
@@ -205,10 +266,16 @@ class Lower(Process):
     @staticmethod
     def get_variables() -> dict:
         return {
-            "storage": {"dims": ("space",), "description": "storagey"},
+            "storage": {
+                "dims": ("space",),
+                "dtype": np.float64,
+                "metadata": {"description": "storagey"},
+                "initial": "storage_initial",
+            },
             "storage_previous": {
                 "dims": ("space",),
-                "description": "old storagey",
+                "dtype": np.float64,
+                "metadata": {"description": "old storagey"},
             },
         }
 
@@ -229,6 +296,13 @@ class Lower(Process):
 
 
 class Model:
+    """
+    Principle: the model should transform all paths in to datasets for
+    parameters and dataarrays for all other fields. No process should take
+    paths.
+
+    """
+
     def __init__(
         self,
         process_dict: dict,
@@ -237,39 +311,69 @@ class Model:
 
         self._passed_process_dict = process_dict
         self._process_dict = deepcopy(process_dict)
-        self._deal_w_parameters()
-        self._get_inputs_wire_processes()
-        # solve time
-        adf
 
-    def _deal_w_parameters(self):
-        proc_param_file_dict = {
-            kk: vv["parameters"]
-            for kk, vv in self._process_dict.items()
-            if isinstance(vv["parameters"], pl.Path)
-        }
-        # param_file_proc_dict = {
-        #     vv: kk for kk, vv in proc_param_file_dict.items()
-        # }
-        param_file_da_dict = {
-            vv: xr.open_dataset(vv) for vv in proc_param_file_dict.values()
-        }
-        for kk in list(self._process_dict.keys()):
-            vv = self._process_dict[kk]
-            params = vv["parameters"]
-            if isinstance(params, pl.Path):
-                vv["parameters"] = param_file_da_dict[params]
+        self._paths_to_data_proc_dict()
 
+        # wire up the model
+        self.model_dict = {}
+        self.inputs_dict = {}
+        self._set_inputs_and_model_dicts()
+
+        self._set_time()
         return
 
-    def _get_inputs_wire_processes(self):
+    def _paths_to_data_proc_dict(self):
+        """All input paths to Dataset or DataArray without opening files twice.
+
+        If inputs come as memory, we dont need to do anything (though that's
+        potentially a source of user error)
+
+        """
+        repeated_paths = self._get_repeated_paths()
+        for proc_name in self._process_dict.keys():
+            proc = self._process_dict[proc_name]
+            for input_key in proc.keys():
+                input_val = proc[input_key]
+                if isinstance(input_val, pl.Path):
+                    if input_val in repeated_paths.keys():
+                        proc[input_key] = repeated_paths[input_val]
+                    else:
+                        proc[input_key] = open_xr(input_val)
+
+        # TODO: write test that repeated path has same memory id
+        # assert id(self._process_dict["upper"]["parameters"]) == id(
+        #     self._process_dict["lower"]["parameters"]
+        # )
+        return
+
+    def _get_repeated_paths(
+        self,
+    ) -> dict[pl.Path, Union[xr.DataArray, xr.Dataset]]:
+        """Open repeated paths in the process_dict once key against path.
+
+        This is intended to work with parameter files or forcing files specified
+        across multiple processes.
+        """
+        from collections import Counter
+
+        flat_proc_dict_paths = []
+        for outer_val in self._process_dict.values():
+            for inner_val in outer_val.values():
+                if isinstance(inner_val, pl.Path):
+                    flat_proc_dict_paths.append(inner_val)
+
+        repeated_paths_list = [
+            kk for kk, vv in Counter(flat_proc_dict_paths).items() if vv > 1
+        ]
+        repeated_paths_data = {kk: open_xr(kk) for kk in repeated_paths_list}
+        return repeated_paths_data
+
+    def _set_inputs_and_model_dicts(self):
         """Initialize inputs and processes to processes above.
 
         The inputs are in self.inputs_dict and the wired model is in
         self.model_dict.
         """
-        self.model_dict = {}
-        self.inputs_dict = {}
         for kk, vv in self._process_dict.items():
             # get the process dict with the classes removed
             init_dict = {kkk: vvv for kkk, vvv in vv.items() if kkk != "class"}
@@ -287,9 +391,9 @@ class Model:
                     else:
                         raise ValueError("This should not happen from file.")
                     # <
-                    self.inputs_dict[ii] = Input(
-                        data_or_file, read_only=read_only
-                    )
+                    init_dict[ii] = Input(data_or_file, read_only=read_only)
+                    self.inputs_dict[ii] = init_dict[ii]
+                    assert init_dict[ii].data is self.inputs_dict[ii].data
                     del data_or_file
 
                 else:
@@ -301,15 +405,18 @@ class Model:
 
                 # <<<
                 self.model_dict[kk] = vv["class"](**init_dict)
+                # TODO: test refs across processes
 
         return
 
-    def _get_time_and_inputs_dict(self) -> None:
-        # would check consistency of this across all inputs
-        proc_dict_0 = list(self._process_dict.values())[0]
-        class_0 = proc_dict_0["class"]
-        input_0 = class_0.get_inputs()[0]
-        return np.int64(proc_dict_0[input_0].calc.data.shape[0])
+    def _set_time(self) -> None:
+        # TODO: would take start and end times and check for these
+        # TODO: would check consistency of this across all inputs
+        kk0 = list(self.inputs_dict.keys())[0]
+        self.ntime = self.inputs_dict[kk0].data.sizes["time"]
+        self.time_index = self.inputs_dict[kk0].data.time
+        self.times = self.inputs_dict[kk0].data.time_coord
+        return None
 
     def procs_above(self, proc_name) -> list:
         procs_above = []
@@ -324,26 +431,26 @@ class Model:
 
     def advance(self) -> None:
         for vv in self.inputs_dict.values():
-            vv.calc.advance()
+            vv.advance()
         for vv in self.model_dict.values():
-            vv.calc.advance()
+            vv.advance()
 
     def calculate(self, dt: np.float64) -> None:
         for vv in self.model_dict.values():
-            vv.calc.calculate(dt)
+            vv.calculate(dt)
 
-    def run(self, dt: np.float64, n_steps: np.int32) -> None:
+    def run(self, dt: np.float64, n_steps: np.int32, verbose=False) -> None:
         for tt in range(n_steps):
             self.advance()
             self.calculate(dt=dt)
-            verbose = False
+
             if verbose:
                 print(f"{tt=}")
-                print(f"{self.inputs_dict['forcing_0'].calc.current_values=}")
-                print(f"{self.model_dict['upper'].calc.forcing_0=}")
-                print(f"{self.model_dict['upper'].calc.flow=}")
-                print(f"{self.model_dict['lower'].calc.flow=}")
-                print(f"{self.model_dict['lower'].calc.storage=}")
+                print(f"{self.inputs_dict['forcing_0'].current_values=}")
+                print(f"{self.model_dict['upper']['forcing_0']=}")
+                print(f"{self.model_dict['upper']['flow']=}")
+                print(f"{self.model_dict['lower']['flow']=}")
+                print(f"{self.model_dict['lower']['storage']=}")
         return
 
 
@@ -355,7 +462,7 @@ if __name__ == "__main__":
 
     # Dimensions
     n_years = 4
-    n_space = 20000
+    n_space = 2000
 
     start_year = 2000
     end_year = start_year + n_years
@@ -496,34 +603,13 @@ if __name__ == "__main__":
     def init_model():
         global model
         model = Model(process_dict)
-        print(model.calc)
 
     @timer
-    def run_model(n_steps=n_time):
+    def run_model(n_steps=n_time, verbose=False):
         global model
         # for numba the args must be positional, not kw
-        model.calc.run(dt, np.int32(n_steps))
-
-    @timer
-    def output_model():
-        global model
-        # check the output at the last timestep
-
-        if calc_method == calc_methods[0]:
-            output_flow[:] = model.model_dict["upper"].flow
-            output_storage[:] = model.model_dict["lower"].storage
-            print(f"{output_flow.mean()}")
-            print(f"{output_storage.mean()}")
-
-        else:
-            np.testing.assert_equal(
-                output_flow, model.model_dict["upper"].flow
-            )
-            np.testing.assert_equal(
-                output_storage, model.model_dict["lower"].storage
-            )
+        model.run(dt, np.int32(n_steps), verbose=verbose)
+        del model
 
     init_model()
-    run_model()
-    output_model()
-    del model
+    run_model(verbose=False)
