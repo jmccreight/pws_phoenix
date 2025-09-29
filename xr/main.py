@@ -157,6 +157,7 @@ process_dict: Dict[str, Dict[str, Any]] = {
 
 control = {
     "output_var_names": ["flow", "storage_previous"],
+    "output_dir": pl.Path("./output"),
     "time_chunk_size": 10,
 }
 

@@ -1,7 +1,7 @@
 import pathlib as pl
 import sys
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import netCDF4 as nc
 import numpy as np
@@ -12,18 +12,32 @@ sys.path.append(str(parent_dir))
 from utils import timer  # noqa
 
 
-# TODO is there a fast index order in python, does it matter?
 # TODO: pass through an option to load on open?
 # TODO: have get_variables and get_variable_names so a list of var names is
 #       easily accessible?
 # TODO: why does the time coord need passed around?
+# TODO: read the output class in-depth
+# TODO: review all TODOs scattered in the code.
+# TODO: Output: can we collect the memory over all inputs and processes to
+#       estimate total memory usage (will not include local/temp vars), add
+#       to this the memory usage of the Output memory buffers. Finally, take
+#       a user requested max memory, then solve:
+#       time_chunk_size = (max - (process + init)) / buffer_per_time
+#       and then round down slightly.
+# TODO: what are the keys on the model dict, just from the passed model dict?
 
 
 def open_xr(path: pl.Path) -> Union[xr.DataArray, xr.Dataset]:
-    """Return appropriate DataArray or Dataset given a file.
+    """Open a NetCDF file and return the most appropriate xarray object.
 
+    Automatically determines whether to return a Dataset or DataArray based on
+    the file contents.
     Args:
-        path: The path of the file to open.
+        path: Path to the NetCDF file to open.
+
+    Returns:
+        DataArray if file contains exactly one data variable, otherwise
+        Dataset.
     """
     ds = xr.open_dataset(path)
     if len(ds.data_vars) == 1:
@@ -33,12 +47,50 @@ def open_xr(path: pl.Path) -> Union[xr.DataArray, xr.Dataset]:
 
 
 class Input:
+    """Handles time-varying input data for model processes.
+
+    Manages input data that varies over time, providing functionality to advance
+    through time steps and access current values. Can load data from files or
+    accept pre-loaded DataArrays. Maintains an internal time index and provides
+    the current time slice.
+
+    Attributes:
+        data: The complete time-varying input DataArray.
+        current_values: The values at the current time step.
+
+    Example:
+        >>> from pathlib import Path
+        >>> # From file
+        >>> forcing = Input(Path("forcing_data.nc"))
+        >>> forcing.advance()  # Move to first time step
+        >>> current = forcing.current_values  # Get current time slice
+
+        >>> # From DataArray
+        >>> data = xr.DataArray(
+        ...     np.random.rand(100, 365), dims=['space', 'time']
+        ... )
+        >>> input_obj = Input(data)
+    """
+
     # TODO: needs a control to find the start time index as the first index
     def __init__(
         self,
         data_or_file: Union[xr.DataArray, pl.Path],
         read_only: bool = False,
     ) -> None:
+        """Initialize Input object with data from file or memory.
+
+        Args:
+            data_or_file: Either a path to a NetCDF file containing a DataArray,
+                or a pre-loaded xarray DataArray. The array should have time
+                as one of its dimensions.
+            read_only: If True, marks the underlying data as read-only to
+                prevent accidental modifications. Default is False.
+
+        Note:
+            The time index starts at -1, so call advance() to move to the first
+            time step before accessing current_values.
+        """
         if isinstance(data_or_file, pl.Path):
             self.data = xr.open_dataarray(data_or_file)
             self._input_file = data_or_file
@@ -48,35 +100,64 @@ class Input:
         # <
         if read_only:
             self.data.values.flags.writeable = True
-            # self.data.values.flags.writeable = False  # restore
+
         # <
         self._current_index = np.int64(-1)
         self._current_values = np.nan * self.data[:, 0]
         return
 
     def advance(self) -> None:
+        """Advance current_values to the next time step."""
         self._current_index += np.int64(1)
         self._current_values[:] = self.data[:, self._current_index]
         return
 
     @property
     def current_values(self) -> xr.DataArray:
-        return self._current_values
+        """Get the data values for the current time step.
 
-    @staticmethod
-    def from_file(
-        file_path: pl.Path, var_name: Optional[str] = None
-    ) -> "Input":
-        if var_name is None:
-            return Input(xr.open_dataarray(file_path))
-        else:
-            return Input(xr.open_dataset(file_path)[var_name])
+        Returns:
+            DataArray data at the current time index with shape of the spatial
+            dimensions only.
+
+        Note:
+            Returns NaN values if advance() has not been called yet.
+        """
+        return self._current_values
 
 
 class Process:
-    def __init__(
-        self, parameters: xr.Dataset, **kwargs: Union[xr.DataArray, xr.Dataset]
-    ) -> None:
+    """Base class for modeled processes.
+
+    Abstract base class that provides the framework for implementing model processes.
+    Each process manages its own parameters, inputs, and variables within an xarray
+    Dataset structure. Subclasses must implement abstract methods to define their
+    specific parameters, inputs, and variables.
+
+    A process represents a computational component that:
+    - Takes parameters (static configuration) from a Dataset
+    - Receives inputs (time-varying or from other processes) from DataArrays
+    - Maintains internal variables and state
+    - Provides advance() and calculate() methods for time stepping
+
+    Attributes:
+        data: xarray Dataset containing all process variables and coordinates.
+    """
+
+    def __init__(self, parameters: xr.Dataset, **kwargs: xr.DataArray) -> None:
+        """Initialize the process with parameters and input data.
+
+        Sets up the process's internal xarray Dataset with proper coordinates,
+        parameters, inputs, and variables. Handles the initialization
+        of variable references.
+
+        Args:
+            parameters: Dataset containing static parameters for this process.
+            **kwargs: To handle input data and initial values. Keys should
+            match names returned by get_inputs(), get_input_outputs(), and
+            variable initial conditions indicated by its metadata key
+            "intitial". Values are DataArrays.
+        """
         import itertools
 
         # add parameters, inputs, input_outputs, and public variables
@@ -129,6 +210,23 @@ class Process:
         var_meta: Dict[str, Any],
         **kwargs: Union[xr.DataArray, xr.Dataset],
     ) -> xr.DataArray:
+        """Create a variable DataArray from metadata specification.
+
+        Initialized DataArrays for process variables based on their metadata
+        definitions.
+
+        Args:
+            var_meta: Dictionary containing variable metadata with keys:
+                - 'dims': tuple of dimension names
+                - 'dtype': numpy data type
+                - 'metadata': dictionary of attributes
+                - 'initial': (optional) name of initial value in kwargs
+            **kwargs: Keyword arguments that may contain initial values.
+
+        Returns:
+            DataArray of indicated shape and dtype, either filled with fill
+            value for the dtype or optionally filled with initial values.
+        """
         # TODO move this map to constants somewhere
         fill_value_map = {np.float64: np.nan}
         sizes = self.data.sizes
@@ -164,44 +262,137 @@ class Process:
 
     @staticmethod
     def get_parameters() -> Tuple[str, ...]:
+        """Return names of parameters required by this process.
+
+        Abstract method that must be implemented by subclasses to specify
+        which parameters from the parameter dataset are needed.
+
+        Returns:
+            Tuple of parameter names that will be extracted from the
+            parameters dataset during initialization.
+        """
         raise NotImplementedError()
 
     @staticmethod
     def get_inputs() -> Tuple[str, ...]:
+        """Return names of time-varying inputs required by this process.
+
+        Abstract method that must be implemented by subclasses to specify
+        which external time-varying inputs are needed (e.g., forcing data).
+
+        Returns:
+            Tuple of input names that must be provided as Input objects
+            at initialization or found in variable list of upstream Processes.
+        """
         raise NotImplementedError()
 
     @staticmethod
     def get_input_outputs() -> Tuple[str, ...]:
+        """Return names of modifiable time-varying inputs required by this process.
+
+        Abstract method that must be implemented by subclasses to specify
+        which external modifiable time-varying inputs are needed.
+
+        Returns:
+            Tuple of input names that must be provided as Input objects
+            at initialization or found in variable list of upstream Processes.
+        """
         raise NotImplementedError()
 
     @staticmethod
     def get_variables() -> Dict[str, Dict[str, Any]]:
+        """Return metadata for public variables of this process.
+
+        Abstract method that must be implemented by subclasses to define
+        the variables that this process creates and maintains.
+
+        Returns:
+            Dictionary mapping variable names to their metadata dictionaries.
+            Each metadata dict should contain:
+                - 'dims': tuple of dimension names
+                - 'dtype': numpy data type
+                - 'metadata': dict of attributes
+                - 'initial': (optional) initial value parameter name
+        """
         # TODO: improve the inner Dict[str, Any] typehint once the definition
         # is a bit clearer.
         raise NotImplementedError()
 
     @staticmethod
+    def get_var_names() -> Tuple[str, ...]:
+        """Return names for public variables of this process.
+
+        Returns:
+            Tuple of variable names.
+        """
+        return tuple(Process.get_variables().keys())
+
+    @staticmethod
     def _get_private_variables() -> Dict[str, Dict[str, Any]]:
+        """Return metadata for private/internal variables.
+
+        Abstract method for defining variables used internally by the process
+        but not exposed to other processes. Often returns empty dict.
+
+        Returns:
+            Dictionary with same structure as get_variables() but for
+            internal-use variables.
+        """
         # TODO: improve the inner Dict[str, Any] typehint once the definition
         # is a bit clearer.
         raise NotImplementedError()
 
 
 class Output:
+    """Manages time-chunked output of model variables to NetCDF files.
+
+    Appends time chunks of model variables from memory buffers into separate
+    NetCDF files The choice of time_chunk_size can minimizes I/O overhead and
+    balance memory limitation. Each tracked variable gets its own NetCDF file
+    with proper dimensions, coordinates, and metadata.
+
+    This class:
+    - Tracks references to specified variables from model processes
+    - Buffers data for the specified number of time steps
+    - Writes complete chunks to NetCDF files
+    - Handles partial chunks at simulation end
+
+    Attributes:
+        time_chunk_size: Number of time steps collected before writing.
+        variable_names: List of variable names being tracked.
+        output_dir: Directory where NetCDF files are written.
+
+    Example:
+        >>> output = Output(
+        ...     time_chunk_size=100,
+        ...     variable_names=['temperature', 'pressure'],
+        ...     output_dir=Path('results')
+        ... )
+        >>> # Used internally by Model class during run()
+    """
+
     # This definition needs to come after Process
     def __init__(
         self,
         time_chunk_size: int,
         variable_names: List[str],
-        output_dir: pl.Path = pl.Path("output"),
+        output_dir: pl.Path,
     ) -> None:
-        """
-        Output class for writing model variables to NetCDF files in time chunks.
+        """Initialize Output manager for time-chunked NetCDF writing.
 
         Args:
-            time_chunk_size: Number of time steps to collect before writing to file
-            variable_names: List of variable names to track and output
-            output_dir: Directory to write output files (default: "output")
+            time_chunk_size: Number of time steps to collect in memory before
+                writing to disk. Larger values use more memory but may be more
+                efficient for I/O.
+            variable_names: List of variable names to track and output. Each
+                variable will get its own NetCDF file named {var_name}.nc.
+            output_dir: Directory where output files will be created. Will be
+                created if it doesn't exist.
+
+        Note:
+            This class is somewhat taylored to read Model.model_dict, which
+            is simply has key: Process where the available variables in
+            each Process are identified by Process.get_variables().
         """
         self.time_chunk_size = time_chunk_size
         self.variable_names = variable_names
@@ -220,11 +411,18 @@ class Output:
         self.files_initialized = False
 
     def setup_variable_tracking(self, model_dict: Dict[str, Process]) -> None:
-        """
-        Find and store references to requested variables from model processes.
+        """Set up tracking of specified variables from model processes.
+
+        Searches through all processes to find the requested variables and
+        makes references to them. Initializes memory buffers and NetCDF files.
+        (This method must be called after model processes are initialized.)
 
         Args:
-            model_dict: Dictionary of process_name -> process_object
+            model_dict: Dictionary of keyed process objects. Each process
+                must implement the get_variables() method per it's base class.
+
+        Raises:
+            ValueError: If any requested variable is not found in any process.
         """
         for var_name in self.variable_names:
             found = False
@@ -375,21 +573,71 @@ class Output:
 
 
 class Model:
-    """
-    Principle: the model should transform all paths in to datasets for
-    parameters and dataarrays for all other fields. No process should take
-    paths.
+    """Orchestrates and executes process-based simulations.
 
-    # TODO: improve typehinting for control
+    The Model class is the main simulation engine that coordinates multiple
+    processes, manages data flow between them, handles time stepping, and
+    optionally manages output. It transforms file paths to in-memory data
+    structures and wires processes together based on their input/output
+    dependencies.
+
+    Key responsibilities:
+    - Load and manage parameter/forcing files
+    - Initialize and wire together Process instances
+    - Coordinate time stepping across all processes
+    - Manage optional output collection and writing
+
+    Design principle: All file I/O happens during initialization. Processes
+    operate on in-memory xarray objects during simulation for performance.
+
+    Attributes:
+        inputs_dict: Dictionary of Input objects for time-varying input data
+        model_dict: Dictionary of initialized process instances
+        output: Optional Output manager for writing results
+
+
     """
+
+    # TODO: improve typehinting for process_dict and control
+    # str, Dict[str, Union[Process, pl.Path, xr.DataArray, xr.Dataset]]
 
     def __init__(
         self,
-        process_dict: Dict[
-            str, Dict[str, Union[Process, pl.Path, xr.DataArray, xr.Dataset]]
-        ],
+        process_dict: Dict[str, Any],
         control: Dict[str, Any],
     ) -> None:
+        """Initialize Model with process definitions and control settings.
+
+        Constructs the a model simulation by loading data files,
+        initializing process instances, wiring their dependencies, and
+        optionally setting up output management.
+        Args:
+            process_dict: Dictionary defining processes and their configuration.
+                Keys are user defined, values are dictionaries containing:
+                - 'class': Process class to instantiate
+                - 'parameters': Path to a NetCDF parameter file or a Dataset.
+                - Keys matching process input requirements which are
+                  external to the model chain. Values supplied are either a
+                  Path to a netCDF file or a DataArray in memory.
+                - Keys matching process initial values requirements, with
+                  values supplied are either a Path to a netCDF file or a
+                  DataArray in memory.
+            control: Dictionary containing simulation control settings:
+                - 'output_var_names': (optional) List of variables to output
+                - 'output_dir': (optional) Directory for output files
+                - 'time_chunk_size': (optional) Output chunking size (default: 365)
+                - to be continued
+
+        Raises:
+            ValueError: If only one of output_var_names or output_dir is
+                specified without the other.
+
+        Note:
+            When output_var_names and output_dir are provided, an Output
+            manager is created to handle time-chunked writing of simulation
+            results. If time_chunk_size is not specified, defaults to 365
+            with a warning.
+        """
         from copy import deepcopy
 
         self._passed_process_dict = process_dict
@@ -407,8 +655,15 @@ class Model:
         # TODO: make the following a method
         # Setup output tracking if specified in control
         self.output = None
-        if "output_var_names" in control:
-            variable_names = control["output_var_names"]
+        if "output_var_names" in control or "output_dir" in control:
+            if (
+                "output_var_names" not in control
+                or "output_dir" not in control
+            ):
+                raise ValueError(
+                    "output_var_names and output_dir must noth be specified "
+                    "in the control."
+                )
 
             # Check for time_chunk_size, use default if missing
             if "time_chunk_size" in control:
@@ -416,13 +671,16 @@ class Model:
             else:
                 time_chunk_size = 365
                 warnings.warn(
-                    "The time_chunk_size not specified in control dict, using default value of 365.",
+                    "The time_chunk_size not specified in control dict, using "
+                    "default value of 365.",
                     UserWarning,
                 )
 
             # Create Output object and setup variable tracking
             self.output = Output(
-                time_chunk_size=time_chunk_size, variable_names=variable_names
+                time_chunk_size=time_chunk_size,
+                variable_names=control["output_var_names"],
+                output_dir=control["output_dir"],
             )
             self.output.setup_variable_tracking(self.model_dict)
 
