@@ -73,237 +73,6 @@ class Input:
             return Input(xr.open_dataset(file_path)[var_name])
 
 
-class Process:
-    def __init__(
-        self, parameters: xr.Dataset, **kwargs: Union[xr.DataArray, xr.Dataset]
-    ) -> None:
-        import itertools
-
-        # add parameters, inputs, input_outputs, and public variables
-        # Note: It is somewhat strange that inputs of parameters are treated
-        #       coming from a dataset while inputs and input_outputs are
-        #       treated as coming from dataarrays. Conceptually, it makes some
-        #       sense for the following reasons:
-        #       1. parameters are not time varying
-        #       2. parameters generally have somewhat less impact on output
-        #       3. parameters are "endogenous" or internal, while inputs
-        #          are external and might be coming from various other places/
-        dim_names = [vv["dims"] for vv in self.get_variables().values()]
-        dim_names = set(itertools.chain.from_iterable(dim_names))
-        # Strange naming assumption of coords. Could use a mapping from
-        # dims to coords somewhere
-        coords = {}
-        for dd in dim_names:
-            coords[f"{dd}_coord"] = (dd, parameters[dd].values)
-        # <
-        self.data = xr.Dataset(coords=coords)
-        # parameters
-        for pp in self.get_parameters():
-            # in this case we want read-only copies??
-            self[pp] = parameters[pp]
-            self[pp].values.flags.writeable = False
-        for ii in self.get_inputs():
-            # Input object set on self?4
-            if isinstance(kwargs[ii], Input):
-                self[ii] = kwargs[ii].current_values
-                assert id(self[ii].values) == id(
-                    kwargs[ii].current_values.values
-                )
-            else:
-                self[ii] = kwargs[ii]
-                assert id(self[ii].values) == id(kwargs[ii].values)
-
-            # TODO write a test for the above references
-        for oo in self.get_input_outputs():
-            self[oo] = kwargs[oo].current_values
-            assert id(self[oo].values) == id(kwargs[oo].current_values.values)
-        for kk, vv in self.get_variables().items():
-            self[kk] = self._var_from_metadata(vv, **kwargs)
-        for kk, vv in self._get_private_variables().items():
-            self[kk] = self._var_from_metadata(vv)
-        # <
-        return
-
-    def _var_from_metadata(
-        self,
-        var_meta: Dict[str, Any],
-        **kwargs: Union[xr.DataArray, xr.Dataset],
-    ) -> xr.DataArray:
-        # TODO move this map to constants somewhere
-        fill_value_map = {np.float64: np.nan}
-        sizes = self.data.sizes
-        dims = tuple([sizes[dd] for dd in var_meta["dims"]])
-        da = xr.DataArray(
-            data=np.full(
-                dims,
-                fill_value_map[var_meta["dtype"]],
-                dtype=var_meta["dtype"],
-            ),
-            dims=var_meta["dims"],
-            attrs=var_meta["metadata"],
-        )
-        if (
-            "initial" in var_meta.keys()
-            and var_meta["initial"] in kwargs.keys()
-        ):
-            da[:] = kwargs[var_meta["initial"]]
-        # <
-        return da
-
-    def __getitem__(self, name: str) -> xr.DataArray:
-        # TODO: may want to use getattr to get other properties?
-        return self.data[name]
-
-    def __setitem__(self, name: str, value: xr.DataArray) -> None:
-        self.data[name] = value  # [name]
-        return
-
-    def __delitem__(self, name: str) -> None:
-        del self.data[name]
-        return
-
-    @staticmethod
-    def get_parameters() -> Tuple[str, ...]:
-        raise NotImplementedError()
-
-    @staticmethod
-    def get_inputs() -> Tuple[str, ...]:
-        raise NotImplementedError()
-
-    @staticmethod
-    def get_input_outputs() -> Tuple[str, ...]:
-        raise NotImplementedError()
-
-    @staticmethod
-    def get_variables() -> Dict[str, Dict[str, Any]]:
-        # TODO: improve the inner Dict[str, Any] typehint once the definition
-        # is a bit clearer.
-        raise NotImplementedError()
-
-    @staticmethod
-    def _get_private_variables() -> Dict[str, Dict[str, Any]]:
-        # TODO: improve the inner Dict[str, Any] typehint once the definition
-        # is a bit clearer.
-        raise NotImplementedError()
-
-
-class Upper(Process):
-    def __init__(
-        self,
-        parameters: xr.Dataset,
-        forcing_0: xr.DataArray,
-        flow_initial: xr.DataArray,
-    ) -> None:
-        super().__init__(
-            parameters=parameters,
-            forcing_0=forcing_0,
-            flow_initial=flow_initial,
-        )
-        return
-
-    @staticmethod
-    def get_parameters() -> Tuple[str, ...]:
-        return ("param_up_0", "param_up_1")
-
-    @staticmethod
-    def get_inputs() -> Tuple[str, ...]:
-        return ("forcing_0",)
-
-    @staticmethod
-    def get_input_outputs() -> Tuple[str, ...]:
-        return ()
-
-    @staticmethod
-    def get_variables() -> Dict[str, Dict[str, Any]]:
-        return {
-            "flow": {
-                "dims": ("space",),
-                "dtype": np.float64,
-                "metadata": {"description": "flowy"},
-                "initial": "flow_initial",
-            },
-            "flow_previous": {
-                "dims": ("space",),
-                "dtype": np.float64,
-                "metadata": {"description": "was flowy"},
-            },
-        }
-
-    @staticmethod
-    def _get_private_variables() -> Dict[str, Dict[str, Any]]:
-        return {}
-
-    def advance(self) -> None:
-        self["flow_previous"][:] = self["flow"]
-        return
-
-    def calculate(self, dt: np.float64) -> None:
-        for loc in self["space"]:
-            self["flow"][loc] = (
-                self["flow_previous"][loc] * np.float64(0.95)
-                + self["forcing_0"][loc]
-            )
-        return
-
-
-class Lower(Process):
-    def __init__(
-        self,
-        parameters: xr.Dataset,
-        flow: xr.DataArray,
-        storage_initial: xr.DataArray,
-    ) -> None:
-        super().__init__(
-            parameters=parameters,
-            flow=flow,
-            storage_initial=storage_initial,
-        )
-        return
-
-    @staticmethod
-    def get_parameters() -> Tuple[str, ...]:
-        return ("param_low_0",)
-
-    @staticmethod
-    def get_inputs() -> Tuple[str, ...]:
-        return ("flow",)
-
-    @staticmethod
-    def get_input_outputs() -> Tuple[str, ...]:
-        return ()
-
-    @staticmethod
-    def get_variables() -> Dict[str, Dict[str, Any]]:
-        return {
-            "storage": {
-                "dims": ("space",),
-                "dtype": np.float64,
-                "metadata": {"description": "storagey"},
-                "initial": "storage_initial",
-            },
-            "storage_previous": {
-                "dims": ("space",),
-                "dtype": np.float64,
-                "metadata": {"description": "old storagey"},
-            },
-        }
-
-    @staticmethod
-    def _get_private_variables() -> Dict[str, Dict[str, Any]]:
-        return {}
-
-    def advance(self) -> None:
-        self["storage_previous"][:] = self["storage"]
-        return
-
-    def calculate(self, dt: np.float64) -> None:
-        for loc in self["space"]:
-            self["storage"][loc] = (
-                self["storage_previous"][loc] * np.float64(0.95)
-            ) + (self["flow"][loc] * np.float64(0.12))
-        return
-
-
 class Output:
     def __init__(
         self,
@@ -488,6 +257,120 @@ class Output:
                             ncfile.variables["time"][
                                 time_dim_size : time_dim_size + remaining_steps
                             ] = time_coord[self.chunk_start_time : end_idx]
+
+
+class Process:
+    def __init__(
+        self, parameters: xr.Dataset, **kwargs: Union[xr.DataArray, xr.Dataset]
+    ) -> None:
+        import itertools
+
+        # add parameters, inputs, input_outputs, and public variables
+        # Note: It is somewhat strange that inputs of parameters are treated
+        #       coming from a dataset while inputs and input_outputs are
+        #       treated as coming from dataarrays. Conceptually, it makes some
+        #       sense for the following reasons:
+        #       1. parameters are not time varying
+        #       2. parameters generally have somewhat less impact on output
+        #       3. parameters are "endogenous" or internal, while inputs
+        #          are external and might be coming from various other places/
+        dim_names = [vv["dims"] for vv in self.get_variables().values()]
+        dim_names = set(itertools.chain.from_iterable(dim_names))
+        # Strange naming assumption of coords. Could use a mapping from
+        # dims to coords somewhere
+        coords = {}
+        for dd in dim_names:
+            coords[f"{dd}_coord"] = (dd, parameters[dd].values)
+        # <
+        self.data = xr.Dataset(coords=coords)
+        # parameters
+        for pp in self.get_parameters():
+            # in this case we want read-only copies??
+            self[pp] = parameters[pp]
+            self[pp].values.flags.writeable = False
+        for ii in self.get_inputs():
+            # Input object set on self?4
+            if isinstance(kwargs[ii], Input):
+                self[ii] = kwargs[ii].current_values
+                assert id(self[ii].values) == id(
+                    kwargs[ii].current_values.values
+                )
+            else:
+                self[ii] = kwargs[ii]
+                assert id(self[ii].values) == id(kwargs[ii].values)
+
+            # TODO write a test for the above references
+        for oo in self.get_input_outputs():
+            self[oo] = kwargs[oo].current_values
+            assert id(self[oo].values) == id(kwargs[oo].current_values.values)
+        for kk, vv in self.get_variables().items():
+            self[kk] = self._var_from_metadata(vv, **kwargs)
+        for kk, vv in self._get_private_variables().items():
+            self[kk] = self._var_from_metadata(vv)
+        # <
+        return
+
+    def _var_from_metadata(
+        self,
+        var_meta: Dict[str, Any],
+        **kwargs: Union[xr.DataArray, xr.Dataset],
+    ) -> xr.DataArray:
+        # TODO move this map to constants somewhere
+        fill_value_map = {np.float64: np.nan}
+        sizes = self.data.sizes
+        dims = tuple([sizes[dd] for dd in var_meta["dims"]])
+        da = xr.DataArray(
+            data=np.full(
+                dims,
+                fill_value_map[var_meta["dtype"]],
+                dtype=var_meta["dtype"],
+            ),
+            dims=var_meta["dims"],
+            attrs=var_meta["metadata"],
+        )
+        if (
+            "initial" in var_meta.keys()
+            and var_meta["initial"] in kwargs.keys()
+        ):
+            da[:] = kwargs[var_meta["initial"]]
+        # <
+        return da
+
+    def __getitem__(self, name: str) -> xr.DataArray:
+        # TODO: may want to use getattr to get other properties?
+        return self.data[name]
+
+    def __setitem__(self, name: str, value: xr.DataArray) -> None:
+        self.data[name] = value  # [name]
+        return
+
+    def __delitem__(self, name: str) -> None:
+        del self.data[name]
+        return
+
+    @staticmethod
+    def get_parameters() -> Tuple[str, ...]:
+        raise NotImplementedError()
+
+    @staticmethod
+    def get_inputs() -> Tuple[str, ...]:
+        raise NotImplementedError()
+
+    @staticmethod
+    def get_input_outputs() -> Tuple[str, ...]:
+        raise NotImplementedError()
+
+    @staticmethod
+    def get_variables() -> Dict[str, Dict[str, Any]]:
+        # TODO: improve the inner Dict[str, Any] typehint once the definition
+        # is a bit clearer.
+        raise NotImplementedError()
+
+    @staticmethod
+    def _get_private_variables() -> Dict[str, Dict[str, Any]]:
+        # TODO: improve the inner Dict[str, Any] typehint once the definition
+        # is a bit clearer.
+        raise NotImplementedError()
 
 
 class Model:

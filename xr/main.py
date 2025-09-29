@@ -5,8 +5,9 @@ from typing import Any, Dict
 import numpy as np
 import xarray as xr
 
-# Import from the toy model module
-from toy_model_1_xr import Lower, Model, Upper
+# Import from the toy model modules
+from base import Model
+from processes import Lower, Upper
 
 np.random.seed(42)
 
