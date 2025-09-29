@@ -1,6 +1,7 @@
 import pathlib as pl
-from typing import Union
+from typing import Dict, List, Union
 
+import netCDF4 as nc
 import numpy as np
 import xarray as xr
 
@@ -285,6 +286,190 @@ class Lower(Process):
         return
 
 
+class Output:
+    def __init__(
+        self,
+        time_chunk_size: int,
+        variable_names: List[str],
+        output_dir: pl.Path = pl.Path("output"),
+    ):
+        """
+        Output class for writing model variables to NetCDF files in time chunks.
+
+        Args:
+            time_chunk_size: Number of time steps to collect before writing to file
+            variable_names: List of variable names to track and output
+            output_dir: Directory to write output files (default: "output")
+        """
+        self.time_chunk_size = time_chunk_size
+        self.variable_names = variable_names
+        self.output_dir = output_dir
+        self.output_dir.mkdir(exist_ok=True)
+
+        # Track variable references and data
+        self.variable_refs: Dict[str, xr.DataArray] = {}
+        self.process_map: Dict[str, str] = {}  # var_name -> process_name
+        self.data_buffers: Dict[str, np.ndarray] = {}
+        self.current_time_step = 0
+        self.chunk_start_time = 0
+
+        # File handles for appending
+        self.file_handles: Dict[str, nc.Dataset] = {}
+        self.files_initialized = False
+
+    def setup_variable_tracking(self, model_dict: Dict[str, Process]):
+        """
+        Find and store references to requested variables from model processes.
+
+        Args:
+            model_dict: Dictionary of process_name -> process_object
+        """
+        for var_name in self.variable_names:
+            found = False
+            for process_name, process_obj in model_dict.items():
+                if var_name in process_obj.get_variables():
+                    self.variable_refs[var_name] = process_obj[var_name]
+                    self.process_map[var_name] = process_name
+                    found = True
+                    break
+
+            if not found:
+                raise ValueError(
+                    f"Variable '{var_name}' not found in any process"
+                )
+
+        # Initialize data buffers
+        self._initialize_buffers()
+
+        # Initialize NetCDF files upfront
+        for var_name in self.variable_names:
+            file_path = self.output_dir / f"{var_name}.nc"
+            self._initialize_netcdf_file(var_name, file_path)
+
+        self.files_initialized = True
+
+    def _initialize_buffers(self):
+        """Initialize numpy arrays to store time chunk data for each variable."""
+        for var_name, var_ref in self.variable_refs.items():
+            # Create buffer: (time_chunk_size, *spatial_dims)
+            spatial_shape = var_ref.shape
+            buffer_shape = (self.time_chunk_size,) + spatial_shape
+            self.data_buffers[var_name] = np.empty(
+                buffer_shape, dtype=var_ref.dtype
+            )
+
+    def collect_timestep(self, time_index: int, time_coord: any):
+        """
+        Collect current variable values for this time step.
+
+        Args:
+            time_index: Global time index
+            time_coord: Time coordinate value
+        """
+        buffer_index = self.current_time_step % self.time_chunk_size
+
+        # Collect data from all tracked variables
+        for var_name, var_ref in self.variable_refs.items():
+            self.data_buffers[var_name][buffer_index] = var_ref.values
+
+        self.current_time_step += 1
+
+        # Write chunk when buffer is full
+        if buffer_index == self.time_chunk_size - 1:
+            self._write_chunk(time_coord)
+
+    def _write_chunk(self, time_coord: any):
+        """Write current data buffer to NetCDF files."""
+        chunk_end_time = self.chunk_start_time + self.time_chunk_size
+
+        for var_name in self.variable_names:
+            file_path = self.output_dir / f"{var_name}.nc"
+
+            # Write data to file
+            with nc.Dataset(file_path, "a") as ncfile:
+                # Get current time dimension size
+                time_dim_size = ncfile.dimensions["time"].size
+
+                # Write time chunk data
+                ncfile.variables[var_name][
+                    time_dim_size : time_dim_size + self.time_chunk_size
+                ] = self.data_buffers[var_name]
+
+                # Write time coordinates if available
+                if (
+                    hasattr(time_coord, "__len__")
+                    and len(time_coord) >= chunk_end_time
+                ):
+                    ncfile.variables["time"][
+                        time_dim_size : time_dim_size + self.time_chunk_size
+                    ] = time_coord[self.chunk_start_time : chunk_end_time]
+
+        self.chunk_start_time = chunk_end_time
+
+    def _initialize_netcdf_file(self, var_name: str, file_path: pl.Path):
+        """Initialize NetCDF file structure for a variable."""
+        var_ref = self.variable_refs[var_name]
+
+        with nc.Dataset(file_path, "w") as ncfile:
+            # Create dimensions
+            ncfile.createDimension("time", None)  # Unlimited dimension
+
+            for dim_name, dim_size in zip(var_ref.dims, var_ref.shape):
+                if dim_name != "time":  # Skip time dimension
+                    ncfile.createDimension(dim_name, dim_size)
+
+            # Create time variable
+            time_var = ncfile.createVariable("time", "f8", ("time",))
+            time_var.units = "days"
+            time_var.calendar = "standard"
+
+            # Create coordinate variables
+            for dim_name in var_ref.dims:
+                if (
+                    dim_name != "time"
+                    and f"{dim_name}_coord" in var_ref.coords
+                ):
+                    coord_var = ncfile.createVariable(
+                        f"{dim_name}_coord", "f8", (dim_name,)
+                    )
+                    coord_var[:] = var_ref.coords[f"{dim_name}_coord"].values
+
+            # Create main variable
+            dims_with_time = ("time",) + var_ref.dims
+            var_nc = ncfile.createVariable(
+                var_name, var_ref.dtype, dims_with_time
+            )
+
+            # Copy attributes
+            for attr_name, attr_val in var_ref.attrs.items():
+                setattr(var_nc, attr_name, attr_val)
+
+    def finalize(self, time_coord: any = None):
+        """Write any remaining data in buffers and close files."""
+        remaining_steps = self.current_time_step % self.time_chunk_size
+        if remaining_steps > 0:
+            # Write partial chunk
+            for var_name in self.variable_names:
+                file_path = self.output_dir / f"{var_name}.nc"
+
+                with nc.Dataset(file_path, "a") as ncfile:
+                    time_dim_size = ncfile.dimensions["time"].size
+
+                    # Write only the used portion of buffer
+                    ncfile.variables[var_name][
+                        time_dim_size : time_dim_size + remaining_steps
+                    ] = self.data_buffers[var_name][:remaining_steps]
+
+                    if time_coord is not None and hasattr(
+                        time_coord, "__len__"
+                    ):
+                        end_idx = self.chunk_start_time + remaining_steps
+                        if len(time_coord) >= end_idx:
+                            ncfile.variables["time"][
+                                time_dim_size : time_dim_size + remaining_steps
+                            ] = time_coord[self.chunk_start_time : end_idx]
+
+
 class Model:
     """
     Principle: the model should transform all paths in to datasets for
@@ -296,6 +481,7 @@ class Model:
     def __init__(
         self,
         process_dict: dict,
+        control: dict,
     ) -> None:
         from copy import deepcopy
 
@@ -310,6 +496,28 @@ class Model:
         self._set_inputs_and_model_dicts()
 
         self._set_time()
+
+        # Setup output tracking if specified in control
+        self.output = None
+        if "output" in control:
+            variable_names = control["output"]
+
+            # Check for time_chunk_size, use default if missing
+            if "time_chunk_size" in control:
+                time_chunk_size = control["time_chunk_size"]
+            else:
+                time_chunk_size = 365
+                warnings.warn(
+                    "The time_chunk_size not specified in control dict, using default value of 365.",
+                    UserWarning,
+                )
+
+            # Create Output object and setup variable tracking
+            self.output = Output(
+                time_chunk_size=time_chunk_size, variable_names=variable_names
+            )
+            self.output.setup_variable_tracking(self.model_dict)
+
         return
 
     def _paths_to_data_proc_dict(self):
@@ -434,6 +642,11 @@ class Model:
             self.advance()
             self.calculate(dt=dt)
 
+            # Collect output data if output object is provided
+            if self.output is not None:
+                time_coord = self.times[tt]
+                self.output.collect_timestep(tt, time_coord)
+
             if verbose:
                 print(f"{tt=}")
                 print(f"{self.inputs_dict['forcing_0'].current_values=}")
@@ -441,6 +654,13 @@ class Model:
                 print(f"{self.model_dict['upper']['flow']=}")
                 print(f"{self.model_dict['lower']['flow']=}")
                 print(f"{self.model_dict['lower']['storage']=}")
+
+        # Finalize output if provided
+        # TODO: potentially separate to a finalize method.
+        if self.output is not None:
+            self.output.finalize(
+                self.times if hasattr(self, "times") else None
+            )
         return
 
 
