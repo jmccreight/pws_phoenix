@@ -25,16 +25,6 @@ def open_xr(path: pl.Path) -> Union[xr.DataArray, xr.Dataset]:
         return ds
 
 
-class Parameters:
-    def __init__(self, data: xr.Dataset):
-        self.data = data
-        pass
-
-    @staticmethod
-    def from_file(file_path: pl.Path) -> "Parameters":
-        return Parameters(xr.open_dataset(file_path))
-
-
 class Input:
     # TODO: needs a control to find the start time index as the first index
     def __init__(
