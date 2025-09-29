@@ -1,11 +1,15 @@
 import pathlib as pl
+import sys
 from typing import Dict, List, Union
 
 import netCDF4 as nc
 import numpy as np
+
 import xarray as xr
 
-from utils import timer
+parent_dir = (pl.Path("./") / __file__).resolve().parent.parent
+sys.path.append(str(parent_dir))
+from utils import timer  # noqa
 
 np.random.seed(42)
 
@@ -668,6 +672,7 @@ if __name__ == "__main__":
     import pathlib as pl
 
     import numpy as np
+
     import xarray as xr
 
     # Dimensions
@@ -809,15 +814,19 @@ if __name__ == "__main__":
         },
     }
 
+    control = {
+        "output": ["flow"],
+        "time_chunk_size": 180,
+    }
+
     @timer
     def init_model():
         global model
-        model = Model(process_dict)
+        model = Model(process_dict, control)
 
     @timer
     def run_model(n_steps=n_time, verbose=False):
         global model
-        # for numba the args must be positional, not kw
         model.run(dt, np.int32(n_steps), verbose=verbose)
         del model
 
