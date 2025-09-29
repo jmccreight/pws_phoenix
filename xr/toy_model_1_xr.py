@@ -1,10 +1,10 @@
 import pathlib as pl
 import sys
+import warnings
 from typing import Dict, List, Union
 
 import netCDF4 as nc
 import numpy as np
-
 import xarray as xr
 
 parent_dir = (pl.Path("./") / __file__).resolve().parent.parent
@@ -15,6 +15,9 @@ np.random.seed(42)
 
 # TODO is there a fast index order in python, does it matter?
 # TODO: pass through an option to load on open?
+# TODO: have get_variables and get_variable_names so a list of var names is
+#       easily accessible?
+# TODO: why does the time coord need passed around?
 
 
 def open_xr(path: pl.Path) -> Union[xr.DataArray, xr.Dataset]:
@@ -362,7 +365,7 @@ class Output:
                 buffer_shape, dtype=var_ref.dtype
             )
 
-    def collect_timestep(self, time_index: int, time_coord: any):
+    def collect_timestep(self, time_index: int, time_coord: np.datetime64):
         """
         Collect current variable values for this time step.
 
@@ -382,7 +385,7 @@ class Output:
         if buffer_index == self.time_chunk_size - 1:
             self._write_chunk(time_coord)
 
-    def _write_chunk(self, time_coord: any):
+    def _write_chunk(self, time_coord: np.datetime64):
         """Write current data buffer to NetCDF files."""
         chunk_end_time = self.chunk_start_time + self.time_chunk_size
 
@@ -448,7 +451,7 @@ class Output:
             for attr_name, attr_val in var_ref.attrs.items():
                 setattr(var_nc, attr_name, attr_val)
 
-    def finalize(self, time_coord: any = None):
+    def finalize(self, time_coord: np.datetime64 = None):
         """Write any remaining data in buffers and close files."""
         remaining_steps = self.current_time_step % self.time_chunk_size
         if remaining_steps > 0:
@@ -503,8 +506,8 @@ class Model:
 
         # Setup output tracking if specified in control
         self.output = None
-        if "output" in control:
-            variable_names = control["output"]
+        if "output_var_names" in control:
+            variable_names = control["output_var_names"]
 
             # Check for time_chunk_size, use default if missing
             if "time_chunk_size" in control:
@@ -648,8 +651,7 @@ class Model:
 
             # Collect output data if output object is provided
             if self.output is not None:
-                time_coord = self.times[tt]
-                self.output.collect_timestep(tt, time_coord)
+                self.output.collect_timestep(tt, self.times[tt].values)
 
             if verbose:
                 print(f"{tt=}")
@@ -672,12 +674,11 @@ if __name__ == "__main__":
     import pathlib as pl
 
     import numpy as np
-
     import xarray as xr
 
     # Dimensions
     n_years = 4
-    n_space = 2000
+    n_space = 20
 
     start_year = 2000
     end_year = start_year + n_years
@@ -815,8 +816,8 @@ if __name__ == "__main__":
     }
 
     control = {
-        "output": ["flow"],
-        "time_chunk_size": 180,
+        "output_var_names": ["flow", "storage_previous"],
+        "time_chunk_size": 10,
     }
 
     @timer
