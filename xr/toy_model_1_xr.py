@@ -1,7 +1,7 @@
 import pathlib as pl
 import sys
 import warnings
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import netCDF4 as nc
 import numpy as np
@@ -36,7 +36,9 @@ def open_xr(path: pl.Path) -> Union[xr.DataArray, xr.Dataset]:
 class Input:
     # TODO: needs a control to find the start time index as the first index
     def __init__(
-        self, data_or_file: Union[xr.DataArray, pl.Path], read_only=False
+        self,
+        data_or_file: Union[xr.DataArray, pl.Path],
+        read_only: bool = False,
     ) -> None:
         if isinstance(data_or_file, pl.Path):
             self.data = xr.open_dataarray(data_or_file)
@@ -59,12 +61,12 @@ class Input:
         return
 
     @property
-    def current_values(self):
+    def current_values(self) -> xr.DataArray:
         return self._current_values
 
     @staticmethod
     def from_file(
-        file_path: pl.Path, var_name: Union[str, None] = None
+        file_path: pl.Path, var_name: Optional[str] = None
     ) -> "Input":
         if var_name is None:
             return Input(xr.open_dataarray(file_path))
@@ -73,7 +75,9 @@ class Input:
 
 
 class Process:
-    def __init__(self, parameters: xr.Dataset, **kwargs):
+    def __init__(
+        self, parameters: xr.Dataset, **kwargs: Union[xr.DataArray, xr.Dataset]
+    ) -> None:
         import itertools
 
         # add parameters, inputs, input_outputs, and public variables
@@ -121,7 +125,11 @@ class Process:
         # <
         return
 
-    def _var_from_metadata(self, var_meta: dict, **kwargs) -> xr.DataArray:
+    def _var_from_metadata(
+        self,
+        var_meta: Dict[str, Any],
+        **kwargs: Union[xr.DataArray, xr.Dataset],
+    ) -> xr.DataArray:
         # TODO move this map to constants somewhere
         fill_value_map = {np.float64: np.nan}
         sizes = self.data.sizes
@@ -156,23 +164,27 @@ class Process:
         return
 
     @staticmethod
-    def get_parameters() -> tuple:
+    def get_parameters() -> Tuple[str, ...]:
         raise NotImplementedError()
 
     @staticmethod
-    def get_inputs() -> tuple:
+    def get_inputs() -> Tuple[str, ...]:
         raise NotImplementedError()
 
     @staticmethod
-    def get_input_outputs() -> tuple:
+    def get_input_outputs() -> Tuple[str, ...]:
         raise NotImplementedError()
 
     @staticmethod
-    def get_variables() -> dict:
+    def get_variables() -> Dict[str, Dict[str, Any]]:
+        # TODO: improve the inner Dict[str, Any] typehint once the definition
+        # is a bit clearer.
         raise NotImplementedError()
 
     @staticmethod
-    def _get_private_variables() -> dict:
+    def _get_private_variables() -> Dict[str, Dict[str, Any]]:
+        # TODO: improve the inner Dict[str, Any] typehint once the definition
+        # is a bit clearer.
         raise NotImplementedError()
 
 
@@ -191,19 +203,19 @@ class Upper(Process):
         return
 
     @staticmethod
-    def get_parameters() -> tuple:
+    def get_parameters() -> Tuple[str, ...]:
         return ("param_up_0", "param_up_1")
 
     @staticmethod
-    def get_inputs() -> tuple:
+    def get_inputs() -> Tuple[str, ...]:
         return ("forcing_0",)
 
     @staticmethod
-    def get_input_outputs() -> tuple:
+    def get_input_outputs() -> Tuple[str, ...]:
         return ()
 
     @staticmethod
-    def get_variables() -> dict:
+    def get_variables() -> Dict[str, Dict[str, Any]]:
         return {
             "flow": {
                 "dims": ("space",),
@@ -219,7 +231,7 @@ class Upper(Process):
         }
 
     @staticmethod
-    def _get_private_variables() -> dict:
+    def _get_private_variables() -> Dict[str, Dict[str, Any]]:
         return {}
 
     def advance(self) -> None:
@@ -250,19 +262,19 @@ class Lower(Process):
         return
 
     @staticmethod
-    def get_parameters() -> tuple:
+    def get_parameters() -> Tuple[str, ...]:
         return ("param_low_0",)
 
     @staticmethod
-    def get_inputs() -> tuple:
+    def get_inputs() -> Tuple[str, ...]:
         return ("flow",)
 
     @staticmethod
-    def get_input_outputs() -> tuple:
+    def get_input_outputs() -> Tuple[str, ...]:
         return ()
 
     @staticmethod
-    def get_variables() -> dict:
+    def get_variables() -> Dict[str, Dict[str, Any]]:
         return {
             "storage": {
                 "dims": ("space",),
@@ -278,7 +290,7 @@ class Lower(Process):
         }
 
     @staticmethod
-    def _get_private_variables() -> dict:
+    def _get_private_variables() -> Dict[str, Dict[str, Any]]:
         return {}
 
     def advance(self) -> None:
@@ -299,7 +311,7 @@ class Output:
         time_chunk_size: int,
         variable_names: List[str],
         output_dir: pl.Path = pl.Path("output"),
-    ):
+    ) -> None:
         """
         Output class for writing model variables to NetCDF files in time chunks.
 
@@ -324,7 +336,7 @@ class Output:
         self.file_handles: Dict[str, nc.Dataset] = {}
         self.files_initialized = False
 
-    def setup_variable_tracking(self, model_dict: Dict[str, Process]):
+    def setup_variable_tracking(self, model_dict: Dict[str, Process]) -> None:
         """
         Find and store references to requested variables from model processes.
 
@@ -355,7 +367,7 @@ class Output:
 
         self.files_initialized = True
 
-    def _initialize_buffers(self):
+    def _initialize_buffers(self) -> None:
         """Initialize numpy arrays to store time chunk data for each variable."""
         for var_name, var_ref in self.variable_refs.items():
             # Create buffer: (time_chunk_size, *spatial_dims)
@@ -365,7 +377,9 @@ class Output:
                 buffer_shape, dtype=var_ref.dtype
             )
 
-    def collect_timestep(self, time_index: int, time_coord: np.datetime64):
+    def collect_timestep(
+        self, time_index: int, time_coord: np.datetime64
+    ) -> None:
         """
         Collect current variable values for this time step.
 
@@ -385,7 +399,7 @@ class Output:
         if buffer_index == self.time_chunk_size - 1:
             self._write_chunk(time_coord)
 
-    def _write_chunk(self, time_coord: np.datetime64):
+    def _write_chunk(self, time_coord: np.datetime64) -> None:
         """Write current data buffer to NetCDF files."""
         chunk_end_time = self.chunk_start_time + self.time_chunk_size
 
@@ -413,7 +427,9 @@ class Output:
 
         self.chunk_start_time = chunk_end_time
 
-    def _initialize_netcdf_file(self, var_name: str, file_path: pl.Path):
+    def _initialize_netcdf_file(
+        self, var_name: str, file_path: pl.Path
+    ) -> None:
         """Initialize NetCDF file structure for a variable."""
         var_ref = self.variable_refs[var_name]
 
@@ -451,7 +467,7 @@ class Output:
             for attr_name, attr_val in var_ref.attrs.items():
                 setattr(var_nc, attr_name, attr_val)
 
-    def finalize(self, time_coord: np.datetime64 = None):
+    def finalize(self, time_coord: np.datetime64 = None) -> None:
         """Write any remaining data in buffers and close files."""
         remaining_steps = self.current_time_step % self.time_chunk_size
         if remaining_steps > 0:
@@ -467,9 +483,7 @@ class Output:
                         time_dim_size : time_dim_size + remaining_steps
                     ] = self.data_buffers[var_name][:remaining_steps]
 
-                    if time_coord is not None and hasattr(
-                        time_coord, "__len__"
-                    ):
+                    if hasattr(time_coord, "__len__"):
                         end_idx = self.chunk_start_time + remaining_steps
                         if len(time_coord) >= end_idx:
                             ncfile.variables["time"][
@@ -483,12 +497,15 @@ class Model:
     parameters and dataarrays for all other fields. No process should take
     paths.
 
+    # TODO: improve typehinting for control
     """
 
     def __init__(
         self,
-        process_dict: dict,
-        control: dict,
+        process_dict: Dict[
+            str, Dict[str, Union[Process, pl.Path, xr.DataArray, xr.Dataset]]
+        ],
+        control: Dict[str, Any],
     ) -> None:
         from copy import deepcopy
 
@@ -504,6 +521,7 @@ class Model:
 
         self._set_time()
 
+        # TODO: make the following a method
         # Setup output tracking if specified in control
         self.output = None
         if "output_var_names" in control:
@@ -527,7 +545,7 @@ class Model:
 
         return
 
-    def _paths_to_data_proc_dict(self):
+    def _paths_to_data_proc_dict(self) -> None:
         """All input paths to Dataset or DataArray without opening files twice.
 
         If inputs come as memory, we dont need to do anything (though that's
@@ -553,7 +571,7 @@ class Model:
 
     def _get_repeated_paths(
         self,
-    ) -> dict[pl.Path, Union[xr.DataArray, xr.Dataset]]:
+    ) -> Dict[pl.Path, Union[xr.DataArray, xr.Dataset]]:
         """Open repeated paths in the process_dict once key against path.
 
         This is intended to work with parameter files or forcing files specified
@@ -573,7 +591,7 @@ class Model:
         repeated_paths_data = {kk: open_xr(kk) for kk in repeated_paths_list}
         return repeated_paths_data
 
-    def _set_inputs_and_model_dicts(self):
+    def _set_inputs_and_model_dicts(self) -> None:
         """Initialize inputs and processes to processes above.
 
         The inputs are in self.inputs_dict and the wired model is in
@@ -623,7 +641,7 @@ class Model:
         self.times = self.inputs_dict[kk0].data.time_coord
         return None
 
-    def procs_above(self, proc_name) -> list:
+    def procs_above(self, proc_name: str) -> List[str]:
         procs_above = []
         for pp in self._process_dict:
             if proc_name != pp:
@@ -644,7 +662,9 @@ class Model:
         for vv in self.model_dict.values():
             vv.calculate(dt)
 
-    def run(self, dt: np.float64, n_steps: np.int32, verbose=False) -> None:
+    def run(
+        self, dt: np.float64, n_steps: np.int32, verbose: bool = False
+    ) -> None:
         for tt in range(n_steps):
             self.advance()
             self.calculate(dt=dt)
@@ -821,12 +841,12 @@ if __name__ == "__main__":
     }
 
     @timer
-    def init_model():
+    def init_model() -> None:
         global model
         model = Model(process_dict, control)
 
     @timer
-    def run_model(n_steps=n_time, verbose=False):
+    def run_model(n_steps: int = n_time, verbose: bool = False) -> None:
         global model
         model.run(dt, np.int32(n_steps), verbose=verbose)
         del model
