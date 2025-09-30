@@ -387,12 +387,9 @@ class TestRegression:
         )
 
         # Test output NetCDF files
-        flow_ds = xr.open_dataset(
-            control_config["output_dir"] / "flow.nc",  # decode_timedelta=False
-        )
+        flow_ds = xr.open_dataset(control_config["output_dir"] / "flow.nc")
         storage_prev_ds = xr.open_dataset(
-            control_config["output_dir"] / "storage_previous.nc",
-            # decode_timedelta=False,
+            control_config["output_dir"] / "storage_previous.nc"
         )
 
         # Check that output files contain expected time series

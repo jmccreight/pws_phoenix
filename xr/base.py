@@ -529,11 +529,11 @@ class Output:
 
             for dim_name, dim_size in zip(var_ref.dims, var_ref.shape):
                 if dim_name != "time":  # Skip time dimension
-                    ncfile.createDimension(dim_name, dim_size)
+                    ncfile.createDimension(str(dim_name), dim_size)
 
             # Create time variable
             time_var = ncfile.createVariable("time", "f8", ("time",))
-            time_var.units = f"days since {str(self.time_datum)[:10]}"
+            time_var.units = f"days since {str(self.time_datum)[:10]} 00:00:00"
 
             # Create coordinate variables
             for dim_name in var_ref.dims:
@@ -542,15 +542,15 @@ class Output:
                     and f"{dim_name}_coord" in var_ref.coords
                 ):
                     coord_var = ncfile.createVariable(
-                        f"{dim_name}_coord", "f8", (dim_name,)
+                        f"{dim_name}_coord", "f8", (str(dim_name),)
                     )
                     coord_var[:] = var_ref.coords[f"{dim_name}_coord"].values
 
             # Create main variable
-            dims_with_time = ("time",) + var_ref.dims
-            var_nc = ncfile.createVariable(
-                var_name, var_ref.dtype, dims_with_time
-            )
+            dims_with_time = ("time",) + tuple(str(d) for d in var_ref.dims)
+            # Convert numpy dtype to NetCDF4 compatible string
+            dtype_str = var_ref.dtype.str
+            var_nc = ncfile.createVariable(var_name, dtype_str, dims_with_time)
 
             # Copy attributes
             for attr_name, attr_val in var_ref.attrs.items():
