@@ -99,7 +99,7 @@ class Input:
             self._input_file = None
         # <
         if read_only:
-            self.data.values.flags.writeable = True
+            self.data.values.flags.writeable = False
 
         # <
         self._current_index = np.int64(-1)
