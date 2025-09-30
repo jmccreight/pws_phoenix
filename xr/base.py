@@ -249,14 +249,16 @@ class Process:
         return da
 
     def __getitem__(self, name: str) -> xr.DataArray:
-        # TODO: may want to use getattr to get other properties?
+        """Access DataArrays from the internal Dataset by variable name."""
         return self.data[name]
 
     def __setitem__(self, name: str, value: xr.DataArray) -> None:
-        self.data[name] = value  # [name]
+        """Add or update DataArray in the internal Dataset."""
+        self.data[name] = value
         return
 
     def __delitem__(self, name: str) -> None:
+        """Remove DataArray from the internal Dataset."""
         del self.data[name]
         return
 
@@ -687,10 +689,13 @@ class Model:
         return
 
     def _paths_to_data_proc_dict(self) -> None:
-        """All input paths to Dataset or DataArray without opening files twice.
+        """Convert file paths in process_dict to loaded xarray objects.
+
+        All input paths to Dataset or DataArray without opening files twice,
+        repeats are managed by references.
 
         If inputs come as memory, we dont need to do anything (though that's
-        potentially a source of user error)
+        potentially a source of user error).
 
         """
         repeated_paths = self._get_repeated_paths()
@@ -713,7 +718,7 @@ class Model:
     def _get_repeated_paths(
         self,
     ) -> Dict[pl.Path, Union[xr.DataArray, xr.Dataset]]:
-        """Open repeated paths in the process_dict once key against path.
+        """Open repeated paths in the process_dict once against the key path.
 
         This is intended to work with parameter files or forcing files specified
         across multiple processes.
@@ -733,7 +738,9 @@ class Model:
         return repeated_paths_data
 
     def _set_inputs_and_model_dicts(self) -> None:
-        """Initialize inputs and processes to processes above.
+        """Initialize Input and Process objects, wire dependencies.
+
+        Initialize inputs and processes wiring processes to processes above.
 
         The inputs are in self.inputs_dict and the wired model is in
         self.model_dict.
@@ -774,6 +781,7 @@ class Model:
         return
 
     def _set_time(self) -> None:
+        """Set time dimensions from first input for simulation."""
         # TODO: would take start and end times and check for these
         # TODO: would check consistency of this across all inputs
         kk0 = list(self.inputs_dict.keys())[0]
@@ -783,6 +791,7 @@ class Model:
         return None
 
     def procs_above(self, proc_name: str) -> List[str]:
+        """Return list of processes defined above/before given process name."""
         procs_above = []
         for pp in self._process_dict:
             if proc_name != pp:
@@ -794,18 +803,21 @@ class Model:
         return
 
     def advance(self) -> None:
+        """Advance all inputs and processes to next time step."""
         for vv in self.inputs_dict.values():
             vv.advance()
         for vv in self.model_dict.values():
             vv.advance()
 
     def calculate(self, dt: np.float64) -> None:
+        """Execute calculations for all processes at current time step."""
         for vv in self.model_dict.values():
             vv.calculate(dt)
 
     def run(
         self, dt: np.float64, n_steps: np.int32, verbose: bool = False
     ) -> None:
+        """Execute simulation for specified time steps and finalize."""
         for tt in range(n_steps):
             self.advance()
             self.calculate(dt=dt)
