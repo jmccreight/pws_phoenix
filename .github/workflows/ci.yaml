@@ -41,9 +41,18 @@ jobs:
       - name: Run tests
         run: |
           cd xr
-          python -m coverage pytest tests/ -vv -n=4
+          python -m coverage run -m pytest tests/ -vv -n=4
           python -m coverage report -m
           python -m coverage xml
+
+      # - name: Run tests with coverage (Python 3.12 only)
+      #   if: matrix.python-version == '3.12'
+      #   run: |
+      #     pip install coverage
+      #     cd xr
+      #     python -m coverage run -m pytest tests/
+      #     python -m coverage report -m
+      #     python -m coverage xml
 
       - name: Upload coverage to Codecov (Python 3.12 only)
         if: matrix.python-version == '3.12'
