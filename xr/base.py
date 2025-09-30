@@ -103,13 +103,13 @@ class Input:
 
         # <
         self._current_index = np.int64(-1)
-        self._current_values = np.nan * self.data[:, 0]
+        self._current_values = np.nan * self.data[0, :]
         return
 
     def advance(self) -> None:
         """Advance current_values to the next time step."""
         self._current_index += np.int64(1)
-        self._current_values[:] = self.data[:, self._current_index]
+        self._current_values[:] = self.data[self._current_index, :]
         return
 
     @property

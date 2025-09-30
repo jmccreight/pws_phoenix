@@ -51,11 +51,11 @@ class TestRegression:
                     ),
                 ),
                 param_up_1=(
-                    ["space", "time"],
+                    ["time", "space"],
                     np.random.uniform(
                         low=0.1,
                         high=1,
-                        size=(dimensions["n_space"], dimensions["n_time"]),
+                        size=(dimensions["n_time"], dimensions["n_space"]),
                     ),
                 ),
                 param_low_0=(
@@ -95,19 +95,11 @@ class TestRegression:
         shifts = np.random.uniform(
             low=10, high=100, size=dimensions["n_space"]
         )
-        forcing_0_data = (
-            np.broadcast_to(
-                sin_data.transpose(),
-                (dimensions["n_space"], dimensions["n_time"]),
-            )
-            + np.broadcast_to(
-                shifts, (dimensions["n_time"], dimensions["n_space"])
-            ).transpose()
-        )
+        forcing_0_data = sin_data[:, np.newaxis] + shifts[np.newaxis, :]
 
         return xr.DataArray(
             data=forcing_0_data,
-            dims=["space", "time"],
+            dims=["time", "space"],
             coords=dict(
                 space_coord=("space", dimensions["space"]),
                 time_coord=("time", dimensions["time"]),
@@ -246,21 +238,21 @@ class TestRegression:
             else:
                 flow_initial = flow_initial_data
 
-            flow = np.zeros((len(flow_initial), n_time))
-            flow_previous = np.zeros((len(flow_initial), n_time))
+            flow = np.zeros((n_time, len(flow_initial)))
+            flow_previous = np.zeros((n_time, len(flow_initial)))
 
             # Time loop matches model.run(): advance() then calculate()
             for t in range(n_time):
                 # advance: flow_previous = flow (from previous time step)
                 if t == 0:
-                    flow_previous[:, t] = (
+                    flow_previous[t, :] = (
                         flow_initial  # First advance uses initial
                     )
                 else:
-                    flow_previous[:, t] = flow[:, t - 1]
+                    flow_previous[t, :] = flow[t - 1, :]
 
                 # calculate: flow = flow_previous * 0.95 + forcing_0
-                flow[:, t] = flow_previous[:, t] * 0.95 + forcing_0[:, t]
+                flow[t, :] = flow_previous[t, :] * 0.95 + forcing_0[t, :]
 
             return flow, flow_previous
 
@@ -272,22 +264,22 @@ class TestRegression:
             else:
                 storage_initial = storage_initial_data
 
-            storage = np.zeros((len(storage_initial), n_time))
-            storage_previous = np.zeros((len(storage_initial), n_time))
+            storage = np.zeros((n_time, len(storage_initial)))
+            storage_previous = np.zeros((n_time, len(storage_initial)))
 
             # Time loop matches model.run(): advance() then calculate()
             for t in range(n_time):
                 # advance: storage_previous = storage (from previous time step)
                 if t == 0:
-                    storage_previous[:, t] = (
+                    storage_previous[t, :] = (
                         storage_initial  # First advance uses initial
                     )
                 else:
-                    storage_previous[:, t] = storage[:, t - 1]
+                    storage_previous[t, :] = storage[t - 1, :]
 
                 # calculate: storage = storage_previous * 0.95 + flow * 0.12
-                storage[:, t] = (
-                    storage_previous[:, t] * 0.95 + flow[:, t] * 0.12
+                storage[t, :] = (
+                    storage_previous[t, :] * 0.95 + flow[t, :] * 0.12
                 )
 
             return storage, storage_previous
@@ -360,28 +352,28 @@ class TestRegression:
         # Test in-memory values against vectorized calculations
         np.testing.assert_allclose(
             model.model_dict["upper"]["flow"].values,
-            expected_flow[:, -1],
+            expected_flow[-1, :],
             rtol=1e-12,
             err_msg="Upper flow values don't match vectorized calculation",
         )
 
         np.testing.assert_allclose(
             model.model_dict["upper"]["flow_previous"].values,
-            expected_flow_prev[:, -1],
+            expected_flow_prev[-1, :],
             rtol=1e-12,
             err_msg="Upper flow_previous values don't match vectorized calculation",
         )
 
         np.testing.assert_allclose(
             model.model_dict["lower"]["storage"].values,
-            expected_storage[:, -1],
+            expected_storage[-1, :],
             rtol=1e-12,
             err_msg="Lower storage values don't match vectorized calculation",
         )
 
         np.testing.assert_allclose(
             model.model_dict["lower"]["storage_previous"].values,
-            expected_storage_prev[:, -1],
+            expected_storage_prev[-1, :],
             rtol=1e-12,
             err_msg="Lower storage_previous values don't match vectorized calculation",
         )
@@ -393,17 +385,16 @@ class TestRegression:
         )
 
         # Check that output files contain expected time series
-        # NetCDF files have (time, space) shape, so transpose expected arrays
         np.testing.assert_allclose(
             flow_da.values,
-            expected_flow.T,  # Transpose from (space, time) to (time, space)
+            expected_flow,  # Already in (time, space) format
             rtol=1e-12,
             err_msg="Output flow NetCDF doesn't match vectorized calculation",
         )
 
         np.testing.assert_allclose(
             storage_prev_da.values,
-            expected_storage_prev.T,  # Transpose from (space, time) to (time, space)
+            expected_storage_prev,  # Already in (time, space) format
             rtol=1e-12,
             err_msg="Output storage_previous NetCDF doesn't match vectorized calculation",
         )

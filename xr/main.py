@@ -51,8 +51,8 @@ if not parameter_file.exists():
                 np.random.uniform(low=0.1, high=1, size=n_space),
             ),
             param_up_1=(
-                ["space", "time"],
-                np.random.uniform(low=0.1, high=1, size=(n_space, n_time)),
+                ["time", "space"],
+                np.random.uniform(low=0.1, high=1, size=(n_time, n_space)),
             ),
             param_low_0=(
                 ["space"],
@@ -82,13 +82,10 @@ if not forcing_0_file.exists():
     # plt.plot(time, sin_data)
     # plt.show()
     shifts = np.random.uniform(low=10, high=100, size=n_space)
-    forcing_0_data = (
-        np.broadcast_to(sin_data.transpose(), (n_space, n_time))
-        + np.broadcast_to(shifts, (n_time, n_space)).transpose()
-    )
+    forcing_0_data = sin_data[:, np.newaxis] + shifts[np.newaxis, :]
     forcing_0 = xr.DataArray(
         data=forcing_0_data,
-        dims=["space", "time"],
+        dims=["time", "space"],
         coords=dict(
             space_coord=("space", space),
             time_coord=("time", time),
