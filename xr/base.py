@@ -91,12 +91,12 @@ class Input:
             The time index starts at -1, so call advance() to move to the first
             time step before accessing current_values.
         """
+        self._input_file: Union[pl.Path, None] = None
         if isinstance(data_or_file, pl.Path):
             self.data = xr.open_dataarray(data_or_file)
             self._input_file = data_or_file
         else:
             self.data = data_or_file
-            self._input_file = None
         # <
         if read_only:
             self.data.values.flags.writeable = False
@@ -170,7 +170,7 @@ class Process:
         #       3. parameters are "endogenous" or internal, while inputs
         #          are external and might be coming from various other places/
         dim_names = [vv["dims"] for vv in self.get_variables().values()]
-        dim_names = set(itertools.chain.from_iterable(dim_names))
+        dim_names = list(set(itertools.chain.from_iterable(dim_names)))
         # Strange naming assumption of coords. Could use a mapping from
         # dims to coords somewhere
         coords = {}
@@ -342,6 +342,12 @@ class Process:
         """
         # TODO: improve the inner Dict[str, Any] typehint once the definition
         # is a bit clearer.
+        raise NotImplementedError()
+
+    def advance(self) -> None:
+        raise NotImplementedError()
+
+    def calculate(self, dt: np.float64) -> None:
         raise NotImplementedError()
 
 
@@ -667,8 +673,8 @@ class Model:
         self._paths_to_data_proc_dict()
 
         # wire up the model
-        self.model_dict = {}
-        self.inputs_dict = {}
+        self.model_dict: Dict[str, Process] = {}
+        self.inputs_dict: Dict[str, Input] = {}
         self._set_inputs_and_model_dicts()
 
         self._set_time()
@@ -845,15 +851,19 @@ class Model:
 
     def advance(self) -> None:
         """Advance all inputs and processes to next time step."""
-        for vv in self.inputs_dict.values():
-            vv.advance()
-        for vv in self.model_dict.values():
-            vv.advance()
+        for ii in self.inputs_dict.values():
+            ii.advance()
+        for pp in self.model_dict.values():
+            pp.advance()
+        # <
+        return
 
     def calculate(self, dt: np.float64) -> None:
         """Execute calculations for all processes at current time step."""
         for vv in self.model_dict.values():
             vv.calculate(dt)
+        # <
+        return
 
     def run(
         self, dt: np.float64, n_steps: np.int32, verbose: bool = False

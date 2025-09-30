@@ -591,7 +591,7 @@ class TestOutput:
             time_datum=sample_time_datum,
         )
 
-        output.setup_variable_tracking(model_dict)
+        output.setup_variable_tracking(model_dict)  # type: ignore[arg-type]
 
         # Manually set some data in buffer (simulating partial chunk)
         output.data_buffers["var1"][0] = [10.0, 20.0, 30.0]

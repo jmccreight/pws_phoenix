@@ -158,6 +158,8 @@ control = {
     "time_chunk_size": 10,
 }
 
+model: Model
+
 
 @timer
 def init_model() -> None:
