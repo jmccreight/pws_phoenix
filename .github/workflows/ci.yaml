@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-xdist coverage numpy xarray netcdf4 pathlib ruff mypy
+          pip install pytest pytest-xdist pytest-cov numpy xarray netcdf4 pathlib ruff mypy
           # Install additional dependencies if requirements file exists
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f environment.yml ]; then pip install -r <(grep -E "^\s*-\s+" environment.yml | sed 's/^\s*-\s*//'); fi
@@ -41,9 +41,7 @@ jobs:
       - name: Run tests
         run: |
           cd xr
-          python -m coverage run -m pytest tests/ -vv -n=4
-          python -m coverage report -m
-          python -m coverage xml
+          python -m pytest tests/ -vv -n=4 --cov=. --cov-report=xml --cov-report=term-missing --junitxml=junit.xml
 
       # - name: Run tests with coverage (Python 3.12 only)
       #   if: matrix.python-version == '3.12'
@@ -60,3 +58,10 @@ jobs:
         with:
           file: ./xr/coverage.xml
           fail_ci_if_error: false
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: ./xr/junit.xml
