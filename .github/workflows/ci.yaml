@@ -35,6 +35,9 @@ jobs:
       - name: Format
         run: ruff format --check xr/
 
+      - name: mypy
+        run: mypy --check-untyped-defs xr/
+
       - name: Run tests
         run: |
           cd xr

@@ -1,5 +1,6 @@
 import pathlib as pl
 import sys
+from typing import Any, Dict
 from unittest.mock import Mock, patch
 
 import netCDF4 as nc
@@ -682,7 +683,8 @@ class TestModel:
 
     def test_init_without_output(self, sample_process_dict, tmp_path):
         """Test Model initialization without output configuration."""
-        control_config = {}  # No output_var_names or output_dir
+        # No output_var_names or output_dir
+        control_config: Dict[str, Any] = {}
 
         model = Model(sample_process_dict, control_config)
 
