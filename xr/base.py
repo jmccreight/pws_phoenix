@@ -535,16 +535,19 @@ class Output:
             time_var = ncfile.createVariable("time", "f8", ("time",))
             time_var.units = f"days since {str(self.time_datum)[:10]} 00:00:00"
 
-            # Create coordinate variables
+            # Create coordinate variables and track their names
+            coord_names = ["time"]
             for dim_name in var_ref.dims:
                 if (
                     dim_name != "time"
                     and f"{dim_name}_coord" in var_ref.coords
                 ):
+                    coord_var_name = f"{dim_name}_coord"
                     coord_var = ncfile.createVariable(
-                        f"{dim_name}_coord", "f8", (str(dim_name),)
+                        coord_var_name, "f8", (str(dim_name),)
                     )
-                    coord_var[:] = var_ref.coords[f"{dim_name}_coord"].values
+                    coord_var[:] = var_ref.coords[coord_var_name].values
+                    coord_names.append(coord_var_name)
 
             # Create main variable
             dims_with_time = ("time",) + tuple(str(d) for d in var_ref.dims)
@@ -555,6 +558,9 @@ class Output:
             # Copy attributes
             for attr_name, attr_val in var_ref.attrs.items():
                 setattr(var_nc, attr_name, attr_val)
+
+            # Add coordinates attribute to help xarray identify coordinate variables
+            var_nc.coordinates = " ".join(coord_names)
 
     def finalize(self) -> None:
         """Write any remaining data in buffers and close files."""

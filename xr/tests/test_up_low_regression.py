@@ -387,22 +387,22 @@ class TestRegression:
         )
 
         # Test output NetCDF files
-        flow_ds = xr.open_dataset(control_config["output_dir"] / "flow.nc")
-        storage_prev_ds = xr.open_dataset(
+        flow_da = xr.open_dataarray(control_config["output_dir"] / "flow.nc")
+        storage_prev_da = xr.open_dataarray(
             control_config["output_dir"] / "storage_previous.nc"
         )
 
         # Check that output files contain expected time series
         # NetCDF files have (time, space) shape, so transpose expected arrays
         np.testing.assert_allclose(
-            flow_ds["flow"].values,
+            flow_da.values,
             expected_flow.T,  # Transpose from (space, time) to (time, space)
             rtol=1e-12,
             err_msg="Output flow NetCDF doesn't match vectorized calculation",
         )
 
         np.testing.assert_allclose(
-            storage_prev_ds["storage_previous"].values,
+            storage_prev_da.values,
             expected_storage_prev.T,  # Transpose from (space, time) to (time, space)
             rtol=1e-12,
             err_msg="Output storage_previous NetCDF doesn't match vectorized calculation",
@@ -424,5 +424,5 @@ class TestRegression:
             model.model_dict["upper"]["flow"].values
         ), "Lower process doesn't reference Upper's flow values"
 
-        flow_ds.close()
-        storage_prev_ds.close()
+        flow_da.close()
+        storage_prev_da.close()
