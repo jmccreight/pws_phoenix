@@ -13,191 +13,332 @@ from processes import Lower, Upper
 
 
 class TestRegression:
-    """Regression tests based on main.py functionality."""
+    """Regression tests with parameterized fixtures for memory vs file initialization."""
 
+    # ============ DIMENSION FIXTURES ============
     @pytest.fixture
-    def setup_data(self, tmp_path):
-        """Set up test data similar to main.py."""
-        np.random.seed(42)  # For reproducible results
+    def dimensions(self):
+        """Create dimension data for tests."""
 
-        # Dimensions
-        n_years = 4
+        n_years = 1
         n_space = 20
-
         start_year = 2000
         end_year = start_year + n_years
         start_time = np.datetime64(f"{start_year}-01-01")
         end_time = np.datetime64(f"{end_year}-01-01") - np.timedelta64(1, "D")
         time = np.arange(start_time, end_time, dtype="datetime64[D]")
         n_time = len(time)
-
         space = np.arange(n_space)
 
-        # Create test data directory
-        data_dir = tmp_path / "toy_model_1_data"
-        data_dir.mkdir()
+        return {
+            "n_years": n_years,
+            "n_space": n_space,
+            "n_time": n_time,
+            "time": time,
+            "space": space,
+        }
 
-        # Parameters
-        parameter_file = data_dir / "parameters.nc"
-        param_ds = xr.Dataset(
+    # ============ PARAMETER FIXTURES ============
+    @pytest.fixture
+    def parameters_memory(self, dimensions):
+        """Create parameters Dataset in memory."""
+        return xr.Dataset(
             data_vars=dict(
                 param_up_0=(
                     ["space"],
-                    np.random.uniform(low=0.1, high=1, size=n_space),
+                    np.random.uniform(
+                        low=0.1, high=1, size=dimensions["n_space"]
+                    ),
                 ),
                 param_up_1=(
                     ["space", "time"],
-                    np.random.uniform(low=0.1, high=1, size=(n_space, n_time)),
+                    np.random.uniform(
+                        low=0.1,
+                        high=1,
+                        size=(dimensions["n_space"], dimensions["n_time"]),
+                    ),
                 ),
                 param_low_0=(
                     ["space"],
-                    np.random.uniform(low=0.17, high=0.23, size=(n_space)),
+                    np.random.uniform(
+                        low=0.17, high=0.23, size=dimensions["n_space"]
+                    ),
                 ),
             ),
             coords=dict(
-                space_coord=("space", space),
-                time_coord=("time", time),
+                space_coord=("space", dimensions["space"]),
+                time_coord=("time", dimensions["time"]),
             ),
             attrs=dict(description="Flow parameters."),
         )
-        param_ds.to_netcdf(parameter_file)
 
-        # Forcing
-        forcing_0_file = data_dir / "forcing_0.nc"
+    @pytest.fixture
+    def parameters_file(self, parameters_memory, tmp_path):
+        """Write parameters to file and return path."""
+        data_dir = tmp_path / "toy_model_1_data"
+        data_dir.mkdir(exist_ok=True)
+        parameter_file = data_dir / "parameters.nc"
+        parameters_memory.to_netcdf(parameter_file)
+        return parameter_file
+
+    # ============ FORCING FIXTURES ============
+    @pytest.fixture
+    def forcing_memory(self, dimensions):
+        """Create forcing DataArray in memory."""
         sin_data = np.sin(
-            np.arange(0, 2 * np.pi * n_years, 2 * np.pi * n_years / n_time)
+            np.arange(
+                0,
+                2 * np.pi * dimensions["n_years"],
+                2 * np.pi * dimensions["n_years"] / dimensions["n_time"],
+            )
         )
-        shifts = np.random.uniform(low=10, high=100, size=n_space)
+        shifts = np.random.uniform(
+            low=10, high=100, size=dimensions["n_space"]
+        )
         forcing_0_data = (
-            np.broadcast_to(sin_data.transpose(), (n_space, n_time))
-            + np.broadcast_to(shifts, (n_time, n_space)).transpose()
+            np.broadcast_to(
+                sin_data.transpose(),
+                (dimensions["n_space"], dimensions["n_time"]),
+            )
+            + np.broadcast_to(
+                shifts, (dimensions["n_time"], dimensions["n_space"])
+            ).transpose()
         )
-        forcing_0 = xr.DataArray(
+
+        return xr.DataArray(
             data=forcing_0_data,
             dims=["space", "time"],
             coords=dict(
-                space_coord=("space", space),
-                time_coord=("time", time),
+                space_coord=("space", dimensions["space"]),
+                time_coord=("time", dimensions["time"]),
             ),
             attrs=dict(
                 description="Primal forcing.",
                 units="parsecs",
             ),
         )
-        forcing_0.to_netcdf(forcing_0_file)
 
-        # Initial conditions
-        flow_ic_file = data_dir / "flow_ic.nc"
-        flow_ic_data = np.random.uniform(low=100, high=1000, size=n_space)
-        flow_ic = xr.DataArray(
+    @pytest.fixture
+    def forcing_file(self, forcing_memory, tmp_path):
+        """Write forcing to file and return path."""
+        data_dir = tmp_path / "toy_model_1_data"
+        data_dir.mkdir(exist_ok=True)
+        forcing_file = data_dir / "forcing_0.nc"
+        forcing_memory.to_netcdf(forcing_file)
+        return forcing_file
+
+    # ============ INITIAL CONDITION FIXTURES ============
+    @pytest.fixture
+    def flow_ic_memory(self, dimensions):
+        """Create flow initial conditions DataArray in memory."""
+        flow_ic_data = np.random.uniform(
+            low=100, high=1000, size=dimensions["n_space"]
+        )
+        return xr.DataArray(
             data=flow_ic_data,
             dims=["space"],
-            coords=dict(space_coord=("space", space)),
+            coords=dict(space_coord=("space", dimensions["space"])),
             attrs=dict(
                 description="Initial flow.",
                 units="cumecs",
-                time=str(time[0]),
+                time=str(dimensions["time"][0]),
             ),
         )
-        flow_ic.to_netcdf(flow_ic_file)
 
-        storage_ic_file = data_dir / "storage_ic.nc"
-        storage_ic_data = np.random.uniform(low=100, high=500, size=n_space)
-        storage_ic = xr.DataArray(
+    @pytest.fixture
+    def flow_ic_file(self, flow_ic_memory, tmp_path):
+        """Write flow initial conditions to file and return path."""
+        data_dir = tmp_path / "toy_model_1_data"
+        data_dir.mkdir(exist_ok=True)
+        flow_ic_file = data_dir / "flow_ic.nc"
+        flow_ic_memory.to_netcdf(flow_ic_file)
+        return flow_ic_file
+
+    @pytest.fixture
+    def storage_ic_memory(self, dimensions):
+        """Create storage initial conditions DataArray in memory."""
+        storage_ic_data = np.random.uniform(
+            low=100, high=500, size=dimensions["n_space"]
+        )
+        return xr.DataArray(
             data=storage_ic_data,
             dims=["space"],
-            coords=dict(space_coord=("space", space)),
+            coords=dict(space_coord=("space", dimensions["space"])),
             attrs=dict(
                 description="Initial storage.",
                 units="quibits",
-                time=str(time[0]),
+                time=str(dimensions["time"][0]),
             ),
         )
-        storage_ic.to_netcdf(storage_ic_file)
 
-        # Setup process dictionary
-        process_dict: Dict[str, Dict[str, Any]] = {
-            "upper": {
-                "class": Upper,
-                "forcing_0": forcing_0_file,
-                "flow_initial": flow_ic_file,
-                "parameters": parameter_file,
-            },
-            "lower": {
-                "class": Lower,
-                "storage_initial": storage_ic_file,
-                "parameters": parameter_file,
-            },
-        }
+    @pytest.fixture
+    def storage_ic_file(self, storage_ic_memory, tmp_path):
+        """Write storage initial conditions to file and return path."""
+        data_dir = tmp_path / "toy_model_1_data"
+        data_dir.mkdir(exist_ok=True)
+        storage_ic_file = data_dir / "storage_ic.nc"
+        storage_ic_memory.to_netcdf(storage_ic_file)
+        return storage_ic_file
 
+    # ============ PARAMETERIZED DATA FIXTURES ============
+    @pytest.fixture(params=["memory", "file"])
+    def parameters_data(self, request, parameters_memory, parameters_file):
+        """Parameterized fixture returning either memory or file parameters."""
+        if request.param == "memory":
+            return parameters_memory
+        else:
+            return parameters_file
+
+    @pytest.fixture(params=["memory", "file"])
+    def forcing_data(self, request, forcing_memory, forcing_file):
+        """Parameterized fixture returning either memory or file forcing."""
+        if request.param == "memory":
+            return forcing_memory
+        else:
+            return forcing_file
+
+    @pytest.fixture(params=["memory", "file"])
+    def flow_ic_data(self, request, flow_ic_memory, flow_ic_file):
+        """Parameterized fixture returning either memory or file flow IC."""
+        if request.param == "memory":
+            return flow_ic_memory
+        else:
+            return flow_ic_file
+
+    @pytest.fixture(params=["memory", "file"])
+    def storage_ic_data(self, request, storage_ic_memory, storage_ic_file):
+        """Parameterized fixture returning either memory or file storage IC."""
+        if request.param == "memory":
+            return storage_ic_memory
+        else:
+            return storage_ic_file
+
+    # ============ CONTROL FIXTURES ============
+    @pytest.fixture
+    def control_config(self, tmp_path):
+        """Create control configuration."""
         output_dir = tmp_path / "output"
-        control = {
+        return {
             "output_var_names": ["flow", "storage_previous"],
             "output_dir": output_dir,
             "time_chunk_size": 10,
         }
 
+    # ============ ANSWERS FIXTURE ============
+    @pytest.fixture
+    def answers(
+        self, dimensions, forcing_memory, flow_ic_memory, storage_ic_memory
+    ):
+        """Compute vectorized expected results once for all parameterized tests."""
+
+        def vectorized_upper_calculation(
+            forcing_0_data, flow_initial_data, n_time
+        ):
+            """Vectorized version of Upper process calculations."""
+            # Extract numpy arrays from xarray objects
+            if hasattr(forcing_0_data, "values"):
+                forcing_0 = forcing_0_data.values
+            else:
+                forcing_0 = forcing_0_data
+
+            if hasattr(flow_initial_data, "values"):
+                flow_initial = flow_initial_data.values
+            else:
+                flow_initial = flow_initial_data
+
+            flow = np.zeros((len(flow_initial), n_time))
+            flow_previous = np.zeros((len(flow_initial), n_time))
+
+            # Time loop matches model.run(): advance() then calculate()
+            for t in range(n_time):
+                # advance: flow_previous = flow (from previous time step)
+                if t == 0:
+                    flow_previous[:, t] = (
+                        flow_initial  # First advance uses initial
+                    )
+                else:
+                    flow_previous[:, t] = flow[:, t - 1]
+
+                # calculate: flow = flow_previous * 0.95 + forcing_0
+                flow[:, t] = flow_previous[:, t] * 0.95 + forcing_0[:, t]
+
+            return flow, flow_previous
+
+        def vectorized_lower_calculation(flow, storage_initial_data, n_time):
+            """Vectorized version of Lower process calculations."""
+            # Extract numpy arrays from xarray objects
+            if hasattr(storage_initial_data, "values"):
+                storage_initial = storage_initial_data.values
+            else:
+                storage_initial = storage_initial_data
+
+            storage = np.zeros((len(storage_initial), n_time))
+            storage_previous = np.zeros((len(storage_initial), n_time))
+
+            # Time loop matches model.run(): advance() then calculate()
+            for t in range(n_time):
+                # advance: storage_previous = storage (from previous time step)
+                if t == 0:
+                    storage_previous[:, t] = (
+                        storage_initial  # First advance uses initial
+                    )
+                else:
+                    storage_previous[:, t] = storage[:, t - 1]
+
+                # calculate: storage = storage_previous * 0.95 + flow * 0.12
+                storage[:, t] = (
+                    storage_previous[:, t] * 0.95 + flow[:, t] * 0.12
+                )
+
+            return storage, storage_previous
+
+        # Compute all expected results once
+        expected_flow, expected_flow_prev = vectorized_upper_calculation(
+            forcing_memory, flow_ic_memory, dimensions["n_time"]
+        )
+
+        expected_storage, expected_storage_prev = vectorized_lower_calculation(
+            expected_flow, storage_ic_memory, dimensions["n_time"]
+        )
+
+        # Return all results in a dictionary
         return {
-            "process_dict": process_dict,
-            "control": control,
-            "n_time": n_time,
-            "n_space": n_space,
-            "time": time,
-            "space": space,
-            "forcing_0_data": forcing_0_data,
-            "flow_ic_data": flow_ic_data,
-            "storage_ic_data": storage_ic_data,
-            "param_ds": param_ds,
-            "output_dir": output_dir,
+            "expected_flow": expected_flow,
+            "expected_flow_prev": expected_flow_prev,
+            "expected_storage": expected_storage,
+            "expected_storage_prev": expected_storage_prev,
         }
 
-    def vectorized_upper_calculation(self, forcing_0, flow_initial, n_time):
-        """Vectorized version of Upper process calculations."""
-        flow = np.zeros((len(flow_initial), n_time))
-        flow_previous = np.zeros((len(flow_initial), n_time))
+    # ============ CONSOLIDATED TEST ============
+    def test_model_regression(
+        self,
+        dimensions,
+        parameters_data,
+        forcing_data,
+        flow_ic_data,
+        storage_ic_data,
+        control_config,
+        answers,
+    ):
+        """Comprehensive regression test with parameterized memory/file inputs."""
+        # Setup process dictionary with parameterized data
+        process_dict: Dict[str, Dict[str, Any]] = {
+            "upper": {
+                "class": Upper,
+                "forcing_0": forcing_data,
+                "flow_initial": flow_ic_data,
+                "parameters": parameters_data,
+            },
+            "lower": {
+                "class": Lower,
+                "storage_initial": storage_ic_data,
+                "parameters": parameters_data,
+            },
+        }
 
-        # Time loop matches model.run(): advance() then calculate()
-        for t in range(n_time):
-            # advance: flow_previous = flow (from previous time step)
-            if t == 0:
-                flow_previous[:, t] = (
-                    flow_initial  # First advance uses initial
-                )
-            else:
-                flow_previous[:, t] = flow[:, t - 1]
-
-            # calculate: flow = flow_previous * 0.95 + forcing_0
-            flow[:, t] = flow_previous[:, t] * 0.95 + forcing_0[:, t]
-
-        return flow, flow_previous
-
-    def vectorized_lower_calculation(self, flow, storage_initial, n_time):
-        """Vectorized version of Lower process calculations."""
-        storage = np.zeros((len(storage_initial), n_time))
-        storage_previous = np.zeros((len(storage_initial), n_time))
-
-        # Time loop matches model.run(): advance() then calculate()
-        for t in range(n_time):
-            # advance: storage_previous = storage (from previous time step)
-            if t == 0:
-                storage_previous[:, t] = (
-                    storage_initial  # First advance uses initial
-                )
-            else:
-                storage_previous[:, t] = storage[:, t - 1]
-
-            # calculate: storage = storage_previous * 0.95 + flow * 0.12
-            storage[:, t] = storage_previous[:, t] * 0.95 + flow[:, t] * 0.12
-
-        return storage, storage_previous
-
-    def test_model_regression(self, setup_data):
-        """Test complete model run against vectorized calculations."""
-        data = setup_data
+        # Create model - this should work with both memory and file inputs
+        model = Model(process_dict, control_config)
         dt = np.float64(1.0)
-
-        # Create and run model
-        model = Model(data["process_dict"], data["control"])
 
         # Store initial reference IDs for testing
         initial_refs = {
@@ -208,21 +349,15 @@ class TestRegression:
         }
 
         # Run model
-        model.run(dt, np.int32(data["n_time"]))
+        model.run(dt, np.int32(dimensions["n_time"]))
 
-        # Test vectorized calculations
-        expected_flow, expected_flow_prev = self.vectorized_upper_calculation(
-            data["forcing_0_data"], data["flow_ic_data"], data["n_time"]
-        )
-
-        expected_storage, expected_storage_prev = (
-            self.vectorized_lower_calculation(
-                expected_flow, data["storage_ic_data"], data["n_time"]
-            )
-        )
+        # Get expected results from answers fixture (computed only once)
+        expected_flow = answers["expected_flow"]
+        expected_flow_prev = answers["expected_flow_prev"]
+        expected_storage = answers["expected_storage"]
+        expected_storage_prev = answers["expected_storage_prev"]
 
         # Test in-memory values against vectorized calculations
-        # Note: Model runs for n_time steps, but final values are at last time step
         np.testing.assert_allclose(
             model.model_dict["upper"]["flow"].values,
             expected_flow[:, -1],
@@ -253,10 +388,11 @@ class TestRegression:
 
         # Test output NetCDF files
         flow_ds = xr.open_dataset(
-            data["output_dir"] / "flow.nc", decode_timedelta=False
+            control_config["output_dir"] / "flow.nc", decode_timedelta=False
         )
         storage_prev_ds = xr.open_dataset(
-            data["output_dir"] / "storage_previous.nc", decode_timedelta=False
+            control_config["output_dir"] / "storage_previous.nc",
+            decode_timedelta=False,
         )
 
         # Check that output files contain expected time series

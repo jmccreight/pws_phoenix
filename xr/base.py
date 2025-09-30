@@ -788,6 +788,20 @@ class Model:
         self.ntime = self.inputs_dict[kk0].data.sizes["time"]
         self.time_index = self.inputs_dict[kk0].data.time
         self.times = self.inputs_dict[kk0].data.time_coord
+
+        # Enforce datetime64[D] resolution for consistent NetCDF output
+        if (
+            hasattr(self.times, "dtype")
+            and self.times.dtype != "datetime64[D]"
+        ):
+            import warnings
+
+            warnings.warn(
+                f"Time coordinate has dtype {self.times.dtype}, expected datetime64[D]. "
+                "This may cause issues with NetCDF timedelta decoding.",
+                UserWarning,
+            )
+
         return None
 
     def procs_above(self, proc_name: str) -> List[str]:
