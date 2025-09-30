@@ -379,6 +379,8 @@ class Output:
         time_chunk_size: int,
         variable_names: List[str],
         output_dir: pl.Path,
+        current_time_ref: np.ndarray,
+        time_datum: np.datetime64,
     ) -> None:
         """Initialize Output manager for time-chunked NetCDF writing.
 
@@ -390,6 +392,8 @@ class Output:
                 variable will get its own NetCDF file named {var_name}.nc.
             output_dir: Directory where output files will be created. Will be
                 created if it doesn't exist.
+            current_time_ref: Reference to array containing current time index.
+            time_datum: Reference time for CF convention "days since datum".
 
         Note:
             This class is somewhat taylored to read Model.model_dict, which
@@ -400,6 +404,8 @@ class Output:
         self.variable_names = variable_names
         self.output_dir = output_dir
         self.output_dir.mkdir(exist_ok=True)
+        self.current_time_ref = current_time_ref
+        self.time_datum = time_datum
 
         # Track variable references and data
         self.variable_refs: Dict[str, xr.DataArray] = {}
@@ -460,15 +466,12 @@ class Output:
                 buffer_shape, dtype=var_ref.dtype
             )
 
-    def collect_timestep(
-        self, time_index: int, time_coord: np.datetime64
-    ) -> None:
+    def collect_timestep(self, time_index: int) -> None:
         """
         Collect current variable values for this time step.
 
         Args:
             time_index: Global time index
-            time_coord: Time coordinate value
         """
         buffer_index = self.current_time_step % self.time_chunk_size
 
@@ -480,11 +483,19 @@ class Output:
 
         # Write chunk when buffer is full
         if buffer_index == self.time_chunk_size - 1:
-            self._write_chunk(time_coord)
+            self._write_chunk()
 
-    def _write_chunk(self, time_coord: np.datetime64) -> None:
+    def _write_chunk(self) -> None:
         """Write current data buffer to NetCDF files."""
         chunk_end_time = self.chunk_start_time + self.time_chunk_size
+
+        # Calculate time values as days since datum
+        time_values = []
+        for i in range(self.time_chunk_size):
+            # Calculate days since datum from actual time coordinates
+            # Note: This assumes we're writing a complete chunk, so we calculate
+            # the time for each step based on the current position in the chunk
+            time_values.append(float(self.chunk_start_time + i))
 
         for var_name in self.variable_names:
             file_path = self.output_dir / f"{var_name}.nc"
@@ -499,14 +510,10 @@ class Output:
                     time_dim_size : time_dim_size + self.time_chunk_size
                 ] = self.data_buffers[var_name]
 
-                # Write time coordinates if available
-                if (
-                    hasattr(time_coord, "__len__")
-                    and len(time_coord) >= chunk_end_time
-                ):
-                    ncfile.variables["time"][
-                        time_dim_size : time_dim_size + self.time_chunk_size
-                    ] = time_coord[self.chunk_start_time : chunk_end_time]
+                # Write time coordinates as days since datum
+                ncfile.variables["time"][
+                    time_dim_size : time_dim_size + self.time_chunk_size
+                ] = time_values
 
         self.chunk_start_time = chunk_end_time
 
@@ -526,8 +533,7 @@ class Output:
 
             # Create time variable
             time_var = ncfile.createVariable("time", "f8", ("time",))
-            time_var.units = "days"
-            time_var.calendar = "standard"
+            time_var.units = f"days since {str(self.time_datum)[:10]}"
 
             # Create coordinate variables
             for dim_name in var_ref.dims:
@@ -550,10 +556,19 @@ class Output:
             for attr_name, attr_val in var_ref.attrs.items():
                 setattr(var_nc, attr_name, attr_val)
 
-    def finalize(self, time_coord: np.datetime64 = None) -> None:
+    def finalize(self) -> None:
         """Write any remaining data in buffers and close files."""
         remaining_steps = self.current_time_step % self.time_chunk_size
         if remaining_steps > 0:
+            # Calculate time values for remaining steps as days since datum
+            time_values = []
+            for i in range(remaining_steps):
+                current_step = self.chunk_start_time + i
+                days_since_datum = float(
+                    current_step
+                )  # Simple day counting from start
+                time_values.append(days_since_datum)
+
             # Write partial chunk
             for var_name in self.variable_names:
                 file_path = self.output_dir / f"{var_name}.nc"
@@ -566,12 +581,10 @@ class Output:
                         time_dim_size : time_dim_size + remaining_steps
                     ] = self.data_buffers[var_name][:remaining_steps]
 
-                    if hasattr(time_coord, "__len__"):
-                        end_idx = self.chunk_start_time + remaining_steps
-                        if len(time_coord) >= end_idx:
-                            ncfile.variables["time"][
-                                time_dim_size : time_dim_size + remaining_steps
-                            ] = time_coord[self.chunk_start_time : end_idx]
+                    # Write time coordinates as days since datum
+                    ncfile.variables["time"][
+                        time_dim_size : time_dim_size + remaining_steps
+                    ] = time_values
 
 
 class Model:
@@ -654,6 +667,12 @@ class Model:
 
         self._set_time()
 
+        # Initialize time tracking arrays
+        self.current_time_index = np.array([0], dtype=np.int32)
+        self.current_time = np.array(
+            [self.times[0].values], dtype="datetime64[D]"
+        )
+
         # TODO: make the following a method
         # Setup output tracking if specified in control
         self.output = None
@@ -678,11 +697,13 @@ class Model:
                     UserWarning,
                 )
 
-            # Create Output object and setup variable tracking
+            # Create Output object with time reference and datum
             self.output = Output(
                 time_chunk_size=time_chunk_size,
                 variable_names=control["output_var_names"],
                 output_dir=control["output_dir"],
+                current_time_ref=self.current_time_index,
+                time_datum=self.times[0].values,
             )
             self.output.setup_variable_tracking(self.model_dict)
 
@@ -833,12 +854,16 @@ class Model:
     ) -> None:
         """Execute simulation for specified time steps and finalize."""
         for tt in range(n_steps):
+            # Update both time tracking arrays
+            self.current_time_index[0] = tt
+            self.current_time[0] = self.times[tt].values
+
             self.advance()
             self.calculate(dt=dt)
 
             # Collect output data if output object is provided
             if self.output is not None:
-                self.output.collect_timestep(tt, self.times[tt].values)
+                self.output.collect_timestep(tt)
 
             if verbose:
                 print(f"{tt=}")
@@ -851,7 +876,5 @@ class Model:
         # Finalize output if provided
         # TODO: potentially separate to a finalize method.
         if self.output is not None:
-            self.output.finalize(
-                self.times if hasattr(self, "times") else None
-            )
+            self.output.finalize()
         return
