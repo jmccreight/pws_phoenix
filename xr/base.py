@@ -632,6 +632,7 @@ class Model:
         self,
         process_dict: Dict[str, Any],
         control: Dict[str, Any],
+        load_all: Union[bool, None] = None,
     ) -> None:
         """Initialize Model with process definitions and control settings.
 
@@ -653,7 +654,10 @@ class Model:
                 - 'output_var_names': (optional) List of variables to output
                 - 'output_dir': (optional) Directory for output files
                 - 'time_chunk_size': (optional) Output chunking size (default: 365)
+                - 'load_all': (optional) Whether to load all data into memory
                 - to be continued
+            load_all: Whether to load all xarray objects into memory. If None,
+                checks control dict for 'load_all' key, defaults to False.
 
         Raises:
             ValueError: If only one of output_var_names or output_dir is
@@ -669,6 +673,12 @@ class Model:
 
         self._passed_process_dict = process_dict
         self._process_dict = deepcopy(process_dict)
+
+        # Set load_all option
+        if load_all is None:
+            self._load_all = control.get("load_all", False)
+        else:
+            self._load_all = load_all
 
         self._paths_to_data_proc_dict()
 
@@ -741,6 +751,11 @@ class Model:
                         proc[input_key] = repeated_paths[input_val]
                     else:
                         proc[input_key] = open_xr(input_val)
+
+                # Load data into memory if load_all is True
+                if self._load_all:
+                    if isinstance(proc[input_key], (xr.DataArray, xr.Dataset)):
+                        proc[input_key] = proc[input_key].load()
 
         # TODO: write test that repeated path has same memory id
         # assert id(self._process_dict["upper"]["parameters"]) == id(

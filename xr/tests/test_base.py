@@ -675,7 +675,7 @@ class TestModel:
         assert model.output is None
 
     def test_paths_to_data_proc_dict(self, tmp_path):
-        """Test the _paths_to_data_proc_dict method."""
+        """Test _paths_to_data_proc_dict method and load_all."""
         # Create test files with actual NetCDF data
         forcing_file = tmp_path / "forcing.nc"
         forcing_data = xr.DataArray(
@@ -711,11 +711,47 @@ class TestModel:
             }
         }
 
+        # Test basic functionality (load_all=False by default)
         model = Model(proc_dict, {})
 
         # Check that paths were converted to data
         assert isinstance(model.model_dict["process1"]["param1"], xr.DataArray)
         assert isinstance(model.inputs_dict["input1"], Input)
+
+        # Test with load_all=True via control dict
+        control_with_load_all = {"load_all": True}
+        model_load_control = Model(proc_dict, control_with_load_all)
+
+        # Check that data was loaded (chunks should be None)
+        for var_name in ["param1", "param2"]:
+            var_data = model_load_control.model_dict["process1"][var_name]
+            assert isinstance(var_data, xr.DataArray)
+            assert var_data.chunks is None, (
+                f"{var_name} should be loaded (chunks=None)"
+            )
+
+        # Test with load_all=True via parameter
+        model_load_param = Model(proc_dict, {}, load_all=True)
+
+        # Check that data was loaded (chunks should be None)
+        for var_name in ["param1", "param2"]:
+            var_data = model_load_param.model_dict["process1"][var_name]
+            assert isinstance(var_data, xr.DataArray)
+            assert var_data.chunks is None, (
+                f"{var_name} should be loaded (chunks=None)"
+            )
+
+        # Test that parameter overrides control dict
+        control_false = {"load_all": False}
+        model_override = Model(proc_dict, control_false, load_all=True)
+
+        # Check that data was loaded (parameter should override control)
+        for var_name in ["param1", "param2"]:
+            var_data = model_override.model_dict["process1"][var_name]
+            assert isinstance(var_data, xr.DataArray)
+            assert var_data.chunks is None, (
+                f"{var_name} should be loaded (parameter overrides control)"
+            )
 
     def test_advance(self, sample_process_dict, sample_control_config):
         """Test the advance method."""
