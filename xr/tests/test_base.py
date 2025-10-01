@@ -674,7 +674,7 @@ class TestModel:
 
         assert model.output is None
 
-    def test_paths_to_data_proc_dict(self, tmp_path):
+    def test_paths_to_data_proc_dict_and_load_all(self, tmp_path):
         """Test _paths_to_data_proc_dict method and load_all."""
         # Create test files with actual NetCDF data
         forcing_file = tmp_path / "forcing.nc"
@@ -753,36 +753,13 @@ class TestModel:
                 f"{var_name} should be loaded (parameter overrides control)"
             )
 
-    def test_advance(self, sample_process_dict, sample_control_config):
-        """Test the advance method."""
-        model = Model(sample_process_dict, sample_control_config)
-
-        # Mock the advance method on the process
-        with patch.object(
-            model.model_dict["mock_process"], "advance"
-        ) as mock_advance:
-            model.advance()
-            mock_advance.assert_called_once()
-
-    def test_calculate(self, sample_process_dict, sample_control_config):
-        """Test the calculate method."""
-        model = Model(sample_process_dict, sample_control_config)
-        dt = np.float64(1.0)
-
-        # Mock the calculate method on the process
-        with patch.object(
-            model.model_dict["mock_process"], "calculate"
-        ) as mock_calculate:
-            model.calculate(dt)
-            mock_calculate.assert_called_once_with(dt)
-
     def test_run(self, sample_process_dict, sample_control_config):
-        """Test the run method."""
+        """Test the run method with process execution and output collection."""
         model = Model(sample_process_dict, sample_control_config)
         dt = np.float64(1.0)
         n_time_steps = np.int32(3)  # Match the available time steps
 
-        # Mock the advance and calculate methods
+        # Mock both process and output methods
         with (
             patch.object(
                 model.model_dict["mock_process"], "advance"
@@ -790,6 +767,8 @@ class TestModel:
             patch.object(
                 model.model_dict["mock_process"], "calculate"
             ) as mock_calculate,
+            patch.object(model.output, "collect_timestep") as mock_collect,
+            patch.object(model.output, "finalize") as mock_finalize,
         ):
             model.run(dt, n_time_steps)
 
@@ -800,19 +779,6 @@ class TestModel:
             # Check that calculate was called with correct dt
             for call in mock_calculate.call_args_list:
                 assert call[0][0] == dt
-
-    def test_run_with_output(self, sample_process_dict, sample_control_config):
-        """Test the run method with output collection."""
-        model = Model(sample_process_dict, sample_control_config)
-        dt = np.float64(1.0)
-        n_time_steps = np.int32(3)
-
-        # Mock the output methods
-        with (
-            patch.object(model.output, "collect_timestep") as mock_collect,
-            patch.object(model.output, "finalize") as mock_finalize,
-        ):
-            model.run(dt, n_time_steps)
 
             # Check that output was collected for each time step
             assert mock_collect.call_count == 3
