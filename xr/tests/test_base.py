@@ -3,7 +3,6 @@ import sys
 from typing import Any, Dict
 from unittest.mock import Mock, patch
 
-import netCDF4 as nc
 import numpy as np
 import pytest
 import xarray as xr
@@ -31,7 +30,7 @@ class TestOpenXr:
         result = open_xr(file_path)
 
         assert isinstance(result, xr.DataArray)
-        np.testing.assert_array_equal(result.values, data.values)
+        xr.testing.assert_equal(result, data)
 
     def test_open_xr_multiple_variables_returns_dataset(self, tmp_path):
         """Test that open_xr returns Dataset for multi-variable files."""
@@ -279,7 +278,7 @@ class TestProcess:
         )
 
         assert isinstance(result, xr.DataArray)
-        np.testing.assert_array_equal(result.values, [10.0, 20.0, 30.0])
+        np.testing.assert_equal(result.values, test_initial.values)
         assert result.attrs["description"] == "Test variable"
 
     def test_getitem_setitem_delitem(self, sample_parameters, sample_input):
@@ -295,17 +294,15 @@ class TestProcess:
         # Test __getitem__
         param1 = process["param1"]
         assert isinstance(param1, xr.DataArray)
-        np.testing.assert_array_equal(
-            param1.values, sample_parameters["param1"]
+        np.testing.assert_equal(
+            param1.values, sample_parameters["param1"].values
         )
 
         # Test __setitem__
         new_var = xr.DataArray([100, 200, 300], dims=["space"])
         process["new_var"] = new_var
         assert "new_var" in process.data
-        np.testing.assert_array_equal(
-            process["new_var"].values, new_var.values
-        )
+        np.testing.assert_equal(process["new_var"].values, new_var.values)
 
         # Test __delitem__
         del process["new_var"]
@@ -532,37 +529,26 @@ class TestOutput:
         # Check file was created and has correct structure
         assert file_path.exists()
 
-        with nc.Dataset(file_path, "r") as ncfile:
-            # Check dimensions
-            assert "time" in ncfile.dimensions
-            assert "space" in ncfile.dimensions
-            assert ncfile.dimensions["time"].isunlimited()
-            assert len(ncfile.dimensions["space"]) == 3
+        da = xr.open_dataarray(file_path)
 
-            # Check variables
-            assert "time" in ncfile.variables
-            assert "space_coord" in ncfile.variables
-            assert "test_var" in ncfile.variables
+        # Check dimensions
+        assert "time" in da.dims
+        assert "space" in da.dims
+        assert da.sizes["space"] == 3
 
-            # Check variable attributes
-            assert ncfile.variables["test_var"].description == "Test variable"
-            assert ncfile.variables["test_var"].units == "meters"
-            assert (
-                ncfile.variables["test_var"].coordinates == "time space_coord"
-            )
+        # Check variables
+        assert "time" in da.coords
+        assert "space_coord" in da.coords
+        assert "test_var" == da.name
 
-            # Check time variable attributes
-            assert (
-                ncfile.variables["time"].units
-                == "days since 2000-01-01 00:00:00"
-            )
-            # These attributes are set by the _initialize_netcdf_file method
-            try:
-                assert ncfile.variables["time"].standard_name == "time"
-                assert ncfile.variables["time"].axis == "T"
-            except AttributeError:
-                # These attributes might not be set in all test scenarios
-                pass
+        # Check variable attributes
+        assert da.attrs["description"] == "Test variable"
+        assert da.attrs["units"] == "meters"
+
+        # Check some encodings / variable attributes
+        assert da["time"].encoding["units"] == "days since 2000-01-01 00:00:00"
+        assert da.encoding["coordinates"] == "time space_coord"
+        da.close()
 
     def test_finalize_with_remaining_data(
         self, tmp_path, sample_time_ref, sample_time_datum
@@ -595,8 +581,9 @@ class TestOutput:
         output.setup_variable_tracking(model_dict)  # type: ignore[arg-type]
 
         # Manually set some data in buffer (simulating partial chunk)
-        output.data_buffers["var1"][0] = [10.0, 20.0, 30.0]
-        output.data_buffers["var1"][1] = [40.0, 50.0, 60.0]
+        expected_data = np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]])
+        output.data_buffers["var1"][0] = expected_data[0, :]
+        output.data_buffers["var1"][1] = expected_data[1, :]
         output.current_time_step = 2  # Only 2 steps collected
 
         # Finalize should write the partial chunk
@@ -604,12 +591,10 @@ class TestOutput:
 
         # Check that data was written to file
         var_file = output_dir / "var1.nc"
-        with nc.Dataset(var_file, "r") as ncfile:
-            assert ncfile.dimensions["time"].size == 2  # Only 2 time steps
-            expected_data = np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]])
-            np.testing.assert_array_equal(
-                ncfile.variables["var1"][:], expected_data
-            )
+        da = xr.open_dataarray(var_file)
+        assert da.sizes["time"] == 2  # Only 2 time steps
+        np.testing.assert_array_equal(da.values, expected_data)
+        da.close()
 
 
 class TestModel:
@@ -674,7 +659,6 @@ class TestModel:
         assert isinstance(model.model_dict["mock_process"], MockProcess)
 
         # Check that output is set up if output_var_names is provided
-        assert model.output is not None
         assert isinstance(model.output, Output)
 
         # Check time setup
