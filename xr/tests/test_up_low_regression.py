@@ -332,12 +332,10 @@ class TestRegression:
         model = Model(process_dict, control_config)
         dt = np.float64(1.0)
 
-        # Store initial reference IDs for testing
+        # Store initial references for testing
         initial_refs = {
-            "upper_flow_id": id(model.model_dict["upper"]["flow"].values),
-            "lower_storage_id": id(
-                model.model_dict["lower"]["storage"].values
-            ),
+            "upper_flow_id": model.model_dict["upper"]["flow"].values,
+            "lower_storage_id": model.model_dict["lower"]["storage"].values,
         }
 
         # Run model
@@ -401,17 +399,17 @@ class TestRegression:
 
         # Test that references are still valid after run
         assert (
-            id(model.model_dict["upper"]["flow"].values)
-            == initial_refs["upper_flow_id"]
+            model.model_dict["upper"]["flow"].values
+            is initial_refs["upper_flow_id"]
         ), "Upper flow reference changed during run"
 
         assert (
-            id(model.model_dict["lower"]["storage"].values)
-            == initial_refs["lower_storage_id"]
+            model.model_dict["lower"]["storage"].values
+            is initial_refs["lower_storage_id"]
         ), "Lower storage reference changed during run"
 
         # Test cross-process references (Lower should reference Upper's flow)
-        assert id(model.model_dict["lower"]["flow"].values) == id(
+        assert model.model_dict["lower"]["flow"].values is (
             model.model_dict["upper"]["flow"].values
         ), "Lower process doesn't reference Upper's flow values"
 
