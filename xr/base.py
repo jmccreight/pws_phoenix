@@ -27,13 +27,16 @@ from utils import timer  # noqa
 # TODO: what are the keys on the model dict, just from the passed model dict?
 
 
-def open_xr(path: pl.Path) -> Union[xr.DataArray, xr.Dataset]:
+def open_xr(
+    path: pl.Path, load: bool = False
+) -> Union[xr.DataArray, xr.Dataset]:
     """Open a NetCDF file and return the most appropriate xarray object.
 
     Automatically determines whether to return a Dataset or DataArray based on
     the file contents.
     Args:
         path: Path to the NetCDF file to open.
+        load_all: Load all variables in the returned object.
 
     Returns:
         DataArray if file contains exactly one data variable, otherwise
@@ -41,9 +44,14 @@ def open_xr(path: pl.Path) -> Union[xr.DataArray, xr.Dataset]:
     """
     ds = xr.open_dataset(path)
     if len(ds.data_vars) == 1:
-        return ds[list(ds.data_vars)[0]]
+        da_ds = ds[list(ds.data_vars)[0]]
     else:
-        return ds
+        da_ds = ds
+
+    if load:
+        da_ds = da_ds.load()
+
+    return da_ds
 
 
 class Input:
@@ -77,6 +85,7 @@ class Input:
         self,
         data_or_file: Union[xr.DataArray, pl.Path],
         read_only: bool = False,
+        load: bool = False,
     ) -> None:
         """Initialize Input object with data from file or memory.
 
@@ -86,6 +95,7 @@ class Input:
                 as one of its dimensions.
             read_only: If True, marks the underlying data as read-only to
                 prevent accidental modifications. Default is False.
+            load: If True, loads all data into memory. Default is False.
 
         Note:
             The time index starts at -1, so call advance() to move to the first
@@ -97,7 +107,10 @@ class Input:
             self._input_file = data_or_file
         else:
             self.data = data_or_file
+
         # <
+        if load:
+            self.data = self.data.load()
         if read_only:
             self.data.values.flags.writeable = False
 
@@ -180,9 +193,11 @@ class Process:
         self.data = xr.Dataset(coords=coords)
         # parameters
         for pp in self.get_parameters():
-            # in this case we want read-only copies??
+            # in this case we want read-only refs.
             self[pp] = parameters[pp]
-            self[pp].values.flags.writeable = False
+            # This seems successful but in
+            # test_base.py::TestModel::test_get_repeated_paths, these are
+            # copied if shared??
         for ii in self.get_inputs():
             # Input object set on self?4
             if isinstance(kwargs[ii], Input):
@@ -686,6 +701,7 @@ class Model:
         self.model_dict: Dict[str, Process] = {}
         self.inputs_dict: Dict[str, Input] = {}
         self._set_inputs_and_model_dicts()
+        del self._process_dict
 
         self._set_time()
 
@@ -731,7 +747,7 @@ class Model:
 
         return
 
-    def _paths_to_data_proc_dict(self) -> None:
+    def _paths_to_data_proc_dict(self, load_all: bool = False) -> None:
         """Convert file paths in process_dict to loaded xarray objects.
 
         All input paths to Dataset or DataArray without opening files twice,
@@ -740,8 +756,11 @@ class Model:
         If inputs come as memory, we dont need to do anything (though that's
         potentially a source of user error).
 
+        Args:
+            load_all: load data of all xarray objects instantiated.
+
         """
-        repeated_paths = self._get_repeated_paths()
+        repeated_paths = self._get_repeated_paths(load_all=load_all)
         for proc_name in self._process_dict.keys():
             proc = self._process_dict[proc_name]
             for input_key in proc.keys():
@@ -750,12 +769,11 @@ class Model:
                     if input_val in repeated_paths.keys():
                         proc[input_key] = repeated_paths[input_val]
                     else:
-                        proc[input_key] = open_xr(input_val)
+                        proc[input_key] = open_xr(input_val, load=load_all)
 
-                # Load data into memory if load_all is True
-                if self._load_all:
-                    if isinstance(proc[input_key], (xr.DataArray, xr.Dataset)):
-                        proc[input_key] = proc[input_key].load()
+                if input_key == "parameters":
+                    for vv in proc[input_key].keys():
+                        proc[input_key][vv].values.flags.writeable = False
 
         # TODO: write test that repeated path has same memory id
         # assert id(self._process_dict["upper"]["parameters"]) == id(
@@ -764,7 +782,7 @@ class Model:
         return
 
     def _get_repeated_paths(
-        self,
+        self, load_all: bool = False
     ) -> Dict[pl.Path, Union[xr.DataArray, xr.Dataset]]:
         """Open repeated paths in the process_dict once against the key path.
 
@@ -782,7 +800,9 @@ class Model:
         repeated_paths_list = [
             kk for kk, vv in Counter(flat_proc_dict_paths).items() if vv > 1
         ]
-        repeated_paths_data = {kk: open_xr(kk) for kk in repeated_paths_list}
+        repeated_paths_data = {
+            kk: open_xr(kk, load=load_all) for kk in repeated_paths_list
+        }
         return repeated_paths_data
 
     def _set_inputs_and_model_dicts(self) -> None:
@@ -810,7 +830,11 @@ class Model:
                     else:
                         raise ValueError("This should not happen from file.")
                     # <
-                    init_dict[ii] = Input(data_or_file, read_only=read_only)
+                    init_dict[ii] = Input(
+                        data_or_file,
+                        read_only=read_only,
+                        load=self._load_all,
+                    )
                     self.inputs_dict[ii] = init_dict[ii]
                     assert init_dict[ii].data is self.inputs_dict[ii].data
                     del data_or_file

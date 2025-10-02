@@ -789,12 +789,11 @@ class TestModel:
             assert mock_collect.call_args_list == expected_calls
 
     def test_get_repeated_paths(self, tmp_path):
-        """Test the _get_repeated_paths method."""
-        # Create test files with actual NetCDF data
+        """Test the _get_repeated_paths method with actual repeated paths."""
+        # Create test file with actual NetCDF data
         file1 = tmp_path / "file1.nc"
-        file2 = tmp_path / "file2.nc"
 
-        # Create minimal NetCDF files
+        # Create minimal NetCDF file
         data1 = xr.Dataset(
             {
                 "param1": (["space"], [1.0, 2.0, 3.0]),
@@ -802,20 +801,12 @@ class TestModel:
                 "space": [0, 1, 2],
             }
         )
-        data2 = xr.Dataset(
-            {
-                "param1": (["space"], [1.0, 2.0, 3.0]),
-                "param2": (["space"], [0.5, 0.6, 0.7]),
-                "space": [0, 1, 2],
-            }
-        )
         data1.to_netcdf(file1)
-        data2.to_netcdf(file2)
 
         proc_dict = {
             "process1": {
                 "class": MockProcess,
-                "parameters": file1,
+                "parameters": file1,  # Same file used by both processes
                 "input1": xr.DataArray(
                     [[1, 2, 3]],
                     dims=["time", "space"],
@@ -828,7 +819,7 @@ class TestModel:
             },
             "process2": {
                 "class": MockProcess,
-                "parameters": file2,  # Different file from process1
+                "parameters": file1,  # Same file as process1 (repeated)
                 "input1": xr.DataArray(
                     [[4, 5, 6]],
                     dims=["time", "space"],
@@ -843,10 +834,25 @@ class TestModel:
 
         model = Model(proc_dict, {})
         repeated_paths = model._get_repeated_paths()
+        
+        
 
-        # Since no files are actually repeated in this test,
-        # repeated_paths should be empty (each process uses a different file)
-        assert len(repeated_paths) == 0
+        # Test that repeated paths were detected by checking shared parameter DataArrays
+        # Get the intersection of parameters from both processes
+        process1_params = set(MockProcess.get_parameters())
+        process2_params = set(MockProcess.get_parameters())
+        shared_params = process1_params & process2_params
+
+        # For each shared parameter, verify the DataArrays are the same object
+        for param_name in shared_params:
+            param1_data = model.model_dict["process1"][param_name]
+            param2_data = model.model_dict["process2"][param_name]
+
+            # Verify they are the same DataArray object in memory
+            assert param1_data is param2_data, (
+                f"Parameter '{param_name}' should be the same DataArray object "
+                f"for repeated paths"
+            )
 
     def test_procs_above(self, sample_process_dict, sample_control_config):
         """Test the procs_above method."""
