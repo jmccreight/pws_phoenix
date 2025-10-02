@@ -842,7 +842,6 @@ class TestModel:
 
         # For each shared parameter, verify the DataArrays are the same object
         for param_name in shared_params:
-
             assert (
                 model.model_dict["process1"][param_name]
                 is model.model_dict["process2"][param_name]

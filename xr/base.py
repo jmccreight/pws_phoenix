@@ -172,7 +172,6 @@ class Process:
             variable initial conditions indicated by its metadata key
             "intitial". Values are DataArrays.
         """
-        import itertools
 
         # add parameters, inputs, input_outputs, and public variables
         # Note: It is somewhat strange that inputs of parameters are treated
@@ -183,22 +182,17 @@ class Process:
         #       2. parameters generally have somewhat less impact on output
         #       3. parameters are "endogenous" or internal, while inputs
         #          are external and might be coming from various other places/
-        dim_names = [vv["dims"] for vv in self.get_variables().values()]
-        dim_names = list(set(itertools.chain.from_iterable(dim_names)))
-        # Strange naming assumption of coords. Could use a mapping from
-        # dims to coords somewhere
-        coords = {}
-        for dd in dim_names:
-            coords[f"{dd}_coord"] = (dd, parameters[dd].values)
-        # <
-        self.data = xr.Dataset(coords=coords)
+        self.data = parameters[list(self.get_parameters())]
         # parameters
         for pp in self.get_parameters():
             # in this case we want read-only refs.
-            self[pp] = parameters[pp]
-            # This seems successful but in
-            # test_base.py::TestModel::test_get_repeated_paths, these are
-            # copied if shared??
+            # THIS IS THE MOST MYSTIFYING/OBSCURE USE OF REFERENCES.
+            # Apparently a copy above happens. The ONLY thing that works is
+            # replacing the values in the DataArrays and not the DataArrays
+            #  themselves (or both)
+            # self[pp] = parameters[pp]  # no no no - this ruins the refs
+            self[pp].values = parameters[pp].values
+            assert self[pp].values is parameters[pp].values
         for ii in self.get_inputs():
             # Input object set on self?4
             if isinstance(kwargs[ii], Input):
@@ -776,10 +770,6 @@ class Model:
                     for vv in proc[input_key].keys():
                         proc[input_key][vv].values.flags.writeable = False
 
-        # TODO: write test that repeated path has same memory id
-        # assert id(self._process_dict["upper"]["parameters"]) == id(
-        #     self._process_dict["lower"]["parameters"]
-        # )
         return
 
     def _get_repeated_paths(
