@@ -64,6 +64,12 @@ class TestRegression:
                         low=0.17, high=0.23, size=dimensions["n_space"]
                     ),
                 ),
+                param_common=(
+                    ["space"],
+                    np.random.uniform(
+                        low=0, high=0, size=dimensions["n_space"]
+                    ),
+                ),
             ),
             coords=dict(
                 space_coord=("space", dimensions["space"]),
@@ -108,6 +114,7 @@ class TestRegression:
                 description="Primal forcing.",
                 units="parsecs",
             ),
+            name="forcing_0",
         )
 
     @pytest.fixture
@@ -117,6 +124,36 @@ class TestRegression:
         data_dir.mkdir(exist_ok=True)
         forcing_file = data_dir / "forcing_0.nc"
         forcing_memory.to_netcdf(forcing_file)
+        return forcing_file
+
+    @pytest.fixture
+    def forcing_common_memory(self, dimensions):
+        """Create forcing DataArray in memory."""
+        forcing_common_data = np.ones(
+            (dimensions["n_time"], dimensions["n_space"])
+        )
+
+        return xr.DataArray(
+            data=forcing_common_data,
+            dims=["time", "space"],
+            coords=dict(
+                space_coord=("space", dimensions["space"]),
+                time_coord=("time", dimensions["time"]),
+            ),
+            attrs=dict(
+                description="Common forcing.",
+                units="parsecs",
+            ),
+            name="forcing_common",
+        )
+
+    @pytest.fixture
+    def forcing_common_file(self, forcing_common_memory, tmp_path):
+        """Write forcing to file and return path."""
+        data_dir = tmp_path / "toy_model_1_data"
+        data_dir.mkdir(exist_ok=True)
+        forcing_file = data_dir / "forcing_common.nc"
+        forcing_common_memory.to_netcdf(forcing_file)
         return forcing_file
 
     # ============ INITIAL CONDITION FIXTURES ============
@@ -135,6 +172,7 @@ class TestRegression:
                 units="cumecs",
                 time=str(dimensions["time"][0]),
             ),
+            name="flow_ic",
         )
 
     @pytest.fixture
@@ -161,6 +199,7 @@ class TestRegression:
                 units="quibits",
                 time=str(dimensions["time"][0]),
             ),
+            name="storage_ic",
         )
 
     @pytest.fixture
@@ -188,6 +227,16 @@ class TestRegression:
             return forcing_memory
         else:
             return forcing_file
+
+    @pytest.fixture(params=["memory", "file"])
+    def forcing_common_data(
+        self, request, forcing_common_memory, forcing_common_file
+    ):
+        """Parameterized fixture returning either memory or file forcing."""
+        if request.param == "memory":
+            return forcing_common_memory
+        else:
+            return forcing_common_file
 
     @pytest.fixture(params=["memory", "file"])
     def flow_ic_data(self, request, flow_ic_memory, flow_ic_file):
@@ -307,6 +356,7 @@ class TestRegression:
         dimensions,
         parameters_data,
         forcing_data,
+        forcing_common_data,
         flow_ic_data,
         storage_ic_data,
         control_config,
@@ -318,11 +368,13 @@ class TestRegression:
             "upper": {
                 "class": Upper,
                 "forcing_0": forcing_data,
+                "forcing_common": forcing_common_data,
                 "flow_initial": flow_ic_data,
                 "parameters": parameters_data,
             },
             "lower": {
                 "class": Lower,
+                "forcing_common": forcing_common_data,
                 "storage_initial": storage_ic_data,
                 "parameters": parameters_data,
             },
@@ -332,14 +384,20 @@ class TestRegression:
         model = Model(process_dict, control_config)
         dt = np.float64(1.0)
 
-        # Store initial references for testing
-        initial_refs = {
-            "upper_flow_id": model.model_dict["upper"]["flow"].values,
-            "lower_storage_id": model.model_dict["lower"]["storage"].values,
-        }
-
         # Run model
         model.run(dt, np.int32(dimensions["n_time"]))
+
+        assert model.model_dict["upper"]["param_common"].values is (
+            model.model_dict["lower"]["param_common"].values
+        ), "Shared parameter references broken"
+
+        assert model.model_dict["upper"]["forcing_common"].values is (
+            model.model_dict["lower"]["forcing_common"].values
+        ), "Shared forcing data references broken"
+
+        assert model.model_dict["upper"]["flow"].values is (
+            model.model_dict["lower"]["flow"].values
+        ), "Shared internal forcing references broken"
 
         # Get expected results from answers fixture (computed only once)
         expected_flow = answers["expected_flow"]
@@ -347,7 +405,7 @@ class TestRegression:
         expected_storage = answers["expected_storage"]
         expected_storage_prev = answers["expected_storage_prev"]
 
-        # Test in-memory values against vectorized calculations
+        # Test final-time in-memory values against vectorized calculations
         np.testing.assert_allclose(
             model.model_dict["upper"]["flow"].values,
             expected_flow[-1, :],
@@ -376,9 +434,9 @@ class TestRegression:
             err_msg="Lower storage_previous values don't match vectorized calculation",
         )
 
-        # Test output NetCDF files
-        flow_da = xr.open_dataarray(control_config["output_dir"] / "flow.nc")
-        storage_prev_da = xr.open_dataarray(
+        # Test output NetCDF files against expected answers
+        flow_da = xr.load_dataarray(control_config["output_dir"] / "flow.nc")
+        storage_prev_da = xr.load_dataarray(
             control_config["output_dir"] / "storage_previous.nc"
         )
 
@@ -396,22 +454,3 @@ class TestRegression:
             rtol=1e-12,
             err_msg="Output storage_previous NetCDF doesn't match vectorized calculation",
         )
-
-        # Test that references are still valid after run
-        assert (
-            model.model_dict["upper"]["flow"].values
-            is initial_refs["upper_flow_id"]
-        ), "Upper flow reference changed during run"
-
-        assert (
-            model.model_dict["lower"]["storage"].values
-            is initial_refs["lower_storage_id"]
-        ), "Lower storage reference changed during run"
-
-        # Test cross-process references (Lower should reference Upper's flow)
-        assert model.model_dict["lower"]["flow"].values is (
-            model.model_dict["upper"]["flow"].values
-        ), "Lower process doesn't reference Upper's flow values"
-
-        flow_da.close()
-        storage_prev_da.close()

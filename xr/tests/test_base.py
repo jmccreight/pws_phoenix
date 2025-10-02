@@ -833,9 +833,6 @@ class TestModel:
         }
 
         model = Model(proc_dict, {})
-        repeated_paths = model._get_repeated_paths()
-        
-        
 
         # Test that repeated paths were detected by checking shared parameter DataArrays
         # Get the intersection of parameters from both processes
@@ -845,11 +842,11 @@ class TestModel:
 
         # For each shared parameter, verify the DataArrays are the same object
         for param_name in shared_params:
-            param1_data = model.model_dict["process1"][param_name]
-            param2_data = model.model_dict["process2"][param_name]
 
-            # Verify they are the same DataArray object in memory
-            assert param1_data is param2_data, (
+            assert (
+                model.model_dict["process1"][param_name]
+                is model.model_dict["process2"][param_name]
+            ), (
                 f"Parameter '{param_name}' should be the same DataArray object "
                 f"for repeated paths"
             )

@@ -11,8 +11,9 @@ parent_dir = (pl.Path("./") / __file__).resolve().parent.parent
 sys.path.append(str(parent_dir))
 from utils import timer  # noqa
 
+# NOTES:
+#     * dataarray.load() is dataarray.load().load()
 
-# TODO: pass through an option to load on open?
 # TODO: have get_variables and get_variable_names so a list of var names is
 #       easily accessible?
 # TODO: why does the time coord need passed around?
@@ -813,31 +814,42 @@ class Model:
         The inputs are in self.inputs_dict and the wired model is in
         self.model_dict.
         """
+        # self.inputs_dict is defined in __init__ and it holds the
+        # inputs/forcing to the model which come from outside/externally.
         for kk, vv in self._process_dict.items():
-            # get the process dict with the classes removed
+            # The init_dict is a process dict with the class removed, the
+            # remaining arguments are used to intitalize the class.
             init_dict = {kkk: vvv for kkk, vvv in vv.items() if kkk != "class"}
 
             inputs_req = vv["class"].get_inputs()
             input_outputs_req = vv["class"].get_input_outputs()
             all_inputs = inputs_req + input_outputs_req
+            # combine all inputs/input_outputs capturing external inputs (or
+            # input_outputs) into the self.inputs_dict which will be advanced.
+            # Check that no external inputs or input_outputs will be duplicated
+            # or overwritten, preserving the refs to the forcing across all
+            # processes.
             for ii in all_inputs:
                 if ii in init_dict.keys():
-                    # combine all inputs/input_outputs into a dict that will be
-                    # advanced
                     data_or_file = init_dict[ii]
                     if ii in inputs_req:
                         read_only = True
                     else:
                         raise ValueError("This should not happen from file.")
                     # <
-                    init_dict[ii] = Input(
-                        data_or_file,
-                        read_only=read_only,
-                        load=self._load_all,
-                    )
-                    self.inputs_dict[ii] = init_dict[ii]
-                    assert init_dict[ii].data is self.inputs_dict[ii].data
-                    del data_or_file
+                    # If any inputs are common across process, only instantiate
+                    # once
+                    if ii not in self.inputs_dict.keys():
+                        init_dict[ii] = Input(
+                            data_or_file,
+                            read_only=read_only,
+                            load=self._load_all,
+                        )
+                        self.inputs_dict[ii] = init_dict[ii]
+                        assert init_dict[ii].data is self.inputs_dict[ii].data
+                        del data_or_file
+                    else:
+                        init_dict[ii] = self.inputs_dict[ii]
 
                 else:
                     # inputs not in init_dict need to be found elsewhere in
@@ -846,9 +858,8 @@ class Model:
                         if ii in self.model_dict[pp].get_variables():
                             init_dict[ii] = self.model_dict[pp][ii]
 
-                # <<<
-                self.model_dict[kk] = vv["class"](**init_dict)
-                # TODO: test refs across processes
+            # <<<<
+            self.model_dict[kk] = vv["class"](**init_dict)
 
         return
 

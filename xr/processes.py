@@ -10,22 +10,24 @@ class Upper(Process):
         self,
         parameters: xr.Dataset,
         forcing_0: xr.DataArray,
+        forcing_common: xr.DataArray,
         flow_initial: xr.DataArray,
     ) -> None:
         super().__init__(
             parameters=parameters,
             forcing_0=forcing_0,
+            forcing_common=forcing_common,
             flow_initial=flow_initial,
         )
         return
 
     @staticmethod
     def get_parameters() -> Tuple[str, ...]:
-        return ("param_up_0", "param_up_1")
+        return ("param_up_0", "param_up_1", "param_common")
 
     @staticmethod
     def get_inputs() -> Tuple[str, ...]:
-        return ("forcing_0",)
+        return ("forcing_0", "forcing_common")
 
     @staticmethod
     def get_input_outputs() -> Tuple[str, ...]:
@@ -68,11 +70,13 @@ class Lower(Process):
     def __init__(
         self,
         parameters: xr.Dataset,
+        forcing_common: xr.DataArray,
         flow: xr.DataArray,
         storage_initial: xr.DataArray,
     ) -> None:
         super().__init__(
             parameters=parameters,
+            forcing_common=forcing_common,
             flow=flow,
             storage_initial=storage_initial,
         )
@@ -80,11 +84,11 @@ class Lower(Process):
 
     @staticmethod
     def get_parameters() -> Tuple[str, ...]:
-        return ("param_low_0",)
+        return ("param_low_0", "param_common")
 
     @staticmethod
     def get_inputs() -> Tuple[str, ...]:
-        return ("flow",)
+        return ("flow", "forcing_common")
 
     @staticmethod
     def get_input_outputs() -> Tuple[str, ...]:
