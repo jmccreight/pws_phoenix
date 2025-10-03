@@ -417,11 +417,9 @@ class TestRegression:
         }
 
         # Create model - this should work with both memory and file inputs
-        model = Model(process_dict, control_config)
         dt = np.float64(1.0)
-
-        # Run model
-        model.run(dt, np.int32(dimensions["n_time"]))
+        with Model(process_dict, control_config) as model:
+            model.run(dt, np.int32(dimensions["n_time"]))
 
         assert model.model_dict["upper"]["param_common"].values is (
             model.model_dict["lower"]["param_common"].values

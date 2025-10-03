@@ -690,11 +690,23 @@ class Model:
     Design principle: All file I/O happens during initialization. Processes
     operate on in-memory xarray objects during simulation for performance.
 
+    Supports context manager protocol for automatic resource cleanup.
+
     Attributes:
         inputs_dict: Dictionary of Input objects for time-varying input data
         model_dict: Dictionary of initialized process instances
         output: Optional Output manager for writing results
 
+    Example:
+        >>> # Using context manager (recommended)
+        >>> with Model(process_dict, control) as model:
+        ...     model.run(dt=1.0, n_steps=365)
+        >>> # Files automatically closed
+
+        >>> # Using explicit finalize
+        >>> model = Model(process_dict, control)
+        >>> model.run(dt=1.0, n_steps=365)
+        >>> model.finalize()  # Close all file handles
 
     """
 
@@ -747,6 +759,10 @@ class Model:
         self._passed_process_dict = process_dict
         self._process_dict = deepcopy(process_dict)
 
+        # Track files opened by this Model for cleanup
+        self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
+        self._finalized = False
+
         # Set load_all option
         if load_all is None:
             self._load_all = control.get("load_all", False)
@@ -758,7 +774,7 @@ class Model:
         # wire up the model
         self.model_dict: Dict[str, Process] = {}
         self.inputs_dict: Dict[str, Input] = {}
-        self._initialize_inputs_and_processess()
+        self._initialize_inputs_and_proceses()
         del self._process_dict
 
         self._set_time()
@@ -818,16 +834,18 @@ class Model:
             load_all: load data of all xarray objects instantiated.
 
         """
-        repeated_paths = self._load_shared_data_files(load_all=load_all)
+        shared_data_files = self._load_shared_data_files(load_all=load_all)
         for proc_name in self._process_dict.keys():
             proc = self._process_dict[proc_name]
             for input_key in proc.keys():
                 input_val = proc[input_key]
                 if isinstance(input_val, pl.Path):
-                    if input_val in repeated_paths.keys():
-                        proc[input_key] = repeated_paths[input_val]
+                    if input_val in shared_data_files.keys():
+                        proc[input_key] = shared_data_files[input_val]
                     else:
-                        proc[input_key] = open_xr(input_val, load=load_all)
+                        opened = open_xr(input_val, load=load_all)
+                        proc[input_key] = opened
+                        self._opened_files.append(opened)
 
         return
 
@@ -850,15 +868,17 @@ class Model:
                 if isinstance(inner_val, pl.Path):
                     flat_proc_dict_paths.append(inner_val)
 
-        repeated_paths_list = [
+        shared_data_files_list = [
             kk for kk, vv in Counter(flat_proc_dict_paths).items() if vv > 1
         ]
-        repeated_paths_data = {
-            kk: open_xr(kk, load=load_all) for kk in repeated_paths_list
-        }
-        return repeated_paths_data
+        shared_data_files_data = {}
+        for kk in shared_data_files_list:
+            opened = open_xr(kk, load=load_all)
+            shared_data_files_data[kk] = opened
+            self._opened_files.append(opened)
+        return shared_data_files_data
 
-    def _initialize_inputs_and_processess(self) -> None:
+    def _initialize_inputs_and_proceses(self) -> None:
         """Initialize Input and Process objects, wire dependencies.
 
         Initialize inputs and processes wiring processes to preceeding
@@ -985,7 +1005,16 @@ class Model:
             dt: Time step size for the simulation.
             n_steps: Number of time steps to run.
             verbose: If True, print debug information at each time step.
+
+        Note:
+            Consider using the Model as a context manager or call finalize()
+            after run() to ensure proper resource cleanup.
         """
+        if self._finalized:
+            raise RuntimeError(
+                "Cannot run a finalized Model. Create a new Model instance."
+            )
+
         for tt in range(n_steps):
             # Update both time tracking arrays
             self.current_time_index[0] = tt
@@ -1006,8 +1035,60 @@ class Model:
                 print(f"{self.model_dict['lower']['flow']=}")
                 print(f"{self.model_dict['lower']['storage']=}")
 
-        # Finalize output if provided
-        # TODO: potentially separate to a finalize method.
+        return
+
+    def finalize(self) -> None:
+        """Close all file handles opened during model initialization.
+
+        Closes xarray objects that were opened from files during initialization.
+        Objects provided as in-memory DataArrays/Datasets by the user are not
+        closed. Also finalizes the Output object if present.
+
+        Note:
+            Should be called after Model.run() completes. After calling this,
+            the model cannot be run again.
+        """
+        if self._finalized:
+            return
+
+        # Close Input objects that opened files
+        for input_obj in self.inputs_dict.values():
+            input_obj.close()
+
+        # Close any files we explicitly tracked
+        for opened_file in self._opened_files:
+            opened_file.close()
+
+        # Finalize output if it exists
         if self.output is not None:
             self.output.finalize()
+
+        self._finalized = True
         return
+
+    def __enter__(self) -> "Model":
+        """Context manager entry.
+
+        Returns:
+            Self for use in with statement.
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> bool:
+        """Context manager exit - cleanup resources.
+
+        Args:
+            exc_type: Exception type if an exception occurred.
+            exc_val: Exception value if an exception occurred.
+            exc_tb: Exception traceback if an exception occurred.
+
+        Returns:
+            False to propagate any exception that occurred.
+        """
+        self.finalize()
+        return False

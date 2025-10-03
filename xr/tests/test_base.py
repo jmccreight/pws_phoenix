@@ -835,11 +835,62 @@ class TestModel:
 
             # Check that output was collected for each time step
             assert mock_collect.call_count == 3
-            mock_finalize.assert_called_once()
 
             # Check that collect_current_timestep was called with correct time indices
             expected_calls = [((0,),), ((1,),), ((2,),)]
             assert mock_collect.call_args_list == expected_calls
+
+            # Finalize the model (complete workflow)
+            model.finalize()
+            mock_finalize.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "use_context_manager,with_output,raise_exception",
+        [
+            (False, True, False),
+            (False, False, False),
+            (True, True, False),
+            (True, True, True),
+        ],
+    )
+    def test_finalize_and_context_manager(
+        self,
+        sample_process_dict,
+        sample_control_config,
+        use_context_manager,
+        with_output,
+        raise_exception,
+    ):
+        """Test Model.finalize() and context manager with various scenarios."""
+        control = sample_control_config if with_output else {}
+
+        model = Model(sample_process_dict, control)
+        if use_context_manager:
+            # Test context manager path
+            try:
+                with model as model:
+                    assert model._finalized is False
+                    model.run(dt=np.float64(1.0), n_steps=np.int32(3))
+                    if raise_exception:
+                        raise ValueError("Test exception")
+            except ValueError:
+                pass
+        else:
+            # Test explicit finalize path
+            assert model._finalized is False
+            model.run(dt=np.float64(1.0), n_steps=np.int32(3))
+            model.finalize()
+
+        # All paths should result in finalized model
+        assert model._finalized is True
+        for input_obj in model.inputs_dict.values():
+            assert input_obj._closed is True
+
+        # Test idempotency and cannot re-run
+        model.finalize()
+        assert model._finalized is True
+        with pytest.raises(RuntimeError, match="Cannot run a finalized Model"):
+            model.run(dt=np.float64(1.0), n_steps=np.int32(1))
 
     def test_get_repeated_paths(self, tmp_path):
         """Test the _get_repeated_paths method with actual repeated paths."""
