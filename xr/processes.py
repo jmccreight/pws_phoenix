@@ -30,7 +30,7 @@ class Upper(Process):
         return ("forcing_0", "forcing_common")
 
     @staticmethod
-    def get_input_outputs() -> Tuple[str, ...]:
+    def get_mutable_inputs() -> Tuple[str, ...]:
         return ()
 
     @staticmethod
@@ -91,7 +91,7 @@ class Lower(Process):
         return ("flow", "forcing_common")
 
     @staticmethod
-    def get_input_outputs() -> Tuple[str, ...]:
+    def get_mutable_inputs() -> Tuple[str, ...]:
         return ()
 
     @staticmethod

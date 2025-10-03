@@ -159,7 +159,7 @@ class MockProcess(Process):
         return ("input1",)
 
     @staticmethod
-    def get_input_outputs():
+    def get_mutable_inputs():
         return ()
 
     @staticmethod
@@ -260,8 +260,8 @@ class TestProcess:
         # Check that private variables are created
         assert "private_var" in process.data
 
-    def test_var_from_metadata(self, sample_parameters):
-        """Test the _var_from_metadata method."""
+    def test_init_var_from_metadata(self, sample_parameters):
+        """Test the _init_var_from_metadata method."""
         input_obj = Input(xr.DataArray([[1, 2, 3]], dims=["time", "space"]))
 
         process = MockProcess(
@@ -279,7 +279,7 @@ class TestProcess:
         }
         test_initial = xr.DataArray([10.0, 20.0, 30.0], dims=["space"])
 
-        result = process._var_from_metadata(
+        result = process._init_var_from_metadata(
             var_metadata, test_initial=test_initial
         )
 
@@ -324,7 +324,7 @@ class TestProcess:
             Process.get_inputs()
 
         with pytest.raises(NotImplementedError):
-            Process.get_input_outputs()
+            Process.get_mutable_inputs()
 
         with pytest.raises(NotImplementedError):
             Process.get_variables()
@@ -368,7 +368,7 @@ class TestOutput:
         assert output.current_time_step == 0
         assert output.chunk_start_time == 0
 
-    def test_setup_variable_tracking(
+    def test_initialize_variable_tracking(
         self, tmp_path, sample_time_ref, sample_time_datum
     ):
         """Test variable tracking setup."""
@@ -394,7 +394,7 @@ class TestOutput:
             time_datum=sample_time_datum,
         )
 
-        output.setup_variable_tracking(model_dict)  # type: ignore
+        output.initialize_variable_tracking(model_dict)  # type: ignore
 
         # Check that variables are tracked
         assert "var1" in output.variable_refs
@@ -413,7 +413,7 @@ class TestOutput:
         assert (output_dir / "var2.nc").exists()
         assert output.files_initialized is True
 
-    def test_setup_variable_tracking_missing_variable(
+    def test_initialize_variable_tracking_missing_variable(
         self, tmp_path, sample_time_ref, sample_time_datum
     ):
         """Test that setup raises error for missing variables."""
@@ -443,9 +443,9 @@ class TestOutput:
         with pytest.raises(
             ValueError, match="Variable 'missing_var' not found"
         ):
-            output.setup_variable_tracking(model_dict)  # type: ignore
+            output.initialize_variable_tracking(model_dict)  # type: ignore
 
-    def test_collect_timestep(
+    def test_collect_current_timestep(
         self, tmp_path, sample_time_ref, sample_time_datum
     ):
         """Test timestep data collection."""
@@ -479,11 +479,11 @@ class TestOutput:
             time_datum=sample_time_datum,
         )
 
-        output.setup_variable_tracking(model_dict)  # type: ignore
+        output.initialize_variable_tracking(model_dict)  # type: ignore
 
         for tt in range(time_chunk_size):
             tv_data.advance()
-            output.collect_timestep(tt)
+            output.collect_current_timestep(tt)
 
         assert np.all(
             output.data_buffers["var1"].ravel()
@@ -492,7 +492,7 @@ class TestOutput:
 
         for tt in range(time_chunk_size, ntime):
             tv_data.advance()
-            output.collect_timestep(tt)
+            output.collect_current_timestep(tt)
 
         assert np.all(
             output.data_buffers["var1"][0 : ntime - time_chunk_size, :].ravel()
@@ -584,7 +584,7 @@ class TestOutput:
             time_datum=sample_time_datum,
         )
 
-        output.setup_variable_tracking(model_dict)  # type: ignore[arg-type]
+        output.initialize_variable_tracking(model_dict)  # type: ignore[arg-type]
 
         # Manually set some data in buffer (simulating partial chunk)
         expected_data = np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]])
@@ -680,8 +680,8 @@ class TestModel:
 
         assert model.output is None
 
-    def test_paths_to_data_proc_dict_and_load_all(self, tmp_path):
-        """Test _paths_to_data_proc_dict method and load_all."""
+    def test_load_paths_to_data_and_load_all(self, tmp_path):
+        """Test _load_paths_to_data method and load_all."""
         # Create test files with actual NetCDF data
         forcing_file = tmp_path / "forcing.nc"
         forcing_data = xr.DataArray(
@@ -773,7 +773,9 @@ class TestModel:
             patch.object(
                 model.model_dict["mock_process"], "calculate"
             ) as mock_calculate,
-            patch.object(model.output, "collect_timestep") as mock_collect,
+            patch.object(
+                model.output, "collect_current_timestep"
+            ) as mock_collect,
             patch.object(model.output, "finalize") as mock_finalize,
         ):
             model.run(dt, n_time_steps)
@@ -790,7 +792,7 @@ class TestModel:
             assert mock_collect.call_count == 3
             mock_finalize.assert_called_once()
 
-            # Check that collect_timestep was called with correct time indices
+            # Check that collect_current_timestep was called with correct time indices
             expected_calls = [((0,),), ((1,),), ((2,),)]
             assert mock_collect.call_args_list == expected_calls
 

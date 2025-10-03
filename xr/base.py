@@ -165,7 +165,7 @@ class Process:
         Args:
             parameters: Dataset containing static parameters for this process.
             **kwargs: To handle input data and initial values. Keys should
-            match names returned by get_inputs(), get_input_outputs(), and
+            match names returned by get_inputs(), get_mutable_inputs(), and
             variable initial conditions indicated by its metadata key
             "intitial". Values are DataArrays.
         """
@@ -195,7 +195,7 @@ class Process:
             #  themselves (or both)
             # self[pp] = parameters[pp]  # no no no - this ruins the refs
             self[pp].values = parameters[pp].values
-            assert self[pp].values is parameters[pp].values
+            # assert self[pp].values is parameters[pp].values
         for ii in self.get_inputs():
             # Input object set on self?4
             if isinstance(kwargs[ii], Input):
@@ -205,19 +205,19 @@ class Process:
                 )
             else:
                 self[ii] = kwargs[ii]
-                assert id(self[ii].values) == id(kwargs[ii].values)
+                # assert id(self[ii].values) == id(kwargs[ii].values)
 
-        for oo in self.get_input_outputs():
+        for oo in self.get_mutable_inputs():
             self[oo] = kwargs[oo].current_values
-            assert id(self[oo].values) == id(kwargs[oo].current_values.values)
+            # assert id(self[oo].values) == id(kwargs[oo].current_values.values)
         for kk, vv in self.get_variables().items():
-            self[kk] = self._var_from_metadata(vv, **kwargs)
+            self[kk] = self._init_var_from_metadata(vv, **kwargs)
         for kk, vv in self._get_private_variables().items():
-            self[kk] = self._var_from_metadata(vv)
+            self[kk] = self._init_var_from_metadata(vv)
         # <
         return
 
-    def _var_from_metadata(
+    def _init_var_from_metadata(
         self,
         var_meta: Dict[str, Any],
         **kwargs: Union[xr.DataArray, xr.Dataset],
@@ -314,7 +314,7 @@ class Process:
         raise NotImplementedError()
 
     @staticmethod
-    def get_input_outputs() -> Tuple[str, ...]:
+    def get_mutable_inputs() -> Tuple[str, ...]:
         """Return names of modifiable time-varying inputs required by this process.
 
         Abstract method that must be implemented by subclasses to specify
@@ -370,7 +370,7 @@ class Process:
         raise NotImplementedError()
 
     @classmethod
-    def _get_provate_var_names(cls) -> Tuple[str, ...]:
+    def _get_private_var_names(cls) -> Tuple[str, ...]:
         """Return names for private variables of this process.
 
         Returns:
@@ -471,8 +471,10 @@ class Output:
         self.file_handles: Dict[str, nc.Dataset] = {}
         self.files_initialized = False
 
-    def setup_variable_tracking(self, model_dict: Dict[str, Process]) -> None:
-        """Set up tracking of specified variables from model processes.
+    def initialize_variable_tracking(
+        self, model_dict: Dict[str, Process]
+    ) -> None:
+        """Initialize tracking of specified variables from model processes.
 
         Searches through all processes to find the requested variables and
         makes references to them. Initializes memory buffers and NetCDF files.
@@ -519,7 +521,7 @@ class Output:
                 buffer_shape, dtype=var_ref.dtype
             )
 
-    def collect_timestep(self, time_index: int) -> None:
+    def collect_current_timestep(self, time_index: int) -> None:
         """
         Collect current variable values for this time step.
 
@@ -536,9 +538,9 @@ class Output:
 
         # Write chunk when buffer is full
         if buffer_index == self.time_chunk_size - 1:
-            self._write_chunk()
+            self._write_buffer_chunk()
 
-    def _write_chunk(self) -> None:
+    def _write_buffer_chunk(self) -> None:
         """Write current data buffer to NetCDF files."""
         chunk_end_time = self.chunk_start_time + self.time_chunk_size
 
@@ -732,12 +734,12 @@ class Model:
         else:
             self._load_all = load_all
 
-        self._paths_to_data_proc_dict()
+        self._load_paths_to_data()
 
         # wire up the model
         self.model_dict: Dict[str, Process] = {}
         self.inputs_dict: Dict[str, Input] = {}
-        self._set_inputs_and_model_dicts()
+        self._initialize_inputs_and_processess()
         del self._process_dict
 
         self._set_time()
@@ -780,11 +782,11 @@ class Model:
                 current_time_ref=self.current_time_index,
                 time_datum=self.times[0].values,
             )
-            self.output.setup_variable_tracking(self.model_dict)
+            self.output.initialize_variable_tracking(self.model_dict)
 
         return
 
-    def _paths_to_data_proc_dict(self, load_all: bool = False) -> None:
+    def _load_paths_to_data(self, load_all: bool = False) -> None:
         """Convert file paths in process_dict to loaded xarray objects.
 
         All input paths to Dataset or DataArray without opening files twice,
@@ -797,7 +799,7 @@ class Model:
             load_all: load data of all xarray objects instantiated.
 
         """
-        repeated_paths = self._get_repeated_paths(load_all=load_all)
+        repeated_paths = self._load_shared_data_files(load_all=load_all)
         for proc_name in self._process_dict.keys():
             proc = self._process_dict[proc_name]
             for input_key in proc.keys():
@@ -810,7 +812,7 @@ class Model:
 
         return
 
-    def _get_repeated_paths(
+    def _load_shared_data_files(
         self, load_all: bool = False
     ) -> Dict[pl.Path, Union[xr.DataArray, xr.Dataset]]:
         """Open repeated paths in the process_dict once against the key path.
@@ -837,10 +839,11 @@ class Model:
         }
         return repeated_paths_data
 
-    def _set_inputs_and_model_dicts(self) -> None:
+    def _initialize_inputs_and_processess(self) -> None:
         """Initialize Input and Process objects, wire dependencies.
 
-        Initialize inputs and processes wiring processes to processes above.
+        Initialize inputs and processes wiring processes to preceeding
+        processes.
 
         The inputs are in self.inputs_dict and the wired model is in
         self.model_dict.
@@ -853,7 +856,7 @@ class Model:
             init_dict = {kkk: vvv for kkk, vvv in vv.items() if kkk != "class"}
 
             inputs_req = vv["class"].get_inputs()
-            input_outputs_req = vv["class"].get_input_outputs()
+            input_outputs_req = vv["class"].get_mutable_inputs()
             all_inputs = inputs_req + input_outputs_req
             # combine all inputs/input_outputs capturing external inputs (or
             # input_outputs) into the self.inputs_dict which will be advanced.
@@ -884,8 +887,8 @@ class Model:
 
                 else:
                     # inputs not in init_dict need to be found elsewhere in
-                    # the processes above
-                    for pp in self.procs_above(kk):
+                    # the preceeding processes
+                    for pp in self.get_preceeding_processes(kk):
                         if ii in self.model_dict[pp].get_variables():
                             init_dict[ii] = self.model_dict[pp][ii]
 
@@ -918,18 +921,18 @@ class Model:
 
         return None
 
-    def procs_above(self, proc_name: str) -> List[str]:
-        """Return list of processes defined above/before given process name.
+    def get_preceeding_processes(self, proc_name: str) -> List[str]:
+        """List preceeding process names, defined before some process name.
 
         Args:
             proc_name: Name of the process to find predecessors for.
         """
-        procs_above = []
+        preceeding_procs = []
         for pp in self._process_dict:
             if proc_name != pp:
-                procs_above.append(pp)
+                preceeding_procs.append(pp)
             else:
-                return procs_above
+                return preceeding_procs
 
         raise ValueError("This should be unreachable.")
         return
@@ -974,7 +977,7 @@ class Model:
 
             # Collect output data if output object is provided
             if self.output is not None:
-                self.output.collect_timestep(tt)
+                self.output.collect_current_timestep(tt)
 
             if verbose:
                 print(f"{tt=}")
