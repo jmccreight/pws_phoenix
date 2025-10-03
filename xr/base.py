@@ -16,7 +16,6 @@ from utils import timer  # noqa
 
 # TODO: have get_variables and get_variable_names so a list of var names is
 #       easily accessible?
-# TODO: why does the time coord need passed around?
 # TODO: read the output class in-depth
 # TODO: review all TODOs scattered in the code.
 # TODO: Output: can we collect the memory over all inputs and processes to
@@ -25,7 +24,6 @@ from utils import timer  # noqa
 #       a user requested max memory, then solve:
 #       time_chunk_size = (max - (process + init)) / buffer_per_time
 #       and then round down slightly.
-# TODO: what are the keys on the model dict, just from the passed model dict?
 
 
 def open_xr(
@@ -185,7 +183,13 @@ class Process:
         self.data = parameters[list(self.get_parameters())]
         # parameters
         for pp in self.get_parameters():
-            # in this case we want read-only refs.
+            # In this case we want read-only refs.
+            # It is actually debatable if we want refs. The upside is that
+            # parameters cant be changed by users. The minor downside is that
+            # if parameters are supplied in memory, their attributes are
+            # changed to make them read-only.
+            if parameters[pp].values.flags.writeable:
+                parameters[pp].values.flags.writeable = False
             # THIS IS THE MOST MYSTIFYING/OBSCURE USE OF REFERENCES.
             # Apparently a copy above happens. The ONLY thing that works is
             # replacing the values in the DataArrays and not the DataArrays
@@ -204,7 +208,6 @@ class Process:
                 self[ii] = kwargs[ii]
                 assert id(self[ii].values) == id(kwargs[ii].values)
 
-            # TODO write a test for the above references
         for oo in self.get_input_outputs():
             self[oo] = kwargs[oo].current_values
             assert id(self[oo].values) == id(kwargs[oo].current_values.values)
@@ -330,14 +333,14 @@ class Process:
         # is a bit clearer.
         raise NotImplementedError()
 
-    @staticmethod
-    def get_var_names() -> Tuple[str, ...]:
+    @classmethod
+    def get_var_names(cls) -> Tuple[str, ...]:
         """Return names for public variables of this process.
 
         Returns:
             Tuple of variable names.
         """
-        return tuple(Process.get_variables().keys())
+        return tuple(cls.get_variables().keys())
 
     @staticmethod
     def _get_private_variables() -> Dict[str, Dict[str, Any]]:
@@ -353,6 +356,15 @@ class Process:
         # TODO: improve the inner Dict[str, Any] typehint once the definition
         # is a bit clearer.
         raise NotImplementedError()
+
+    @classmethod
+    def _get_provate_var_names(cls) -> Tuple[str, ...]:
+        """Return names for private variables of this process.
+
+        Returns:
+            Tuple of variable names.
+        """
+        return tuple(cls._get_private_variables().keys())
 
     def advance(self) -> None:
         raise NotImplementedError()
@@ -765,10 +777,6 @@ class Model:
                         proc[input_key] = repeated_paths[input_val]
                     else:
                         proc[input_key] = open_xr(input_val, load=load_all)
-
-                if input_key == "parameters":
-                    for vv in proc[input_key].keys():
-                        proc[input_key][vv].values.flags.writeable = False
 
         return
 

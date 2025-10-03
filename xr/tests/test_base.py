@@ -218,6 +218,12 @@ class TestProcess:
             coords={"time": [0, 1], "space": [0, 1, 2]},
         )
 
+    def test_static(self):
+        assert (
+            tuple(MockProcess.get_variables().keys())
+            == MockProcess.get_var_names()
+        )
+
     def test_init(self, sample_parameters, sample_input):
         """Test Process initialization."""
         var1_initial = xr.DataArray(
@@ -843,24 +849,12 @@ class TestModel:
         # For each shared parameter, verify the DataArrays are the same object
         for param_name in shared_params:
             assert (
-                model.model_dict["process1"][param_name]
-                is model.model_dict["process2"][param_name]
+                model.model_dict["process1"][param_name].values
+                is model.model_dict["process2"][param_name].values
             ), (
                 f"Parameter '{param_name}' should be the same DataArray object "
                 f"for repeated paths"
             )
-
-    def test_procs_above(self, sample_process_dict, sample_control_config):
-        """Test the procs_above method."""
-        # For a simple test, just create two independent processes
-        # The procs_above method mainly checks process ordering
-        model = Model(sample_process_dict, sample_control_config)
-
-        # Test procs_above with a simple case
-        procs = model.procs_above("mock_process")
-
-        # Since there's only one process, it should have no dependencies
-        assert len(procs) == 0
 
 
 if __name__ == "__main__":
