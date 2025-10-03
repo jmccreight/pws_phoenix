@@ -16,7 +16,6 @@ from utils import timer  # noqa
 
 # TODO: have get_variables and get_variable_names so a list of var names is
 #       easily accessible?
-# TODO: read the output class in-depth
 # TODO: review all TODOs scattered in the code.
 # TODO: Output: can we collect the memory over all inputs and processes to
 #       estimate total memory usage (will not include local/temp vars), add
@@ -35,7 +34,7 @@ def open_xr(
     the file contents.
     Args:
         path: Path to the NetCDF file to open.
-        load_all: Load all variables in the returned object.
+        load: Load all variables in the returned object.
 
     Returns:
         DataArray if file contains exactly one data variable, otherwise
@@ -262,16 +261,29 @@ class Process:
         return da
 
     def __getitem__(self, name: str) -> xr.DataArray:
-        """Access DataArrays from the internal Dataset by variable name."""
+        """Access DataArrays from the internal Dataset by variable name.
+
+        Args:
+            name: Variable name to retrieve from the Dataset.
+        """
         return self.data[name]
 
     def __setitem__(self, name: str, value: xr.DataArray) -> None:
-        """Add or update DataArray in the internal Dataset."""
+        """Add or update DataArray in the internal Dataset.
+
+        Args:
+            name: Variable name to set in the Dataset.
+            value: DataArray to store at the specified name.
+        """
         self.data[name] = value
         return
 
     def __delitem__(self, name: str) -> None:
-        """Remove DataArray from the internal Dataset."""
+        """Remove DataArray from the internal Dataset.
+
+        Args:
+            name: Variable name to remove from the Dataset.
+        """
         del self.data[name]
         return
 
@@ -367,9 +379,22 @@ class Process:
         return tuple(cls._get_private_variables().keys())
 
     def advance(self) -> None:
+        """Advance process to next time step.
+
+        Abstract method that must be implemented by subclasses to handle
+        time-stepping logic for the process.
+        """
         raise NotImplementedError()
 
     def calculate(self, dt: np.float64) -> None:
+        """Perform calculations for the current time step.
+
+        Abstract method that must be implemented by subclasses to perform
+        the process's computational logic.
+
+        Args:
+            dt: Time step size for the calculation.
+        """
         raise NotImplementedError()
 
 
@@ -548,7 +573,12 @@ class Output:
     def _initialize_netcdf_file(
         self, var_name: str, file_path: pl.Path
     ) -> None:
-        """Initialize NetCDF file structure for a variable."""
+        """Initialize NetCDF output file structure for a variable.
+
+        Args:
+            var_name: Name of the variable to initialize.
+            file_path: Path where the NetCDF file should be created.
+        """
         var_ref = self.variable_refs[var_name]
 
         with nc.Dataset(file_path, "w") as ncfile:
@@ -787,6 +817,9 @@ class Model:
 
         This is intended to work with parameter files or forcing files specified
         across multiple processes.
+
+        Args:
+            load_all: Load data of all xarray objects instantiated.
         """
         from collections import Counter
 
@@ -886,7 +919,11 @@ class Model:
         return None
 
     def procs_above(self, proc_name: str) -> List[str]:
-        """Return list of processes defined above/before given process name."""
+        """Return list of processes defined above/before given process name.
+
+        Args:
+            proc_name: Name of the process to find predecessors for.
+        """
         procs_above = []
         for pp in self._process_dict:
             if proc_name != pp:
@@ -907,7 +944,11 @@ class Model:
         return
 
     def calculate(self, dt: np.float64) -> None:
-        """Execute calculations for all processes at current time step."""
+        """Execute calculations for all processes at current time step.
+
+        Args:
+            dt: Time step size for the calculation.
+        """
         for vv in self.model_dict.values():
             vv.calculate(dt)
         # <
@@ -916,7 +957,13 @@ class Model:
     def run(
         self, dt: np.float64, n_steps: np.int32, verbose: bool = False
     ) -> None:
-        """Execute simulation for specified time steps and finalize."""
+        """Execute simulation for specified time steps and finalize.
+
+        Args:
+            dt: Time step size for the simulation.
+            n_steps: Number of time steps to run.
+            verbose: If True, print debug information at each time step.
+        """
         for tt in range(n_steps):
             # Update both time tracking arrays
             self.current_time_index[0] = tt
