@@ -212,47 +212,81 @@ class TestRegression:
         return storage_ic_file
 
     # ============ PARAMETERIZED DATA FIXTURES ============
-    @pytest.fixture(params=["memory", "file"])
-    def parameters_data(self, request, parameters_memory, parameters_file):
-        """Parameterized fixture returning either memory or file parameters."""
-        if request.param == "memory":
-            return parameters_memory
-        else:
-            return parameters_file
+    # Not sure we need to test every combo of these. I'll leave these here
+    # until I am sure.
+    # @pytest.fixture(params=["memory", "file"])
+    # def parameters_data(self, request, parameters_memory, parameters_file):
+    #     """Parameterized fixture returning either memory or file parameters."""
+    #     if request.param == "memory":
+    #         return parameters_memory
+    #     else:
+    #         return parameters_file
+
+    # @pytest.fixture(params=["memory", "file"])
+    # def forcing_data(self, request, forcing_memory, forcing_file):
+    #     """Parameterized fixture returning either memory or file forcing."""
+    #     if request.param == "memory":
+    #         return forcing_memory
+    #     else:
+    #         return forcing_file
+
+    # @pytest.fixture(params=["memory", "file"])
+    # def forcing_common_data(
+    #     self, request, forcing_common_memory, forcing_common_file
+    # ):
+    #     """Parameterized fixture returning either memory or file forcing."""
+    #     if request.param == "memory":
+    #         return forcing_common_memory
+    #     else:
+    #         return forcing_common_file
+
+    # @pytest.fixture(params=["memory", "file"])
+    # def flow_ic_data(self, request, flow_ic_memory, flow_ic_file):
+    #     """Parameterized fixture returning either memory or file flow IC."""
+    #     if request.param == "memory":
+    #         return flow_ic_memory
+    #     else:
+    #         return flow_ic_file
+
+    # @pytest.fixture(params=["memory", "file"])
+    # def storage_ic_data(self, request, storage_ic_memory, storage_ic_file):
+    #     """Parameterized fixture returning either memory or file storage IC."""
+    #     if request.param == "memory":
+    #         return storage_ic_memory
+    #     else:
+    #         return storage_ic_file
 
     @pytest.fixture(params=["memory", "file"])
-    def forcing_data(self, request, forcing_memory, forcing_file):
-        """Parameterized fixture returning either memory or file forcing."""
-        if request.param == "memory":
-            return forcing_memory
-        else:
-            return forcing_file
-
-    @pytest.fixture(params=["memory", "file"])
-    def forcing_common_data(
-        self, request, forcing_common_memory, forcing_common_file
+    def data_as_memory_or_file(
+        self,
+        request,
+        parameters_memory,
+        parameters_file,
+        forcing_memory,
+        forcing_file,
+        forcing_common_memory,
+        forcing_common_file,
+        flow_ic_memory,
+        flow_ic_file,
+        storage_ic_memory,
+        storage_ic_file,
     ):
-        """Parameterized fixture returning either memory or file forcing."""
         if request.param == "memory":
-            return forcing_common_memory
+            return {
+                "parameters": parameters_memory,
+                "forcing": forcing_memory,
+                "forcing_common": forcing_common_memory,
+                "flow_ic": flow_ic_memory,
+                "storage_ic": storage_ic_memory,
+            }
         else:
-            return forcing_common_file
-
-    @pytest.fixture(params=["memory", "file"])
-    def flow_ic_data(self, request, flow_ic_memory, flow_ic_file):
-        """Parameterized fixture returning either memory or file flow IC."""
-        if request.param == "memory":
-            return flow_ic_memory
-        else:
-            return flow_ic_file
-
-    @pytest.fixture(params=["memory", "file"])
-    def storage_ic_data(self, request, storage_ic_memory, storage_ic_file):
-        """Parameterized fixture returning either memory or file storage IC."""
-        if request.param == "memory":
-            return storage_ic_memory
-        else:
-            return storage_ic_file
+            return {
+                "parameters": parameters_file,
+                "forcing": forcing_file,
+                "forcing_common": forcing_common_file,
+                "flow_ic": flow_ic_file,
+                "storage_ic": storage_ic_file,
+            }
 
     # ============ CONTROL FIXTURES ============
     @pytest.fixture
@@ -354,16 +388,18 @@ class TestRegression:
     def test_model_regression(
         self,
         dimensions,
-        parameters_data,
-        forcing_data,
-        forcing_common_data,
-        flow_ic_data,
-        storage_ic_data,
+        data_as_memory_or_file,
         control_config,
         answers,
     ):
         """Comprehensive regression test with parameterized memory/file inputs."""
         # Setup process dictionary with parameterized data
+        parameters_data = data_as_memory_or_file["parameters"]
+        forcing_data = data_as_memory_or_file["forcing"]
+        forcing_common_data = data_as_memory_or_file["forcing_common"]
+        flow_ic_data = data_as_memory_or_file["flow_ic"]
+        storage_ic_data = data_as_memory_or_file["storage_ic"]
+
         process_dict: Dict[str, Dict[str, Any]] = {
             "upper": {
                 "class": Upper,
