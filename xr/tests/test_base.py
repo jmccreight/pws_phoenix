@@ -146,6 +146,51 @@ class TestInput:
         current = input_obj.current_values
         np.testing.assert_array_equal(current.values, [1, 2, 3])
 
+    @pytest.mark.parametrize(
+        "input_source,load",
+        [
+            ("file", False),
+            ("file", True),
+            ("dataarray", False),
+            ("dataarray", True),
+        ],
+    )
+    def test_close(
+        self,
+        sample_file,
+        sample_dataarray,
+        input_source,
+        load,
+    ):
+        """Test close behavior with different input sources and load options."""
+        # Create Input based on source type
+        if input_source == "file":
+            input_obj = Input(sample_file, load=load)
+            expected_input_file = sample_file
+        else:  # dataarray
+            input_obj = Input(sample_dataarray, load=load)
+            expected_input_file = None
+
+        # Verify initial state
+        assert input_obj._input_file == expected_input_file
+        assert input_obj._closed is False
+
+        # Verify data is accessible before close
+        input_obj.advance()
+        assert input_obj.current_values is not None
+
+        # Call close
+        input_obj.close()
+
+        # Verify closed flag is set
+        assert input_obj._closed is True
+
+        # Test idempotency - close can be called multiple times safely
+        input_obj.close()
+        assert input_obj._closed is True
+        input_obj.close()
+        assert input_obj._closed is True
+
 
 class MockProcess(Process):
     """Mock Process class for testing."""

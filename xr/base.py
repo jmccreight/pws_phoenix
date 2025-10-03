@@ -68,8 +68,9 @@ class Input:
         >>> from pathlib import Path
         >>> # From file
         >>> forcing = Input(Path("forcing_data.nc"))
-        >>> forcing.advance()  # Move to first time step
-        >>> current = forcing.current_values  # Get current time slice
+        >>> forcing.advance()
+        >>> current = forcing.current_values
+        >>> forcing.close()  # Close file handle when done
 
         >>> # From DataArray
         >>> data = xr.DataArray(
@@ -115,6 +116,7 @@ class Input:
         # <
         self._current_index = np.int64(-1)
         self._current_values = np.nan * self.data[0, :]
+        self._closed = False
         return
 
     def advance(self) -> None:
@@ -135,6 +137,23 @@ class Input:
             Returns NaN values if advance() has not been called yet.
         """
         return self._current_values
+
+    def close(self) -> None:
+        """Close underlying file handle if this Input opened a file.
+
+        Closes the xarray DataArray if it was opened from a file during
+        initialization. DataArrays provided as in-memory objects by the
+        user are not closed.
+
+        Note:
+            After calling close(), this Input object should not be used
+            for further operations.
+        """
+        if not self._closed:
+            if self._input_file is not None:
+                self.data.close()
+            self._closed = True
+        return
 
 
 class Process:
