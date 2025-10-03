@@ -1,7 +1,7 @@
 import pathlib as pl
 import sys
 import warnings
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Literal, Tuple, Union
 
 import netCDF4 as nc
 import numpy as np
@@ -1079,7 +1079,7 @@ class Model:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: Any,
-    ) -> bool:
+    ) -> Literal[False]:
         """Context manager exit - cleanup resources.
 
         Args:
