@@ -1,5 +1,5 @@
 *.nc
 __pycache__
-
+pyrightconfig.json
 
 external_repos/landlab/landlab

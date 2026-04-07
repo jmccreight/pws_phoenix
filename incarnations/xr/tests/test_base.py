@@ -291,9 +291,18 @@ class TestProcess:
         )
         assert process["param1"].values.flags.writeable is False
 
+        # Check that parameter buffer identity is preserved (the .values = swap
+        # in Process.__init__ must share the original numpy array, not copy it)
+        assert process["param1"].values is sample_parameters["param1"].values
+        assert process["param2"].values is sample_parameters["param2"].values
+
         # Check that inputs are set
         assert "input1" in process.data
         np.all(np.isnan(process["input1"].values))
+
+        # Check that input buffer identity is preserved (Input._current_values
+        # must share the same numpy array so in-place advance() updates propagate)
+        assert process["input1"].values is input_obj.current_values.values
 
         # Check that variables are created
         assert "var1" in process.data
@@ -425,8 +434,8 @@ class TestOutput:
 
         mock_process = Mock()
         mock_process.get_variables.return_value = {"var1": {}, "var2": {}}
-        mock_process.__getitem__ = (
-            lambda self, key: mock_var1 if key == "var1" else mock_var2
+        mock_process.__getitem__ = lambda self, key: (
+            mock_var1 if key == "var1" else mock_var2
         )
 
         model_dict = {"process1": mock_process}
