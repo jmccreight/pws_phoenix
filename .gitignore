@@ -2,4 +2,5 @@
 __pycache__
 pyrightconfig.json
 
-external_repos/landlab/landlab/*
+external_repos/landlab/landlab
+external_repos/landlab/xarray-simlab

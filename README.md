@@ -10,12 +10,16 @@ See /Users/jamesmcc/usgs/pws_phoenix/incarnations/xr/design_summary.md
 1. Within process parallelism: embarassing parallel; DAG ordered parallelism
 2. Between process parallelism: execute when all upstream dependencies at current/next time are satisfied. Noted by CS4.6 in the above document.
 3. Define chunking in control, particularly time chunking
-4. Input mangement, consolidation, chunking, loading
-5. Separate input and output (internal) chunking.
-6. Interpreted vs mpi-execution; how to build a model and then scale it up? Could the model be defined and interacted on solely a single spatial chunk or some such subset?
-7. Output issues: deprecate netcdf4, use zarr, mpixarry
-8. For loop over time: constructable as numba at run time.
-9. Can we rely on xarray -> numpy reference behavior? Developed mre_buffer_share_testing.py as a test of what we are relying on. There is a comment in the code that one of these fails in some circumstance.
+4. Discretization object(s) that would manage MPI and other discretization methods.
+5. Input mangement, consolidation, chunking, loading
+6. Separate input and output (internal) chunking.
+7. Interpreted vs mpi-execution; how to build a model and then scale it up? Could the model be defined and interacted on solely a single spatial chunk or some such subset?
+8. Output issues: deprecate netcdf4, use zarr, mpixarry
+9. For loop over time: constructable as numba at run time.
+10. Can we rely on xarray -> numpy reference behavior? Developed mre_buffer_share_testing.py as a test of what we are relying on. There is a comment in the code that one of these fails in some circumstance.
+11. hierarchical xarray
+12. attrs, like simlab
+13. templating, or solutions to contract-forward vs standard subclassing (does this work with attrs)
 
 ## External design considerations
 

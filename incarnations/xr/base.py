@@ -190,31 +190,37 @@ class Process:
         """
 
         # add parameters, inputs, input_outputs, and public variables
-        # Note: It is somewhat strange that inputs of parameters are treated
-        #       coming from a dataset while inputs and input_outputs are
-        #       treated as coming from dataarrays. Conceptually, it makes some
-        #       sense for the following reasons:
-        #       1. parameters are not time varying
-        #       2. parameters generally have somewhat less impact on output
-        #       3. parameters are "endogenous" or internal, while inputs
-        #          are external and might be coming from various other places/
-        self.data = parameters[list(self.get_parameters())]
-        # parameters
+        # Note:
+        # It is somewhat strange that inputs of parameters are treated coming
+        # from a dataset while inputs and input_outputs are treated as coming
+        # from dataarrays. Conceptually, it makes some sense for the following
+        # reasons:
+        # 1. parameters are not time varying
+        # 2. parameters generally have somewhat less impact on output
+        # 3. parameters are "endogenous" or internal, while inputs
+        #    are external and might be coming from various other places.
+        # But this is up for further debate.
+
+        # Selectively load only the variables this process needs into memory
+        # in-place on the shared parent Dataset. This preserves buffer identity
+        # across the subsequent variable selection (lazy file-backed Datasets
+        # do not preserve buffer identity on selection -- each .values access
+        # reads from disk producing a fresh array). Loading in-place on the
+        # parent means processes sharing the same parameter file end up pointing
+        # at the same numpy array for shared parameters. Variables not needed
+        # by any process remain lazy on disk.
+        # Note: parameters is released by Model after all processes are
+        # initialized (via del self._process_dict); the file handle is closed
+        # in Model.finalize() via _opened_files.
         for pp in self.get_parameters():
-            # In this case we want read-only refs.
-            # It is actually debatable if we want refs. The upside is that
-            # parameters cant be changed by users. The minor downside is that
-            # if parameters are supplied in memory, their attributes are
-            # changed to make them read-only.
-            if parameters[pp].values.flags.writeable:
-                parameters[pp].values.flags.writeable = False
-            # THIS IS THE MOST MYSTIFYING/OBSCURE USE OF REFERENCES.
-            # Apparently a copy above happens. The ONLY thing that works is
-            # replacing the values in the DataArrays and not the DataArrays
-            #  themselves (or both)
-            # self[pp] = parameters[pp]  # no no no - this ruins the refs
-            self[pp].values = parameters[pp].values
-            # assert self[pp].values is parameters[pp].values
+            parameters[pp].load()
+        self.data = parameters[list(self.get_parameters())]
+        for pp in self.get_parameters():
+            # Set read-only on the shared buffer. Because self.data[pp].values
+            # is parameters[pp].values (same numpy array), this simultaneously
+            # makes the parameter read-only in both the process and the parent
+            # Dataset, preventing accidental modification by any holder.
+            parameters[pp].values.flags.writeable = False
         for ii in self.get_inputs():
             # Input object set on self?4
             if isinstance(kwargs[ii], Input):
