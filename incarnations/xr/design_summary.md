@@ -390,6 +390,27 @@ framework is more suited to problems with flexible spatial dimensions (HRUs,
 sub-basins, 1D reaches) and has a cleaner story around xarray metadata and
 lazy file I/O.
 
+### Architecture decision: Discretization object and BMI coupling
+
+A more detailed treatment of Landlab grid types, the HRU-mapping problem, and
+the recommended interoperability architecture is documented in:
+
+`external_repos/landlab/landlab_overview.md`
+
+The key conclusions (Section 9 of that document):
+
+- A formal `Discretization` class (wrapping an `xr.Dataset` of HRU areas,
+  connectivity, slopes, etc.) is a worthwhile investment independent of Landlab
+  coupling, and can support MPI domain decomposition is introduced --
+  the discretization is the natural unit of partitioning across ranks.
+- The recommended coupling architecture keeps pywatershed and Landlab on
+  **separate grids**: pywatershed operates on its HRU-scale `Discretization`;
+  Landlab operates on a higher-resolution grid appropriate to the physics
+  (raster for overland flow/groundwater, `NetworkModelGrid` for channel
+  sediment). Conservative mapping operators between the two grids are computed
+  **offline** and stored as sparse weight matrices. **BMI** is the runtime
+  exchange layer -- no shared grid object is required.
+
 ---
 
 ## Strengths Worth Preserving
