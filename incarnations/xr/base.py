@@ -9,7 +9,6 @@ import xarray as xr
 
 parent_dir = (pl.Path("./") / __file__).resolve().parent.parent
 sys.path.append(str(parent_dir))
-from utils import timer  # noqa
 
 # NOTES:
 #     * dataarray.load() is dataarray.load().load()
@@ -41,6 +40,7 @@ def open_xr(
         Dataset.
     """
     ds = xr.open_dataset(path)
+    da_ds: Union[xr.DataArray, xr.Dataset]
     if len(ds.data_vars) == 1:
         da_ds = ds[list(ds.data_vars)[0]]
     else:
@@ -73,9 +73,7 @@ class Input:
         >>> forcing.close()  # Close file handle when done
 
         >>> # From DataArray
-        >>> data = xr.DataArray(
-        ...     np.random.rand(100, 365), dims=['space', 'time']
-        ... )
+        >>> data = xr.DataArray(np.random.rand(100, 365), dims=["space", "time"])
         >>> input_obj = Input(data)
     """
 
@@ -445,8 +443,8 @@ class Output:
     Example:
         >>> output = Output(
         ...     time_chunk_size=100,
-        ...     variable_names=['temperature', 'pressure'],
-        ...     output_dir=Path('results')
+        ...     variable_names=["temperature", "pressure"],
+        ...     output_dir=Path("results"),
         ... )
         >>> # Used internally by Model class during run()
     """
@@ -707,6 +705,7 @@ class Model:
         >>> # Using context manager (recommended)
         >>> with Model(process_dict, control) as model:
         ...     model.run(dt=1.0, n_steps=365)
+        ...
         >>> # Files automatically closed
 
         >>> # Using explicit finalize
