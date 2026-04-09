@@ -13,7 +13,7 @@ jobs:
       FORCE_COLOR: 1
     strategy:
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +63,9 @@ jobs:
 
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@v1
+        uses: codecov/codecov-action@v5
         with:
+          file: ./incarnations/xr/junit.xml
+          report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
