@@ -1,0 +1,31 @@
+# https://pre-commit.com/
+repos:
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.6.1
+    hooks:
+      - id: nbstripout
+  - repo: https://github.com/thlorenz/doctoc
+    rev: v2.2.0
+    hooks:
+      - id: doctoc
+  - repo: https://github.com/keewis/blackdoc
+    rev: v0.3.9
+    hooks:
+      - id: blackdoc
+        additional_dependencies: ["black==23.10.1"]
+  - repo: local
+    hooks:
+      - id: check-security
+        name: Check for security and PII issues
+        entry: python .github/scripts/check_security.py --verbose
+        language: system
+        types: [text]
+        pass_filenames: false
+        always_run: true
+      - id: ruff-check
+        name: Run ruff check and format
+        entry: bash .github/scripts/ruff_check.sh
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: false

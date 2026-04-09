@@ -1,0 +1,35 @@
+name: pwpx
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - asv
+  - click != 8.1.0
+  - geopandas
+  - git
+  - make
+  - ipython
+  - netCDF4
+  - numpy>=2.0.0
+  - numba
+  - pandas>=1.4.0
+  - pip
+  - pre-commit
+  - pytest!=8.1.0
+  - pytest-cov
+  - pytest-env
+  - pytest-order
+  - pytest-xdist
+  - python>=3.14
+  - pyyaml
+  - ruff
+  - safety
+  - sphinx
+  - sphinx-book-theme>=0.3.3
+  - sphinx-autodoc-typehints>=2.2.1
+  - sphinx-autosummary-accessors
+  - sphinx-copybutton
+  - xarray>=2024.06.0
+  - zarr
+  - pip:
+      - pytest-error-for-skips
