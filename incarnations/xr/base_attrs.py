@@ -23,7 +23,7 @@ Run tests with: pytest tests/ -v
 
 import dataclasses
 import pathlib as pl
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -38,10 +38,8 @@ from base import Input, Model, Output, open_xr  # noqa: F401
 class _FieldMeta:
     """Metadata attached to a declared process field."""
 
-    kind: (
-        str  # "parameter" | "input" | "mutable_input" | "variable" | "private"
-    )
-    dims: Tuple[str, ...]
+    kind: Literal["parameter", "input", "mutable_input", "variable"]
+    dims: Tuple[str, ...]  # JLM: what is the elipsis here?
     dtype: type
     description: str = ""
     initial: Optional[str] = None  # kwarg name supplying initial values
@@ -96,17 +94,6 @@ def variable(
     )
 
 
-def private_var(
-    dims: Tuple[str, ...],
-    dtype: type,
-    description: str = "",
-) -> _FieldMeta:
-    """Declare a private/internal scratch variable."""
-    return _FieldMeta(
-        kind="private", dims=dims, dtype=dtype, description=description
-    )
-
-
 # ---------------------------------------------------------------------------
 # Spec class introspection helpers
 # ---------------------------------------------------------------------------
@@ -142,8 +129,12 @@ class PWSAccessor:
     Usage:
         ds.pws.advance()
         ds.pws.calculate(dt)
-        ds.pws.get_parameters()   # -> Tuple[str, ...]
-        ds.pws.get_variables()    # -> Tuple[str, ...]
+        ds.pws.get_parameters()        # -> Tuple[str, ...]
+        ds.pws.get_inputs()            # -> Tuple[str, ...]
+        ds.pws.get_mutable_inputs()    # -> Tuple[str, ...]
+        ds.pws.get_variables()         # -> Dict[str, _FieldMeta]
+        ds.pws.get_var_names()         # -> Tuple[str, ...]
+
     """
 
     def __init__(self, ds: xr.Dataset) -> None:
@@ -223,7 +214,6 @@ def _make_process(
     input_names = _fields_of_kind(spec_cls, "input")
     mutable_input_names = _fields_of_kind(spec_cls, "mutable_input")
     variable_metas = _fields_meta_of_kind(spec_cls, "variable")
-    private_metas = _fields_meta_of_kind(spec_cls, "private")
 
     # Load only needed parameters in-place on the shared parent Dataset.
     # This preserves buffer identity when the Dataset is file-backed (lazy).
@@ -250,7 +240,7 @@ def _make_process(
 
     # Initialise state variables.
     sizes = ds.sizes
-    for name, meta in {**variable_metas, **private_metas}.items():
+    for name, meta in variable_metas.items():
         shape = tuple(sizes[d] for d in meta.dims)
         da = xr.DataArray(
             data=np.full(shape, _FILL_VALUE[meta.dtype], dtype=meta.dtype),
@@ -324,9 +314,6 @@ def process(cls: Any) -> Any:
     )
     cls.get_var_names = classmethod(
         lambda c: tuple(_fields_meta_of_kind(cls, "variable").keys())
-    )
-    cls._get_private_variables = classmethod(
-        lambda c: _fields_meta_of_kind(cls, "private")
     )
 
     # Override __new__ so that calling the class returns an xr.Dataset.
