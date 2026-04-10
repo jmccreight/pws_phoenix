@@ -29,7 +29,7 @@ Key differences:
 
 import numpy as np
 import xarray as xr
-from base_attrs import input_var, parameter, process, variable
+from base_attrs import DataArrayMeta, process
 
 
 @process
@@ -38,38 +38,45 @@ class Upper:
     # Field declarations (replace get_parameters / get_inputs /
     # get_variables static methods from processes.py)
     # ------------------------------------------------------------------
-    param_up_0 = parameter(
+    param_up_0 = DataArrayMeta(
+        kind="parameter",
         dims=("space",),
         dtype=np.float64,
         description="Upper zone parameter 0",
     )
-    param_up_1 = parameter(
+    param_up_1 = DataArrayMeta(
+        kind="parameter",
         dims=("time", "space"),
         dtype=np.float64,
         description="Upper zone parameter 1 (time-varying)",
     )
-    param_common = parameter(
+    param_common = DataArrayMeta(
+        kind="parameter",
         dims=("space",),
         dtype=np.float64,
         description="Parameter shared with Lower",
     )
-    forcing_0 = input_var(
+    forcing_0 = DataArrayMeta(
+        kind="input",
         dims=("space",),
         dtype=np.float64,
         description="Primary forcing (read-only)",
     )
-    forcing_common = input_var(
+    forcing_common = DataArrayMeta(
+        kind="input",
         dims=("space",),
         dtype=np.float64,
         description="Common forcing shared with Lower (read-only)",
     )
-    flow = variable(
+    flow = DataArrayMeta(
+        kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Flow (public -- shared downstream with Lower)",
         initial="flow_initial",
     )
-    flow_previous = variable(
+    flow_previous = DataArrayMeta(
+        kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Flow at previous time step",
@@ -96,33 +103,39 @@ class Lower:
     # ------------------------------------------------------------------
     # Field declarations
     # ------------------------------------------------------------------
-    param_low_0 = parameter(
+    param_low_0 = DataArrayMeta(
+        kind="parameter",
         dims=("space",),
         dtype=np.float64,
         description="Lower zone parameter 0",
     )
-    param_common = parameter(
+    param_common = DataArrayMeta(
+        kind="parameter",
         dims=("space",),
         dtype=np.float64,
         description="Parameter shared with Upper",
     )
-    flow = input_var(
+    flow = DataArrayMeta(
+        kind="input",
         dims=("space",),
         dtype=np.float64,
         description="Flow from Upper (read-only input)",
     )
-    forcing_common = input_var(
+    forcing_common = DataArrayMeta(
+        kind="input",
         dims=("space",),
         dtype=np.float64,
         description="Common forcing shared with Upper (read-only)",
     )
-    storage = variable(
+    storage = DataArrayMeta(
+        kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Storage",
         initial="storage_initial",
     )
-    storage_previous = variable(
+    storage_previous = DataArrayMeta(
+        kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Storage at previous time step",
