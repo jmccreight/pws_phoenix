@@ -7,6 +7,7 @@ import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent.parent))
 from base import Input
+from base_attrs import ModelAttrs
 from processes_attrs import Lower, Upper
 
 
@@ -295,7 +296,116 @@ class TestRegressionAttrs:
             "expected_storage_prev": expected_storage_prev,
         }
 
-    # ============ TEST ============
+    # ============ CONTROL FIXTURE ============
+
+    @pytest.fixture
+    def control_config(self, tmp_path):
+        """Create control configuration."""
+        output_dir = tmp_path / "output"
+        return {
+            "output_var_names": ["flow", "storage_previous"],
+            "output_dir": output_dir,
+            "time_chunk_size": 10,
+        }
+
+    # ============ TESTS ============
+
+    def test_model_regression(
+        self,
+        dimensions,
+        data_as_memory_or_file,
+        control_config,
+        answers,
+    ):
+        """Full regression test using ModelAttrs with process_dict -- mirrors
+        test_up_low_regression.py but uses @process decorated classes."""
+        parameters_data = data_as_memory_or_file["parameters"]
+        forcing_data = data_as_memory_or_file["forcing"]
+        forcing_common_data = data_as_memory_or_file["forcing_common"]
+        flow_ic_data = data_as_memory_or_file["flow_ic"]
+        storage_ic_data = data_as_memory_or_file["storage_ic"]
+
+        process_dict = {
+            "upper": {
+                "class": Upper,
+                "forcing_0": forcing_data,
+                "forcing_common": forcing_common_data,
+                "flow_initial": flow_ic_data,
+                "parameters": parameters_data,
+            },
+            "lower": {
+                "class": Lower,
+                "forcing_common": forcing_common_data,
+                "storage_initial": storage_ic_data,
+                "parameters": parameters_data,
+            },
+        }
+
+        dt = np.float64(1.0)
+        with ModelAttrs(process_dict, control_config) as model:
+            model.run(dt, np.int32(dimensions["n_time"]))
+
+        assert model.model_dict["upper"]["param_common"].values is (
+            model.model_dict["lower"]["param_common"].values
+        ), "Shared parameter references broken"
+
+        assert model.model_dict["upper"]["forcing_common"].values is (
+            model.model_dict["lower"]["forcing_common"].values
+        ), "Shared forcing data references broken"
+
+        assert model.model_dict["upper"]["flow"].values is (
+            model.model_dict["lower"]["flow"].values
+        ), "Shared inter-process variable references broken"
+
+        expected_flow = answers["expected_flow"]
+        expected_flow_prev = answers["expected_flow_prev"]
+        expected_storage = answers["expected_storage"]
+        expected_storage_prev = answers["expected_storage_prev"]
+
+        np.testing.assert_allclose(
+            model.model_dict["upper"]["flow"].values,
+            expected_flow[-1, :],
+            rtol=1e-12,
+            err_msg="Upper flow does not match vectorized calculation",
+        )
+        np.testing.assert_allclose(
+            model.model_dict["upper"]["flow_previous"].values,
+            expected_flow_prev[-1, :],
+            rtol=1e-12,
+            err_msg="Upper flow_previous does not match vectorized calculation",
+        )
+        np.testing.assert_allclose(
+            model.model_dict["lower"]["storage"].values,
+            expected_storage[-1, :],
+            rtol=1e-12,
+            err_msg="Lower storage does not match vectorized calculation",
+        )
+        np.testing.assert_allclose(
+            model.model_dict["lower"]["storage_previous"].values,
+            expected_storage_prev[-1, :],
+            rtol=1e-12,
+            err_msg="Lower storage_previous does not match vectorized calculation",
+        )
+
+        flow_da = xr.load_dataarray(control_config["output_dir"] / "flow.nc")
+        storage_prev_da = xr.load_dataarray(
+            control_config["output_dir"] / "storage_previous.nc"
+        )
+        np.testing.assert_allclose(
+            flow_da.values,
+            expected_flow,
+            rtol=1e-12,
+            err_msg="Output flow NetCDF does not match vectorized calculation",
+        )
+        np.testing.assert_allclose(
+            storage_prev_da.values,
+            expected_storage_prev,
+            rtol=1e-12,
+            err_msg=(
+                "Output storage_previous NetCDF does not match "
+                "vectorized calculation"
+            ),
+        )
 
     def test_process_regression(
         self,

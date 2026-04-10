@@ -317,3 +317,24 @@ def process(cls: Any) -> Any:
     cls.__new__ = __new__  # type: ignore[method-assign, assignment]
 
     return cls
+
+
+# ---------------------------------------------------------------------------
+# ModelAttrs
+# ---------------------------------------------------------------------------
+
+
+class ModelAttrs(Model):
+    """Model for use with @process-decorated spec classes from base_attrs.py.
+
+    Identical to Model in base.py -- no overrides needed.  Model.advance(),
+    Model.calculate(), Model._initialize_inputs_and_proceses(), and
+    Output.initialize_variable_tracking() all dispatch via hasattr(proc, "pws")
+    to handle both old-style Process instances and new-style process Datasets.
+
+    Usage:
+        with ModelAttrs(process_dict, control) as model:
+            model.run(dt, n_steps)
+    """
+
+    pass

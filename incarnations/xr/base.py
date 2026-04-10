@@ -513,7 +513,12 @@ class Output:
         for var_name in self.variable_names:
             found = False
             for process_name, process_obj in model_dict.items():
-                if var_name in process_obj.get_variables():
+                var_names = (
+                    process_obj.pws.get_var_names()  # type: ignore[attr-defined]
+                    if isinstance(process_obj, xr.Dataset)
+                    else process_obj.get_variables()
+                )
+                if var_name in var_names:
                     self.variable_refs[var_name] = process_obj[var_name]
                     self.process_map[var_name] = process_name
                     found = True
@@ -933,7 +938,13 @@ class Model:
                     # inputs not in init_dict need to be found elsewhere in
                     # the preceeding processes
                     for pp in self.get_preceeding_processes(kk):
-                        if ii in self.model_dict[pp].get_variables():
+                        proc = self.model_dict[pp]
+                        var_names = (
+                            proc.pws.get_var_names()  # type: ignore[attr-defined]
+                            if isinstance(proc, xr.Dataset)
+                            else proc.get_variables()
+                        )
+                        if ii in var_names:
                             init_dict[ii] = self.model_dict[pp][ii]
 
             # <<<<
@@ -986,7 +997,10 @@ class Model:
         for ii in self.inputs_dict.values():
             ii.advance()
         for pp in self.model_dict.values():
-            pp.advance()
+            if isinstance(pp, xr.Dataset):
+                pp.pws.advance()
+            else:
+                pp.advance()
         # <
         return
 
@@ -997,7 +1011,10 @@ class Model:
             dt: Time step size for the calculation.
         """
         for vv in self.model_dict.values():
-            vv.calculate(dt)
+            if isinstance(vv, xr.Dataset):
+                vv.pws.calculate(dt)
+            else:
+                vv.calculate(dt)
         # <
         return
 
