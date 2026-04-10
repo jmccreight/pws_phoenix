@@ -92,10 +92,11 @@ class Upper:
 
     @staticmethod
     def calculate(ds: xr.Dataset, dt: np.float64) -> None:
-        ds["flow"].values[:] = (
-            ds["flow_previous"].values * np.float64(0.95)
-            + ds["forcing_0"].values
-        )
+        for loc in ds["space"]:
+            ds["flow"][loc] = (
+                ds["flow_previous"][loc] * np.float64(0.95)
+                + ds["forcing_0"][loc]
+            )
 
 
 @process
@@ -151,6 +152,7 @@ class Lower:
 
     @staticmethod
     def calculate(ds: xr.Dataset, dt: np.float64) -> None:
-        ds["storage"].values[:] = ds["storage_previous"].values * np.float64(
-            0.95
-        ) + ds["flow"].values * np.float64(0.12)
+        for loc in ds["space"]:
+            ds["storage"][loc] = ds["storage_previous"][loc] * np.float64(
+                0.95
+            ) + ds["flow"][loc] * np.float64(0.12)
