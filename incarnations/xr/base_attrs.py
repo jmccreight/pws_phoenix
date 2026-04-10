@@ -183,7 +183,7 @@ def _make_process(
         parameters = xr.open_dataset(parameters)
     resolved: Dict[str, Union[xr.DataArray, Input]] = {
         kk: (
-            open_xr(vv)  # type: ignore[arg-type]
+            open_xr(vv)  # type: ignore[misc]
             if isinstance(vv, pl.Path)
             else vv
         )
