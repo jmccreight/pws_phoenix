@@ -1,3 +1,5 @@
+"""Unit tests for base.py -- Input, Process, Output, and Model classes."""
+
 import pathlib as pl
 import sys
 from typing import Any, Dict

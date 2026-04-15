@@ -1,3 +1,5 @@
+"""Regression tests for base.py -- Upper/Lower toy model via Model."""
+
 import pathlib as pl
 import sys
 from typing import Any, Dict

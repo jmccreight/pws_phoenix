@@ -1,3 +1,5 @@
+"""Direct equivalence tests between base.py and base_attrs.py -- same inputs, both designs, outputs compared head-to-head."""
+
 import pathlib as pl
 import sys
 

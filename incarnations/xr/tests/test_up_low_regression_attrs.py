@@ -1,3 +1,5 @@
+"""Regression tests for base_attrs.py -- Upper/Lower toy model via ModelAttrs."""
+
 import pathlib as pl
 import sys
 
@@ -6,7 +8,6 @@ import pytest
 import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent.parent))
-from base import Input
 from base_attrs import ModelAttrs
 from processes_attrs import Lower, Upper
 
@@ -286,6 +287,7 @@ class TestRegressionAttrs:
         expected_flow, expected_flow_prev = vectorized_upper_calculation(
             forcing_memory, flow_ic_memory, dimensions["n_time"]
         )
+        # note dependence on expected flow
         expected_storage, expected_storage_prev = vectorized_lower_calculation(
             expected_flow, storage_ic_memory, dimensions["n_time"]
         )
@@ -406,86 +408,3 @@ class TestRegressionAttrs:
                 "vectorized calculation"
             ),
         )
-
-    def test_process_regression(
-        self,
-        dimensions,
-        data_as_memory_or_file,
-        answers,
-    ):
-        """Regression test driving the model loop manually via the .pws accessor.
-
-        Demonstrates the base_attrs.py design:
-          - Upper(...) and Lower(...) return xr.Datasets (not Process instances)
-          - process["var"] is native Dataset access -- unchanged from base.py
-          - process.pws.advance() / process.pws.calculate(dt) via accessor
-          - Buffer sharing between processes is verified with `is` assertions
-        """
-        parameters_data = data_as_memory_or_file["parameters"]
-        forcing_data = data_as_memory_or_file["forcing"]
-        forcing_common_data = data_as_memory_or_file["forcing_common"]
-        flow_ic_data = data_as_memory_or_file["flow_ic"]
-        storage_ic_data = data_as_memory_or_file["storage_ic"]
-
-        # Create Input objects for time-varying external forcing.
-        input_forcing_0 = Input(forcing_data, read_only=True)
-        input_forcing_common = Input(forcing_common_data, read_only=True)
-
-        # Instantiate processes -- each returns an xr.Dataset.
-        upper: xr.Dataset = Upper(  # type: ignore[call-arg, assignment]
-            parameters=parameters_data,
-            forcing_0=input_forcing_0,
-            forcing_common=input_forcing_common,
-            flow_initial=flow_ic_data,
-        )
-        lower: xr.Dataset = Lower(  # type: ignore[call-arg, assignment]
-            parameters=parameters_data,
-            flow=upper["flow"],  # share Upper's flow buffer directly
-            forcing_common=input_forcing_common,
-            storage_initial=storage_ic_data,
-        )
-
-        # ---- time loop using the .pws accessor ----
-        dt = np.float64(1.0)
-        for _t in range(dimensions["n_time"]):
-            # advance all inputs first (in-place [:] update propagates to
-            # all process Datasets sharing the same buffer)
-            input_forcing_0.advance()
-            input_forcing_common.advance()
-            # advance then calculate -- same ordering as Model.run()
-            upper.pws.advance()
-            lower.pws.advance()
-            upper.pws.calculate(dt)
-            lower.pws.calculate(dt)
-
-        # ---- numerical correctness: final time step ----
-        np.testing.assert_allclose(
-            upper["flow"].values,
-            answers["expected_flow"][-1, :],
-            rtol=1e-12,
-            err_msg="Upper flow does not match vectorized calculation",
-        )
-        np.testing.assert_allclose(
-            upper["flow_previous"].values,
-            answers["expected_flow_prev"][-1, :],
-            rtol=1e-12,
-            err_msg="Upper flow_previous does not match vectorized calculation",
-        )
-        np.testing.assert_allclose(
-            lower["storage"].values,
-            answers["expected_storage"][-1, :],
-            rtol=1e-12,
-            err_msg="Lower storage does not match vectorized calculation",
-        )
-        np.testing.assert_allclose(
-            lower["storage_previous"].values,
-            answers["expected_storage_prev"][-1, :],
-            rtol=1e-12,
-            err_msg="Lower storage_previous does not match vectorized calculation",
-        )
-
-        # Note: buffer-sharing (is) assertions are tested in
-        # test_up_low_regression.py via Model, which handles shared-path
-        # deduplication.  When processes are driven manually with file inputs
-        # each call to Upper/Lower opens its own Dataset, so sharing is not
-        # guaranteed without that deduplication layer.

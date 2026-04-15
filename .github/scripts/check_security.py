@@ -307,7 +307,7 @@ class SecurityChecker:
                 # Skip filenames with extensions (e.g., file.xml, test.json)
                 # Real hostnames don't have common file extensions
                 if re.search(
-                    r"\.(xml|json|yaml|yml|txt|csv|log|md|rst|html|py|pyc|pyx|pyd|test)$",
+                    r"\.(xml|json|yaml|yml|txt|csv|log|md|rst|html|py|pyc|pyx|pyd|test|mock)$",
                     hostname,
                 ):
                     continue

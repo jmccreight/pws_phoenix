@@ -1,3 +1,5 @@
+"""Unit tests for base_attrs.py -- DataArrayMeta, @process decorator, PWSAccessor, and ModelAttrs."""
+
 import pathlib as pl
 import sys
 from typing import Any, Dict

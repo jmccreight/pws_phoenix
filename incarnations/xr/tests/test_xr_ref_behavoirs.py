@@ -1,6 +1,4 @@
 """
-mre_buffer_share_testing.py
-===========================
 MREs for numpy buffer-sharing through xarray DataArrays and Datasets.
 
 Purpose:
@@ -8,7 +6,6 @@ Purpose:
      inter-process communication.
   2. Candidate tests for the xarray test suite.
 
-Run with: pytest mre_buffer_share_testing.py -v
 
 General finding (current xarray, numpy-backed DataArrays)
 ----------------------------------------------------------
