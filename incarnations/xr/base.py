@@ -220,7 +220,7 @@ class Process:
             # Dataset, preventing accidental modification by any holder.
             parameters[pp].values.flags.writeable = False
         for ii in self.get_inputs():
-            # Input object set on self?4
+            # Input object set on self?
             if isinstance(kwargs[ii], Input):
                 self[ii] = kwargs[ii].current_values
                 assert id(self[ii].values) == id(
