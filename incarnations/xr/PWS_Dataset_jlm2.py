@@ -37,6 +37,12 @@ import xarray as xr
 class Behaviour(ABC):
     """Pure strategy ABC -- no __init__, no stored state."""
 
+    def __init__(
+        self,
+        xarray_obj: xr.Dataset | xr.DataArray,  # | xr.DataTree
+    ) -> None:
+        self._obj = xarray_obj
+
     @staticmethod
     def required_parameters() -> tuple:
         return ("rate",)
@@ -47,11 +53,11 @@ class Behaviour(ABC):
         pass
 
     @abstractmethod
-    def advance(self, ds: xr.Dataset) -> None:
+    def advance(self) -> None:
         pass
 
     @abstractmethod
-    def calculate(self, ds: xr.Dataset, dt: float) -> None:
+    def calculate(self, dt: float) -> None:
         pass
 
     @classmethod
@@ -69,16 +75,18 @@ class Decay(Behaviour):
     def variables(self) -> tuple:
         return ("value", "value_prev")
 
-    def advance(self, ds: xr.Dataset) -> None:
-        ds["value_prev"].values[()] = ds["value"].values[()]
+    def advance(self) -> None:
+        self._obj["value_prev"].values[()] = self._obj["value"].values[()]  # type: ignore
 
     @staticmethod
     @numba.jit(nopython=True)
     def _calculate(value: np.ndarray, rate: float, dt: float) -> None:
-        value[()] *= np.exp(-rate * dt)
+        value[()] *= np.exp(-rate * dt)  # type: ignore
 
-    def calculate(self, ds: xr.Dataset, dt: float) -> None:
-        self._calculate(ds["value"].values, float(ds["rate"]), dt)
+    def calculate(self, dt: float) -> None:
+        self._calculate(
+            self._obj["value"].values, float(self._obj["rate"]), dt
+        )
 
 
 class Growth(Behaviour):
@@ -86,16 +94,18 @@ class Growth(Behaviour):
     def variables(self) -> tuple:
         return ("value", "value_prev")
 
-    def advance(self, ds: xr.Dataset) -> None:
-        ds["value_prev"].values[()] = ds["value"].values[()]
+    def advance(self) -> None:
+        self._obj["value_prev"].values[()] = self._obj["value"].values[()]  # type: ignore
 
     @staticmethod
     @numba.jit(nopython=True)
     def _calculate(value: np.ndarray, rate: float, dt: float) -> None:
-        value[()] += rate * dt
+        value[()] += rate * dt  # type: ignore
 
-    def calculate(self, ds: xr.Dataset, dt: float) -> None:
-        self._calculate(ds["value"].values, float(ds["rate"]), dt)
+    def calculate(self, dt: float) -> None:
+        self._calculate(
+            self._obj["value"].values, float(self._obj["rate"]), dt
+        )
 
 
 @xr.register_dataset_accessor("pws")
@@ -104,16 +114,19 @@ class PWS:
     Decay = Decay
     Growth = Growth
 
-    def __init__(self, ds: xr.Dataset) -> None:
-        self._ds = ds
-        # the behavoir is "stateless" -- no ds stored there.
-        self._behaviour = getattr(PWS, ds.attrs["behaviour_name"])()
+    def __init__(
+        self,
+        xarray_obj: xr.Dataset | xr.DataArray,  # | xr.DataTree
+    ) -> None:
+        self._obj = xarray_obj
+        behavior_class = getattr(PWS, self._obj.attrs["behaviour_name"])
+        self._behaviour = behavior_class(self._obj)
 
     def advance(self) -> None:
-        self._behaviour.advance(self._ds)
+        self._behaviour.advance()
 
     def calculate(self, dt: float) -> None:
-        self._behaviour.calculate(self._ds, dt)
+        self._behaviour.calculate(dt)
 
     @property
     def params(self) -> tuple:
@@ -128,6 +141,9 @@ if __name__ == "__main__":
     dt = 1.0
     steps = 4
 
+    # mypy prefers the later, but the former is more conceptually correct
+    # decay = xr.Dataset.pws.Decay.from_dict(rate=0.5, value=100.0, value_prev=100.0)
+    # growth = xr.Dataset.pws.Growth.from_dict(rate=3.0, value=0.0, value_prev=0.0)
     decay = PWS.Decay.from_dict(rate=0.5, value=100.0, value_prev=100.0)
     growth = PWS.Growth.from_dict(rate=3.0, value=0.0, value_prev=0.0)
 
