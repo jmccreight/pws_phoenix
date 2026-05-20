@@ -37,6 +37,12 @@ import xarray as xr
 class Behaviour(ABC):
     """Pure strategy ABC -- no __init__, no stored state."""
 
+    _registry: dict[str, type] = {}
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        Behaviour._registry[cls.__name__] = cls
+
     def __init__(
         self,
         xarray_obj: xr.Dataset | xr.DataArray,  # | xr.DataTree
@@ -110,7 +116,13 @@ class Growth(Behaviour):
 
 @xr.register_dataset_accessor("pws")
 class PWS:
-    # Behaviour subclasses available for construction and registry lookup
+    # Construction syntax:
+    #     Decay.from_dict(...)
+    # or
+    #     xr.Dataset.pws.Decay.from_dict(...)  # clear type of xr.Dataset
+    # Dispatch is handled independently via Behaviour._registry (auto-populated
+    # by __init_subclass__). These attrs are purely for initialization
+    # syntax/convenience.
     Decay = Decay
     Growth = Growth
 
@@ -119,8 +131,8 @@ class PWS:
         xarray_obj: xr.Dataset | xr.DataArray,  # | xr.DataTree
     ) -> None:
         self._obj = xarray_obj
-        behavior_class = getattr(PWS, self._obj.attrs["behaviour_name"])
-        self._behaviour = behavior_class(self._obj)
+        cls = Behaviour._registry[self._obj.attrs["behaviour_name"]]
+        self._behaviour = cls(self._obj)
 
     def advance(self) -> None:
         self._behaviour.advance()
@@ -141,11 +153,16 @@ if __name__ == "__main__":
     dt = 1.0
     steps = 4
 
-    # mypy prefers the later, but the former is more conceptually correct
-    # decay = xr.Dataset.pws.Decay.from_dict(rate=0.5, value=100.0, value_prev=100.0)
-    # growth = xr.Dataset.pws.Growth.from_dict(rate=3.0, value=0.0, value_prev=0.0)
-    decay = PWS.Decay.from_dict(rate=0.5, value=100.0, value_prev=100.0)
-    growth = PWS.Growth.from_dict(rate=3.0, value=0.0, value_prev=0.0)
+    # I'd make these classes avail from a package level import of pywatershed
+    # typically as pws, so these would similarly be pws.Decay or Decay.
+    decay = Decay.from_dict(rate=0.5, value=100.0, value_prev=100.0)
+    growth = Growth.from_dict(rate=3.0, value=0.0, value_prev=0.0)
+    # decay = xr.Dataset.pws.Decay.from_dict(
+    #     rate=0.5, value=100.0, value_prev=100.0
+    # )
+    # growth = xr.Dataset.pws.Growth.from_dict(
+    #     rate=3.0, value=0.0, value_prev=0.0
+    # )
 
     print(f"{'step':>4}  {'decay.value':>12}  {'growth.value':>12}")
     print("-" * 34)
