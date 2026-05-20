@@ -14,7 +14,7 @@ import pytest
 import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent.parent))
-from base_attrs2 import ModelAttrs
+from base_attrs2 import ModelAttrs, Process
 from processes_attrs2 import Lower, Upper
 
 
@@ -319,16 +319,17 @@ class TestRegressionAttrs2:
     # ============ TESTS ============
 
     def test_registry_populated(self):
-        """PWS._registry must contain Upper and Lower after import.
-        Registration happens via explicit assignment at the bottom of
-        processes_attrs2.py -- no decorator required.
+        """Process._registry must contain Upper and Lower after import.
+        Registration happens automatically via __init_subclass__.
         """
-        from base_attrs2 import PWS
-
-        assert "Upper" in PWS._registry, "Upper missing from PWS._registry"
-        assert "Lower" in PWS._registry, "Lower missing from PWS._registry"
-        assert PWS._registry["Upper"] is Upper
-        assert PWS._registry["Lower"] is Lower
+        assert "Upper" in Process._registry, (
+            "Upper missing from Process._registry"
+        )
+        assert "Lower" in Process._registry, (
+            "Lower missing from Process._registry"
+        )
+        assert Process._registry["Upper"] is Upper
+        assert Process._registry["Lower"] is Lower
 
     def test_process_name_in_attrs(
         self,

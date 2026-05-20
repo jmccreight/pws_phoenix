@@ -11,26 +11,52 @@ Revised Process/accessor design. Compared with base_attrs.py:
   advance/calculate are staticmethods  advance/calculate are instance methods
   callables stored in ds.attrs       only ds.attrs["process_name"] (str) stored
   standalone _make_process() fn      Process.new() classmethod
-  @process decorator                 PWS._registry populated explicitly in
-                                       processes_attrs2.py
+  @process decorator                 Process.__init_subclass__ auto-registers
+  PWS._registry manual               Process._registry automatic
+
+Motivation: Polymorphism with the xarray accessor
+--------------------------------------------------
+xr.Dataset is a general-purpose container. In pws_phoenix we have ~40
+process types (Upper, Lower, Snowpack, ...), each with its own variables,
+parameters, and computation. The challenge: how do we attach
+process-specific behaviour (advance, calculate) to a plain xr.Dataset
+without subclassing it (which xarray discourages)?
+
+The accessor pattern can solve this. The order of events is:
+
+  1. @xr.register_dataset_accessor("pws") registers PWS once at import
+     time -- before any datasets exist.
+  2. Process subclasses must be imported before any dataset's .pws is
+     accessed. Each import triggers __init_subclass__, which populates
+     Process._registry automatically.
+  3. Accessor instantiation is lazy: PWS(ds) is only called the first
+     time .pws is accessed on a specific dataset instance.
+  4. At that moment, ds.attrs["process_name"] identifies the exact
+     Process subclass in the registry. That subclass is instantiated
+     with ds and its advance() and calculate() methods are attached to
+     ds.pws. Every dataset self-configures its own accessor.
+
+What is a Process?
+------------------
+A Process is a stateful accessor-style object -- it stores self._obj
+(the dataset) and exposes advance() and calculate(dt) as instance methods.
+This mirrors the xarray accessor pattern and keeps call signatures clean.
+
+There is a contract between a Process and the dataset it operates on:
+the dataset is built by that same Process's new() classmethod, which
+guarantees the dataset has exactly the variables and parameters the
+methods expect. The accessor enforces the pairing at construction time
+via ds.attrs["process_name"].
+
+Heavy computation is delegated to a @staticmethod _calculate(...) that
+takes raw numpy arrays -- no xarray overhead -- making it a natural
+target for @numba.jit(nopython=True).
 
 Key design notes:
   - The PWS accessor is registered on xr.Dataset only. DataArray support
     is deferred for a future revision.
-  - Process subclasses are strategy objects: they hold no data of their own.
-    self._obj is the xr.Dataset they operate on, set at accessor-creation time
-    by a plain Process.__init__ call -- no __new__ tricks needed.
-  - Construction of the dataset is via Process.new(parameters, **kwargs),
-    a classmethod on the ABC. cls is the concrete subclass so DataArrayMeta
-    introspection finds the right fields automatically.
-  - advance() and calculate() are instance methods on the Process ABC.
-    Subclasses should delegate heavy computation to a @staticmethod
-    _calculate(...) that takes raw numpy arrays, making it a natural
-    target for @numba.jit without xarray overhead.
   - No Python callables are stored in ds.attrs. Only the string
     ds.attrs["process_name"] is stored.
-  - PWS._registry is populated explicitly at the bottom of
-    processes_attrs2.py after the subclasses are defined.
 
 Run tests with: pytest tests/ -v
 """
@@ -71,24 +97,46 @@ class DataArrayMeta:
 
 
 # ---------------------------------------------------------------------------
-# Spec class introspection helpers -- unchanged from base_attrs.py
+# Spec class introspection helpers
 # ---------------------------------------------------------------------------
 
 
+def _proc_subclass_mro(cls: type) -> tuple[type, ...]:
+    """Return the MRO of cls excluding Process, ABC, and object.
+
+    Reversed so base class fields are yielded before subclass fields,
+    giving consistent ordering when walking the hierarchy.
+    """
+    _exclude = {"Process", "ABC", "object"}
+    return tuple(
+        cc for cc in reversed(cls.__mro__) if cc.__name__ not in _exclude
+    )
+
+
 def _keys_of_kind(cls: type, kind: str) -> tuple[str, ...]:
-    """Return field names declared with a given kind on a Process subclass."""
+    """Return field names declared with a given kind on a Process subclass.
+
+    Walks the full MRO so fields declared on intermediate base classes
+    are included.
+    """
     return tuple(
         name
-        for name, val in vars(cls).items()
+        for cc in _proc_subclass_mro(cls)
+        for name, val in vars(cc).items()
         if isinstance(val, DataArrayMeta) and val.kind == kind
     )
 
 
 def _dict_of_kind(cls: type, kind: str) -> dict[str, DataArrayMeta]:
-    """Return {name: DataArrayMeta} for fields of a given kind on a Process subclass."""
+    """Return {name: DataArrayMeta} for fields of a given kind on a Process subclass.
+
+    Walks the full MRO so fields declared on intermediate base classes
+    are included.
+    """
     return {
         name: val
-        for name, val in vars(cls).items()
+        for cc in _proc_subclass_mro(cls)
+        for name, val in vars(cc).items()
         if isinstance(val, DataArrayMeta) and val.kind == kind
     }
 
@@ -102,15 +150,12 @@ DataArrayMetaDict = dict[str, DataArrayMeta]
 
 
 class Process(ABC):
-    """Abstract base class for all pws_phoenix process implementations.
-
-    A Process instance is a pure strategy object -- it holds no data.
-    The dataset is passed explicitly to advance() and calculate() each
-    call, making the data flow visible and the object trivially stateless.
+    """Accessor-style ABC: stores self._obj and dispatches advance/calculate.
+    Subclasses auto-register in Process._registry via __init_subclass__.
 
     Construction:
-        Call the classmethod Process.new() (on the concrete subclass) to
-        build the xr.Dataset.
+        Call the classmethod new() on the concrete subclass to build the
+        xr.Dataset, then access .pws to get the configured accessor:
 
         ds = Upper.new(parameters=..., forcing_0=..., flow_initial=...)
         ds.pws.advance()
@@ -118,22 +163,31 @@ class Process(ABC):
 
     Numba:
         Heavy inner computation should be delegated to a @staticmethod
-        _calculate(...) receiving raw numpy arrays, which can then be
-        decorated with @numba.jit:
+        _calculate(...) receiving raw numpy arrays, decorated with
+        @numba.jit(nopython=True):
 
         class Upper(Process):
             @staticmethod
-            def _calculate(flow_prev, forcing, dt):
-                # @numba.jit goes here -- pure numpy, no xarray
-                return flow_prev * 0.95 + forcing
+            @numba.jit(nopython=True)
+            def _calculate(flow_prev, forcing):
+                flow_prev[:] *= 0.95
+                flow_prev[:] += forcing
 
-            def calculate(self, ds: xr.Dataset, dt: np.float64) -> None:
-                ds["flow"].values[:] = self._calculate(
-                    ds["flow_previous"].values,
-                    ds["forcing_0"].values,
-                    dt,
+            def calculate(self, dt: np.float64) -> None:
+                self._calculate(
+                    self._obj["flow_previous"].values,
+                    self._obj["forcing_0"].values,
                 )
     """
+
+    _registry: dict[str, type] = {}
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        Process._registry[cls.__name__] = cls
+
+    def __init__(self, xarray_obj: xr.Dataset) -> None:
+        self._obj = xarray_obj
 
     @classmethod
     def new(
@@ -217,11 +271,11 @@ class Process(ABC):
         return ds
 
     @abstractmethod
-    def advance(self, ds: xr.Dataset) -> None:
+    def advance(self) -> None:
         """Copy current state to *_previous variables for the next timestep."""
 
     @abstractmethod
-    def calculate(self, ds: xr.Dataset, dt: np.float64) -> None:
+    def calculate(self, dt: np.float64) -> None:
         """Update state variables for one timestep of length dt."""
 
     # ------------------------------------------------------------------
@@ -262,30 +316,31 @@ class PWS:
 
     Dispatch is resolved at accessor-creation time by reading
     ds.attrs["process_name"] and looking up the corresponding Process
-    subclass in PWS._registry. No callables are stored in ds.attrs.
+    subclass in Process._registry. No callables are stored in ds.attrs.
 
-    PWS._registry is populated explicitly in processes_attrs2.py after
-    the Process subclasses are defined:
+    Process subclasses auto-register via __init_subclass__ when imported.
+    Class attributes on PWS (Upper, Lower, ...) are provided for
+    convenient construction syntax:
 
-        PWS._registry["Upper"] = Upper
-        PWS._registry["Lower"] = Lower
+        Upper.new(parameters=..., **kwargs)
+        xr.Dataset.pws.Upper.new(parameters=..., **kwargs)
 
     Usage:
         ds = Upper.new(parameters=..., **kwargs)
         ds.pws.advance()
         ds.pws.calculate(dt)
-        ds.pws.get_parameters()     # -> Tuple[str, ...]
-        ds.pws.get_inputs()         # -> Tuple[str, ...]
-        ds.pws.get_mutable_inputs() # -> Tuple[str, ...]
-        ds.pws.get_variables()      # -> Dict[str, DataArrayMeta]
-        ds.pws.get_var_names()      # -> Tuple[str, ...]
+        ds.pws.get_parameters()     # -> tuple[str, ...]
+        ds.pws.get_inputs()         # -> tuple[str, ...]
+        ds.pws.get_mutable_inputs() # -> tuple[str, ...]
+        ds.pws.get_variables()      # -> dict[str, DataArrayMeta]
+        ds.pws.get_var_names()      # -> tuple[str, ...]
     """
 
-    _registry: dict[str, type] = {}  # process_name -> Process subclass
-
-    def __init__(self, ds: xr.Dataset) -> None:
-        self._ds = ds
-        self._process = PWS._registry[ds.attrs["process_name"]]()
+    def __init__(self, xarray_obj: xr.Dataset) -> None:
+        self._obj = xarray_obj
+        self._process = Process._registry[self._obj.attrs["process_name"]](
+            self._obj
+        )
 
     # ------------------------------------------------------------------
     # Computation
@@ -293,11 +348,11 @@ class PWS:
 
     def advance(self) -> None:
         """Advance process state to the next timestep."""
-        self._process.advance(self._ds)
+        self._process.advance()
 
     def calculate(self, dt: np.float64) -> None:
         """Perform calculations for the current timestep."""
-        self._process.calculate(self._ds, dt)
+        self._process.calculate(dt)
 
     # ------------------------------------------------------------------
     # Introspection -- delegates to the Process subclass classmethods
@@ -320,7 +375,7 @@ class PWS:
 
 
 # ---------------------------------------------------------------------------
-# ModelAttrs -- unchanged pass-through from base_attrs.py
+# ModelAttrs
 # ---------------------------------------------------------------------------
 
 
@@ -376,9 +431,6 @@ class ModelAttrs(Model):
                             init_dict[ii] = self.model_dict[pp][ii]
 
             cls = vv["class"]
-            if hasattr(cls, "new") and callable(cls.new):
-                self.model_dict[kk] = cls.new(**init_dict)
-            else:
-                self.model_dict[kk] = cls(**init_dict)
+            self.model_dict[kk] = cls.new(**init_dict)
 
         return

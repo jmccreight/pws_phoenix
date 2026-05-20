@@ -1,6 +1,5 @@
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
 
 - [Some general ground rules](#some-general-ground-rules)
 - [Project context](#project-context)
@@ -67,3 +66,4 @@ If additional context arises about this project which is useful to add, please l
 
 1. please use pyton 3.14 syntax, particularly for typehinting.
 2. Please read the ruff.toml for line length setting.
+3. Avoid single-letter variable names. For throwaway loop variables, prefer doubled letters, e.g. `cc` instead of `c`, `kk` instead of `k`.

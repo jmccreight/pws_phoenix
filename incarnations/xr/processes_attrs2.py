@@ -9,11 +9,12 @@ Compare with processes_attrs.py:
   ------------------                 -------------------
   @process                           class Upper(Process):  # no decorator
   class Upper:                           ...
-      ...                                def advance(self): ...
+      @staticmethod                      def advance(self):
+      def advance(ds): ...                   self._obj[...] = ...
       @staticmethod
-      def advance(ds): ...               def calculate(self, dt):
-      @staticmethod                          self._obj[...] = self._calculate(...)
-      def calculate(ds, dt): ...
+      def calculate(ds, dt): ...         def calculate(self, dt):
+                                             self._calculate(...)
+
                                          @staticmethod
                                          def _calculate(...):  # numba target
                                              ...
@@ -22,16 +23,16 @@ Compare with processes_attrs.py:
 
 Key differences from processes_attrs.py:
   - No @process decorator -- Upper/Lower are plain Process subclasses
-  - Construction via Upper.new(...) / Lower.new(...) -- explicit classmethod
-    on the ABC, returns xr.Dataset; no __new__ tricks
-  - advance / calculate are instance methods; self._obj is the Dataset
+  - Auto-registered in Process._registry via __init_subclass__
+  - Construction via Upper.new(...) -- classmethod on the ABC
+  - advance(self) / calculate(self, dt) are instance methods using self._obj
   - _calculate is a @staticmethod taking raw numpy arrays -- the natural
     target for @numba.jit when performance work begins
-  - PWS._registry populated explicitly at the bottom of this file
+  - Upper/Lower added as class attrs on PWS for construction syntax:
+      Upper.new(...) or xr.Dataset.pws.Upper.new(...)
 """
 
 import numpy as np
-import xarray as xr
 from base_attrs2 import PWS, DataArrayMeta, Process
 
 
@@ -87,8 +88,8 @@ class Upper(Process):
     # Computation
     # ------------------------------------------------------------------
 
-    def advance(self, ds: xr.Dataset) -> None:
-        ds["flow_previous"].values[:] = ds["flow"].values
+    def advance(self) -> None:
+        self._obj["flow_previous"].values[:] = self._obj["flow"].values
 
     @staticmethod
     def _calculate(
@@ -99,10 +100,10 @@ class Upper(Process):
         # Pure numpy -- decorate with @numba.jit when ready
         return flow_previous * np.float64(0.95) + forcing_0
 
-    def calculate(self, ds: xr.Dataset, dt: np.float64) -> None:
-        ds["flow"].values[:] = self._calculate(
-            ds["flow_previous"].values,
-            ds["forcing_0"].values,
+    def calculate(self, dt: np.float64) -> None:
+        self._obj["flow"].values[:] = self._calculate(
+            self._obj["flow_previous"].values,
+            self._obj["forcing_0"].values,
             dt,
         )
 
@@ -153,8 +154,8 @@ class Lower(Process):
     # Computation
     # ------------------------------------------------------------------
 
-    def advance(self, ds: xr.Dataset) -> None:
-        ds["storage_previous"].values[:] = ds["storage"].values
+    def advance(self) -> None:
+        self._obj["storage_previous"].values[:] = self._obj["storage"].values
 
     @staticmethod
     def _calculate(
@@ -165,19 +166,19 @@ class Lower(Process):
         # Pure numpy -- decorate with @numba.jit when ready
         return storage_previous * np.float64(0.95) + flow * np.float64(0.12)
 
-    def calculate(self, ds: xr.Dataset, dt: np.float64) -> None:
-        ds["storage"].values[:] = self._calculate(
-            ds["storage_previous"].values,
-            ds["flow"].values,
+    def calculate(self, dt: np.float64) -> None:
+        self._obj["storage"].values[:] = self._calculate(
+            self._obj["storage_previous"].values,
+            self._obj["flow"].values,
             dt,
         )
 
 
 # ---------------------------------------------------------------------------
-# Register in the PWS accessor registry.
-# Explicit assignment mirrors PWS_Dataset_jlm.py's pattern of class
-# attributes -- no decorator magic required.
+# Attach Process subclasses to PWS for convenient construction syntax:
+#     Upper.new(...)  or  xr.Dataset.pws.Upper.new(...)
+# Dispatch is handled automatically via Process._registry (__init_subclass__).
 # ---------------------------------------------------------------------------
 
-PWS._registry["Upper"] = Upper
-PWS._registry["Lower"] = Lower
+PWS.Upper = Upper  # type: ignore[attr-defined]
+PWS.Lower = Lower  # type: ignore[attr-defined]
