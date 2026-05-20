@@ -2,30 +2,52 @@
 # ====================
 # Evolution of PWS_Dataset_jlm.py. Key changes:
 #
-#   jlm.py                             jlm2.py
-#   ------                             -------
-#   Behaviour.__init__ stores self._obj  No __init__ -- Behaviour is stateless
-#   advance(self)                        advance(self, ds)
-#   calculate(self, dt)                  calculate(self, ds, dt)
-#   PWSAccessor stores self._behaviour   PWS stores self._ds + self._behaviour
-#   self._behaviour.advance()            self._behaviour.advance(self._ds)
+#   jlm.py                               jlm2.py
+#   ------                               -------
+#   PWSAccessor named PWS                PWS (shorter)
+#   dispatch via getattr(PWS, name)      dispatch via Behaviour._registry
+#   Behaviour subclasses as PWS attrs    __init_subclass__ auto-registers
+#     (manual maintenance)                 (automatic, scales to ~40 processes)
+#   PWS attrs also for construction      PWS attrs kept for construction syntax
+#   construction: PWS.Decay.from_dict()  also: xr.Dataset.pws.Decay.from_dict()
+#
+# Motivation: Polymorphism with the xarray accessor
+# --------------------------------------------------
+# xr.Dataset is a general-purpose container. In a hydrological model we
+# have ~40 process types (Upper, Lower, Snowpack, ...), each with its own
+# variables, parameters, and computation. The challenge is: how do we
+# attach process-specific behaviour (advance, calculate) to a plain
+# xr.Dataset without subclassing it (which xarray discourages)?
+#
+# The accessor pattern solves this. The order of events is:
+#
+#   1. @xr.register_dataset_accessor("pws") registers PWS once at import
+#      time -- before any datasets exist.
+#   2. Behaviour subclasses (Decay, Growth, ...) must be imported before
+#      any dataset's .pws is accessed. Each import triggers
+#      __init_subclass__, which populates Behaviour._registry.
+#   3. Accessor instantiation is lazy: PWS(ds) is only called the first
+#      time .pws is accessed on a specific dataset instance.
+#   4. At that moment, ds.attrs["behaviour_name"] identifies the exact
+#      Behaviour subclass in the registry. That subclass is instantiated
+#      with ds and its advance() and calculate() methods are attached to
+#      ds.pws. Every dataset self-configures its own accessor.
 #
 # What is a Behaviour?
 # ---------------------
-# A Behaviour subclass has no __init__ and stores no state -- it is a
-# named set of methods. But it is not arbitrary: there is a contract
-# between a Behaviour and the dataset it operates on. The dataset is
-# built by that same Behaviour's from_dict() (or Process.new() in the
-# full implementation), which guarantees the dataset has exactly the
-# variables and parameters the methods expect. The accessor enforces
-# the pairing at construction time via ds.attrs["behaviour_name"].
+# A Behaviour is a stateful accessor-style object -- it stores self._obj
+# (the dataset) and exposes advance() and calculate(dt) as instance methods.
+# This mirrors the xarray accessor pattern and keeps call signatures clean.
 #
-# So a Behaviour is best understood as a typed interface to a specific
-# dataset shape. All state lives in the dataset; the Behaviour supplies
-# the operations defined over that state. This separation also makes
-# the methods natural targets for numba -- the inner _calculate
-# staticmethod takes raw numpy arrays with no xarray overhead and
-# is decorated with @numba.jit(nopython=True).
+# There is a contract between a Behaviour and the dataset it operates on:
+# the dataset is built by that same Behaviour's from_dict() which guarantees
+# the dataset has exactly the variables and parameters the methods expect.
+# The accessor enforces the pairing at construction time via
+# ds.attrs["behaviour_name"].
+#
+# Heavy computation is delegated to a @staticmethod _calculate(...) that
+# takes raw numpy arrays -- no xarray overhead -- making it a natural
+# target for @numba.jit(nopython=True). The _calculate mutates in-place.
 
 from abc import ABC, abstractmethod
 
@@ -35,7 +57,9 @@ import xarray as xr
 
 
 class Behaviour(ABC):
-    """Pure strategy ABC -- no __init__, no stored state."""
+    """Accessor-style ABC: stores self._obj and dispatches advance/calculate.
+    Subclasses auto-register in _registry via __init_subclass__.
+    """
 
     _registry: dict[str, type] = {}
 
