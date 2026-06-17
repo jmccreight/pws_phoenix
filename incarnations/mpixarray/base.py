@@ -85,7 +85,7 @@ class Input:
 
 
 class Output:
-    """Buffered, time-chunked output of model variables to a single zarr store.
+    """Buffered, serial model time-chunked variables to a single zarr store.
 
     Buffers each tracked variable in memory for time_chunk_size steps, then
     region-writes the full chunk into a pre-sized zarr store; a partial tail is
@@ -165,9 +165,7 @@ class Output:
                     break
 
             if not found:
-                raise ValueError(
-                    f"Variable '{var_name}' not found in any process"
-                )
+                raise ValueError(f"Variable '{var_name}' not found in any process")
 
         self._initialize_buffers()
 
@@ -176,9 +174,7 @@ class Output:
         for var_name, var_ref in self.variable_refs.items():
             # Buffer: (time_chunk_size, *spatial_dims)
             buffer_shape = (self.time_chunk_size,) + var_ref.shape
-            self.data_buffers[var_name] = np.empty(
-                buffer_shape, dtype=var_ref.dtype
-            )
+            self.data_buffers[var_name] = np.empty(buffer_shape, dtype=var_ref.dtype)
 
     def collect_current_timestep(self, time_index: int) -> None:
         """Buffer this step's values; flush a full chunk when the buffer fills.
@@ -214,22 +210,17 @@ class Output:
                 ["time", spatial_dim],
                 np.zeros((self.n_times,) + spatial_shape, dtype=var_ref.dtype),
             )
-            # Carry the spatial coordinate (e.g. space_coord) if present.
-            coord_name = f"{spatial_dim}_coord"
-            if coord_name in var_ref.coords and coord_name not in coords:
-                coords[coord_name] = (
+            # Carry the spatial dim-coordinate (e.g. "space") if present.
+            if spatial_dim in var_ref.coords and spatial_dim not in coords:
+                coords[spatial_dim] = (
                     spatial_dim,
-                    var_ref.coords[coord_name].values,
+                    var_ref.coords[spatial_dim].values,
                 )
             # One chunk spans the full spatial extent; time chunked by buffer.
-            encoding[var_name] = {
-                "chunks": (self.time_chunk_size,) + spatial_shape
-            }
+            encoding[var_name] = {"chunks": (self.time_chunk_size,) + spatial_shape}
 
         ds = xr.Dataset(data_vars, coords=coords)
-        ds.to_zarr(
-            self.output_store, mode="w", encoding=encoding, consolidated=False
-        )
+        ds.to_zarr(self.output_store, mode="w", encoding=encoding, consolidated=False)
         self._zarr_store = zarr.open(str(self.output_store), mode="r+")
         self._zarr_initialized = True
 
@@ -240,9 +231,9 @@ class Output:
         chunk_end = self.current_time_step
         chunk_start = chunk_end - self.time_chunk_size
         for var_name in self.variable_names:
-            self._zarr_store[var_name][chunk_start:chunk_end] = (
-                self.data_buffers[var_name]
-            )
+            self._zarr_store[var_name][chunk_start:chunk_end] = self.data_buffers[
+                var_name
+            ]
 
     def finalize(self) -> None:
         """Region-write any remaining partial buffer and release the store."""
@@ -253,9 +244,9 @@ class Output:
             chunk_end = self.current_time_step
             chunk_start = chunk_end - remaining
             for var_name in self.variable_names:
-                self._zarr_store[var_name][chunk_start:chunk_end] = (
-                    self.data_buffers[var_name][:remaining]
-                )
+                self._zarr_store[var_name][chunk_start:chunk_end] = self.data_buffers[
+                    var_name
+                ][:remaining]
         self._zarr_store = None
 
 
@@ -400,11 +391,12 @@ class Model:
             self.model_dict[kk] = vv["class"](**init_dict)
 
     def _set_time(self) -> None:
-        """Set time dimensions from first input."""
+        """Set time dimensions from the first input's `time` dim-coordinate."""
         kk0 = list(self.inputs_dict.keys())[0]
-        self.ntime = self.inputs_dict[kk0].data.sizes["time"]
-        self.time_index = self.inputs_dict[kk0].data.time
-        self.times = self.inputs_dict[kk0].data.time_coord
+        data = self.inputs_dict[kk0].data
+        self.ntime = data.sizes["time"]
+        self.times = data["time"]
+        self.time_index = data["time"]
 
     def get_preceeding_processes(self, proc_name: str) -> List[str]:
         """Return process names defined before proc_name."""

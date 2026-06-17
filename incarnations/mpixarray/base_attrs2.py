@@ -63,6 +63,7 @@ Run tests with: pytest tests/ -v
 
 import dataclasses
 import pathlib as pl
+import warnings
 from abc import ABC, abstractmethod
 from typing import Literal
 
@@ -531,10 +532,25 @@ class ModelMPI(ModelAttrs):
         for name in list(ds_mpi.data_vars):
             ds_mpi[name] = ds_mpi[name].load()
 
+        proc_classes = self._proc_classes()
+
+        # Time-varying parameters don't fit the streaming dichotomy
+        # (set_streaming drops time-dim vars; static params must be space-only).
+        # Phase 1 drops them -- warn explicitly. See pws_phoenix/CLAUDE.md.
+        for proc_name, cls in proc_classes.items():
+            for pname, meta in _dict_of_kind(cls, "parameter").items():
+                if "time" in meta.dims:
+                    warnings.warn(
+                        f"Time-varying parameter {pname!r} {meta.dims} on "
+                        f"process {proc_name!r} is unsupported in the MPI "
+                        f"streaming path (Phase 1) and is dropped.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
         # File-backed inputs that were dropped: refilled from src each step.
         # An input is file-backed (vs. produced upstream) if no process owns
         # a variable of that name.
-        proc_classes = self._proc_classes()
         var_names = self._all_variable_names()
         file_input_names: list = []
         for cls in proc_classes.values():

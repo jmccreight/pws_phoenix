@@ -1,22 +1,20 @@
 """
 test_up_low_regression_attrs2_mpi.py
 =====================================
-pytest-mpi version of the MPI streaming regression for the Upper/Lower toy
-model via ModelMPI. Same checks as the former script, restructured as a
-pytest class (cf. mpixarray ref_behaviors/..._pytest.py).
+pytest-mpi MPI streaming regression for the Upper/Lower toy model via ModelMPI.
 
-Pattern (deadlock-safe): the whole MPI pipeline -- write the combined input on
-rank 0, build ModelMPI, run the streaming loop, finalize -- runs ONCE in
-setup_class, where ALL collective MPI ops live. Per-rank results, buffer-sharing
-facts, and the streamed output file are captured there; the test_* methods are
-pure (collective-free) asserts, so a failing rank can never interrupt a
-collective and hang the others.
+Shares `dimensions`, `make_toy_input`, and `compute_answers` with the serial
+regression (conftest.py). The whole collective pipeline -- write the ONE
+combined input on rank 0, build ModelMPI, run the streaming loop, finalize,
+gather results -- lives in module-scoped fixtures, where ALL collective MPI ops
+happen. The test_* methods are pure (collective-free) asserts, so a failing rank
+can never interrupt a collective and hang the others.
 
-Phase 1 scope: one space-decomposed dataset streamed over time
-(set_streaming + iter_time); `flow` is streamed to disk and validated over all
-timesteps (global), `storage_previous` from final in-memory state (per rank),
-pending the mpixarray multi-output-var (deepcopy) fix. param_up_1 (time-varying
-parameter) is omitted -- a Phase 2 design question.
+Phase 1: one space-decomposed dataset streamed over time. `flow` is streamed to
+disk and validated over all timesteps (global); `storage_previous` (not streamed
+-- the one-`to_netcdf`-var limit) is validated from final state, gathered
+globally. `param_up_1` is in the file but dropped by the streaming path
+(ModelMPI warns -- asserted explicitly).
 
 Run with:
     mpirun -n 4 pytest --with-mpi tests/test_up_low_regression_attrs2_mpi.py -v
@@ -28,6 +26,7 @@ import pathlib as pl
 import shutil
 import sys
 import tempfile
+import warnings
 
 import numpy as np
 import pytest
@@ -39,179 +38,125 @@ from base_attrs2 import ModelMPI
 from processes_attrs2 import Lower, Upper
 
 
+@pytest.fixture(scope="module")
+def mpi_paths(dimensions, make_toy_input):
+    """Write the unified toy input to ONE combined file on rank 0; broadcast the
+    temp dir. Yields the input/output paths; rank 0 cleans up afterward."""
+    comm = MPI.COMM_WORLD
+    tmp = tempfile.mkdtemp() if comm.rank == 0 else None
+    tmp = comm.bcast(tmp, root=0)
+    data_dir = pl.Path(tmp) / "toy_model_mpi_data"
+    input_file = data_dir / "model_input.nc"
+    output_file = data_dir / "model_output.nc"
+    if comm.rank == 0:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        make_toy_input(dimensions).to_netcdf(input_file)
+    comm.Barrier()
+    yield {"input_file": input_file, "output_file": output_file}
+
+    # --- Teardown (an important pytest + MPI detail) ---
+    # A yield-fixture is a generator: pytest runs it to the `yield` for setup,
+    # hands the dict to the tests, then at the END OF THIS FIXTURE'S SCOPE
+    # resumes the generator past the `yield` (calls next() again) to run the
+    # code below. Scope is "module", so this fires after the LAST test in this
+    # file. It runs even if tests failed, provided setup reached the `yield`.
+    #
+    # Under MPI this teardown runs in EVERY rank's pytest process, but only
+    # rank 0 owns the temp dir, so only rank 0 removes it. There is NO barrier
+    # here on purpose: a rank that failed a test mid-module still reaches its
+    # own teardown, so no rank hangs waiting on a collective.
+    if comm.rank == 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def answers(dimensions, make_toy_input, compute_answers):
+    """Vectorized ground truth. The toy data is deterministic, so every rank
+    recomputes identical answers from an in-memory copy (no file read needed)."""
+    ds = make_toy_input(dimensions)
+    return compute_answers(
+        ds["forcing_0"].values,
+        ds["flow_initial"].values,
+        ds["storage_initial"].values,
+        dimensions["n_time"],
+    )
+
+
+@pytest.fixture(scope="module")
+def mpi_run(mpi_paths):
+    """Build + run + finalize ModelMPI ONCE. Every collective MPI op lives here,
+    so the test_* methods are pure asserts."""
+    comm = MPI.COMM_WORLD
+    process_dict = {"upper": {"class": Upper}, "lower": {"class": Lower}}
+    control = {
+        "input_file": mpi_paths["input_file"],
+        "output_file": mpi_paths["output_file"],
+        "output_var_names": ["flow"],  # one streamed output (see ModelMPI note)
+    }
+
+    # ModelMPI warns that the time-varying param_up_1 is dropped -- capture it so
+    # the drop is asserted explicitly (and warning-as-error configs don't fail).
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = ModelMPI(process_dict, control)
+    param_up_1_warned = any("param_up_1" in str(w.message) for w in caught)
+
+    model.run(np.float64(1.0))
+
+    upper = model.model_dict["upper"]
+    lower = model.model_dict["lower"]
+    # storage_previous isn't streamed, so gather its final state globally as the
+    # Lower-process check (single scheme -> rank-ordered contiguous blocks).
+    storage_prev_final = np.concatenate(
+        comm.allgather(model._ds_mpi["storage_previous"].values.copy())
+    )
+    result = {
+        "output_file": mpi_paths["output_file"],
+        "param_up_1_warned": param_up_1_warned,
+        "shared_param_common": (
+            upper._obj["param_common"].values is lower._obj["param_common"].values
+        ),
+        "shared_forcing_common": (
+            upper._obj["forcing_common"].values is lower._obj["forcing_common"].values
+        ),
+        "shared_flow": upper._obj["flow"].values is lower._obj["flow"].values,
+        "storage_prev_final": storage_prev_final,
+    }
+    model.finalize()
+    comm.Barrier()  # ensure the output file is fully flushed before reads
+    return result
+
+
 @pytest.mark.mpi(min_size=2)
 class TestRegressionAttrs2MPI:
-    """MPI streaming regression for the Upper/Lower toy model via ModelMPI.
+    """MPI streaming regression for the Upper/Lower toy model via ModelMPI."""
 
-    setup_class drives the full collective pipeline once and stashes results on
-    the class; the test_* methods only assert on those captured values.
-    """
+    # -- structural buffer sharing (one ds_mpi) --
+    def test_shared_param_common(self, mpi_run):
+        assert mpi_run["shared_param_common"]
 
-    @classmethod
-    def setup_class(cls):
-        comm = MPI.COMM_WORLD
-        cls.comm = comm
-        rank = comm.rank
+    def test_shared_forcing_common(self, mpi_run):
+        assert mpi_run["shared_forcing_common"]
 
-        # ---- dimensions ----
-        n_years = 1
-        n_space = 20
-        start_year = 2000
-        start_time = np.datetime64(f"{start_year}-01-01")
-        end_time = (
-            np.datetime64(f"{start_year + n_years}-01-01")
-            - np.timedelta64(1, "D")
-        )
-        time = np.arange(start_time, end_time, dtype="datetime64[D]")
-        n_time = len(time)
-        space = np.arange(n_space)
-        cls.n_time = n_time
+    def test_shared_flow_upper_lower(self, mpi_run):
+        assert mpi_run["shared_flow"]
 
-        # ---- combined input file: rank 0 writes, dir broadcast to all ----
-        # time/space are dim coordinates (set_streaming needs the streaming dim
-        # to be a coord). param_up_1 (time-varying parameter) is omitted.
-        np.random.seed(42)
-        tmp_dir = tempfile.mkdtemp() if rank == 0 else None
-        tmp_dir = comm.bcast(tmp_dir, root=0)
-        cls._tmp_dir = tmp_dir
-        data_dir = pl.Path(tmp_dir) / "toy_model_mpi_data"
-        input_file = data_dir / "model_input.nc"
-        cls.output_file = data_dir / "model_output.nc"
+    # -- intentional difference vs serial: time-varying param dropped + warned --
+    def test_param_up_1_dropped_warns(self, mpi_run):
+        assert mpi_run["param_up_1_warned"]
 
-        if rank == 0:
-            data_dir.mkdir(exist_ok=True)
-            sin_data = np.sin(
-                np.arange(0, 2 * np.pi * n_years, 2 * np.pi * n_years / n_time)
-            )
-            shifts = np.random.uniform(10, 100, n_space)
-            forcing_0 = sin_data[:, np.newaxis] + shifts[np.newaxis, :]
-            xr.Dataset(
-                data_vars=dict(
-                    forcing_0=(["time", "space"], forcing_0),
-                    forcing_common=(
-                        ["time", "space"],
-                        np.ones((n_time, n_space)),
-                    ),
-                    param_up_0=(["space"], np.random.uniform(0.1, 1, n_space)),
-                    param_low_0=(
-                        ["space"],
-                        np.random.uniform(0.17, 0.23, n_space),
-                    ),
-                    param_common=(["space"], np.zeros(n_space)),
-                    flow_initial=(
-                        ["space"],
-                        np.random.uniform(100, 1000, n_space),
-                    ),
-                    storage_initial=(
-                        ["space"],
-                        np.random.uniform(100, 500, n_space),
-                    ),
-                ),
-                coords=dict(time=("time", time), space=("space", space)),
-            ).to_netcdf(input_file)
-        comm.Barrier()
+    # -- streamed flow over all timesteps (global), validated on rank 0 --
+    def test_streamed_flow_all_timesteps(self, mpi_run, answers):
+        if MPI.COMM_WORLD.rank != 0:
+            return
+        with xr.open_dataset(mpi_run["output_file"]) as ds_out:
+            flow_out = ds_out["flow_out"].values  # (n_time, n_space) global
+        np.testing.assert_allclose(flow_out, answers["expected_flow"], rtol=1e-12)
 
-        # ---- expected answers (read the actual file; identical on all ranks) ----
-        with xr.open_dataset(input_file) as ds_in:
-            forcing_0_vals = ds_in["forcing_0"].values
-            flow_ic_vals = ds_in["flow_initial"].values
-            storage_ic_vals = ds_in["storage_initial"].values
-
-        expected_flow = np.zeros((n_time, n_space))
-        expected_flow_prev = np.zeros((n_time, n_space))
-        for tt in range(n_time):
-            expected_flow_prev[tt, :] = (
-                flow_ic_vals if tt == 0 else expected_flow[tt - 1, :]
-            )
-            expected_flow[tt, :] = (
-                expected_flow_prev[tt, :] * 0.95 + forcing_0_vals[tt, :]
-            )
-        expected_storage = np.zeros((n_time, n_space))
-        expected_storage_prev = np.zeros((n_time, n_space))
-        for tt in range(n_time):
-            expected_storage_prev[tt, :] = (
-                storage_ic_vals if tt == 0 else expected_storage[tt - 1, :]
-            )
-            expected_storage[tt, :] = (
-                expected_storage_prev[tt, :] * 0.95 + expected_flow[tt, :] * 0.12
-            )
-        cls.expected_flow = expected_flow
-        cls.expected_storage_prev = expected_storage_prev
-
-        # ---- build + run the streaming model (all collectives happen here) ----
-        process_dict = {"upper": {"class": Upper}, "lower": {"class": Lower}}
-        control = {
-            "input_file": input_file,
-            "output_file": cls.output_file,
-            "output_var_names": ["flow"],  # one streamed output (ModelMPI note)
-        }
-        model = ModelMPI(process_dict, control)
-        model.run(np.float64(1.0))
-
-        # local space slice (single scheme -> contiguous blocks in rank order)
-        local_n = int(model._ds_mpi.sizes["space"])
-        local_ns = comm.allgather(local_n)
-        offset = sum(local_ns[:rank])
-        cls.sl = slice(offset, offset + local_n)
-
-        # structural buffer-sharing facts (one ds_mpi -> shared by reference)
-        upper = model.model_dict["upper"]
-        lower = model.model_dict["lower"]
-        cls.shared_param_common = (
-            upper._obj["param_common"].values
-            is lower._obj["param_common"].values
-        )
-        cls.shared_forcing_common = (
-            upper._obj["forcing_common"].values
-            is lower._obj["forcing_common"].values
-        )
-        cls.shared_flow = (
-            upper._obj["flow"].values is lower._obj["flow"].values
-        )
-
-        # final in-memory state (copy before finalize closes the store)
-        cls.local_flow_final = model._ds_mpi["flow"].values.copy()
-        cls.local_storage_prev_final = (
-            model._ds_mpi["storage_previous"].values.copy()
-        )
-
-        model.finalize()  # streams/closes the output store
-        comm.Barrier()  # ensure the output file is fully flushed before reads
-
-    @classmethod
-    def teardown_class(cls):
-        # Only rank 0 touched the temp dir after setup, so no barrier is needed
-        # (and omitting it avoids a teardown hang if a method failed on a rank).
-        if cls.comm.rank == 0 and cls._tmp_dir is not None:
-            shutil.rmtree(cls._tmp_dir, ignore_errors=True)
-
-    # ---- structural buffer sharing (single ds_mpi) ----
-    def test_shared_param_common(self):
-        assert self.shared_param_common
-
-    def test_shared_forcing_common(self):
-        assert self.shared_forcing_common
-
-    def test_shared_flow_upper_lower(self):
-        assert self.shared_flow
-
-    # ---- final in-memory state, per-rank local slice ----
-    def test_upper_flow_final(self):
+    # -- Lower process: final storage_previous, gathered globally --
+    def test_storage_previous_final(self, mpi_run, answers):
         np.testing.assert_allclose(
-            self.local_flow_final, self.expected_flow[-1, self.sl], rtol=1e-12
-        )
-
-    def test_lower_storage_previous_final(self):
-        np.testing.assert_allclose(
-            self.local_storage_prev_final,
-            self.expected_storage_prev[-1, self.sl],
+            mpi_run["storage_prev_final"],
+            answers["expected_storage_prev"][-1, :],
             rtol=1e-12,
         )
-
-    # ---- streamed output file (global), validated on rank 0 only ----
-    def test_streamed_flow_all_timesteps(self):
-        if self.comm.rank != 0:
-            return
-        with xr.open_dataset(self.output_file) as ds_out:
-            flow_out = ds_out["flow_out"].values  # (n_time, n_space) global
-        np.testing.assert_allclose(flow_out, self.expected_flow, rtol=1e-12)
