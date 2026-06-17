@@ -67,3 +67,76 @@ If additional context arises about this project which is useful to add, please l
 1. please use pyton 3.14 syntax, particularly for typehinting.
 2. Please read the ruff.toml for line length setting.
 3. Avoid single-letter variable names. For throwaway loop variables, prefer doubled letters, e.g. `cc` instead of `c`, `kk` instead of `k`.
+
+# incarnations/mpixarray design notes
+
+`incarnations/mpixarray/` blends the serial xr Process framework
+(`base_attrs2.py`, `processes_attrs2.py`) with mpixarray's streaming MPI IO.
+Phase 1 is implemented and tested (serial via pytest; MPI via pytest-mpi).
+
+## Core decision: discretization = the unit of decomposition
+
+The unit of MPI decomposition (and of barriers / the shared dataset) is the
+**discretization** (the grid). "One shared decomposed dataset" really means
+"one dataset per discretization." The toy model has exactly one (`space`);
+multiple discretizations are Phase 2.
+
+## Serial path (`Model` / `ModelAttrs`, `base.py` + `base_attrs2.py`)
+
+- `Process.new()` builds a per-process `xr.Dataset`: parameters loaded in place
+  on the shared parent, inputs wired by reference. Cross-process buffer sharing
+  (`param_common`, `forcing_common`, `Upper.flow → Lower.flow`) is preserved by
+  reference and checked with `a.values is b.values`.
+- The `PWS` accessor dispatches `advance()`/`calculate()` via
+  `ds.attrs["process_name"]` → `Process._registry`.
+- Output: `base.Output` — a buffered, time-chunked **zarr** writer (adapted
+  from pywatershed `base/output.py`): one store at `output_dir/output.zarr`,
+  all output vars as data_vars, lazy-init sized to `n_times`, full-chunk region
+  writes + a partial tail at `finalize`. (netCDF4 was dropped.)
+
+## MPI path (`ModelMPI`, `base_attrs2.py`) — single-decomposition streaming
+
+Uses the real mpixarray streaming API:
+`open_dataset → parallelize(dims=["space"]) → set_streaming("time") →
+open_writer → declare buffers → create → iter_time → write`.
+
+- ONE decomposed dataset (`ds_mpi`) carries every process's state, parameters,
+  per-step input buffers, and streaming outputs. Because there is one dataset,
+  cross-process buffer sharing is **structural** (the same named variable) --
+  not emulated by hand and asserted.
+- Processes bind directly (`cls(ds_mpi)`) and are rebound to each `step` in the
+  loop. There is **no** `Process.new()` MPI path (the old `comm` /
+  `local_space_idx` branch was deleted); serial `new()` is unchanged.
+- Inputs: time-dimensioned file vars are dropped by `set_streaming` and refilled
+  each step from `step.mpi.src`; static space-only params/ICs survive on
+  `ds_mpi` (loaded into memory so their buffers are shared by reference).
+- The single `parallelize()` call is the **Discretization seam** -- keep it one
+  isolated call so promoting it to a real Discretization later is lift-and-shift.
+
+## Known mpixarray limits (Phase 1)
+
+- Only ONE `to_netcdf=True` streaming-output var works; a 2nd trips a
+  "cannot pickle 'module' object" deepcopy (the writer handle is stamped onto
+  shared coord attrs, and the next `from_numpy` deepcopies them). So we stream
+  `flow` to disk and validate `storage_previous` from final in-memory state.
+- `set_streaming` requires the streaming dim to be a real dim-coordinate.
+- Time-varying parameters (e.g. `param_up_1`, `(time, space)`) are deferred --
+  neither static-space nor streaming-input.
+
+## IO is intentionally NOT apples-to-apples
+
+Serial → zarr; MPI → mpixarray's NetCDF stream. The best IO backend differs by
+context, so the two ends are deliberately divergent -- do **not** homogenize
+them via a shared writer. (Only matters when isolating compute-vs-IO time in a
+scaling study.)
+
+## Phase 2 backlog (separable, layered on top)
+
+- A `Global` class (time/config -- note streaming owns the time *loop*).
+- The full `Discretization` class: physical/topology role + multiple
+  discretizations (incl. whether `set_streaming` aligns across ≥2 of them).
+- `ModelInputs` / `input_spec()` / `resolve_inputs()` / `init_run_phase()` lazy
+  lifecycle (`get_inputs()` is already classmethod-level; streaming's `create()`
+  is a latent `init_run_phase`).
+- Time-varying parameters; multi-output-var streaming once the deepcopy bug is
+  fixed.
