@@ -113,6 +113,9 @@ def mpi_run(mpi_paths):
     result = {
         "output_file": mpi_paths["output_file"],
         "param_up_1_warned": param_up_1_warned,
+        "storage_prev_final": storage_prev_final,
+        # the shared buffer/ref checks need to happen before model.finalize()
+        # because that deletes/closees ds_mpi.
         "shared_param_common": (
             upper._obj["param_common"].values is lower._obj["param_common"].values
         ),
@@ -120,7 +123,6 @@ def mpi_run(mpi_paths):
             upper._obj["forcing_common"].values is lower._obj["forcing_common"].values
         ),
         "shared_flow": upper._obj["flow"].values is lower._obj["flow"].values,
-        "storage_prev_final": storage_prev_final,
     }
     model.finalize()
     comm.Barrier()  # ensure the output file is fully flushed before reads
@@ -132,6 +134,7 @@ class TestRegressionAttrs2MPI:
     """MPI streaming regression for the Upper/Lower toy model via ModelMPI."""
 
     # -- structural buffer sharing (one ds_mpi) --
+    # Asserts happen here but the boolean was evaluated before model.finalize
     def test_shared_param_common(self, mpi_run):
         assert mpi_run["shared_param_common"]
 

@@ -140,3 +140,40 @@ scaling study.)
   is a latent `init_run_phase`).
 - Time-varying parameters; multi-output-var streaming once the deepcopy bug is
   fixed.
+
+## Next design topic: container-model unification
+
+The **Process-facing** interface is already uniform: a `Process` only touches
+`self._obj[name].values` and is agnostic to whether `_obj` is a standalone
+serial dataset or a view into the shared `ds_mpi`. The **container** layer is
+what diverges:
+
+- **Serial:** N per-process in-memory `xr.Dataset`s wired by shared buffers --
+  sharing is *manual*, hence the `a.values is b.values` asserts (which can break).
+- **MPI:** ONE decomposed `ds_mpi`; processes are views -- sharing is
+  *structural*, so the same `is` checks are nearly tautological.
+
+The `finalize` asymmetry is a symptom: serial `finalize()` only closes I/O
+handles (its in-memory process datasets survive -- *wanted*, for
+interactive/post-run inspection), while MPI `finalize()` closes `ds_mpi`. The
+consistent contract is "`finalize` **releases external resources**," NOT
+"deletes data" -- do not make serial delete its data (no upside; it kills the
+inspection serial exists for).
+
+**Candidate direction:** collapse both into ONE shared dataset *per
+discretization*, with serial as the *degenerate* case (one rank, full extent,
+plain-xr backend instead of mpixarray). That makes the two genuinely comparable,
+makes buffer-sharing *structural in both* (deleting the fragile serial wiring
+*and* its `is` asserts), and makes "MPI optional" true with no structural fork
+-- serial = "MPI with one rank, no MPI."
+
+**Key tension -- namespacing:** N datasets give each process a private namespace
+for free; one shared dataset flattens it. Fine where vars *should* be identical
+(`param_common`, `Upper.flow → Lower.flow`), but two processes then can't each
+have a private `flow`. Per-discretization grouping narrows it (same-grid
+processes share; different grids are separate datasets), but within a grid you
+still need a naming discipline or sub-grouping.
+
+Moot for *users* (`ds_mpi` is never inspected interactively); this is a
+*developer*-facing concern -- reasoning plus the buffer-sharing correctness
+invariant.

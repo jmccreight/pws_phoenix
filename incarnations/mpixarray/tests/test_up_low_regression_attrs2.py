@@ -95,6 +95,10 @@ class TestRegressionAttrs2:
             flow_initial=toy_ds["flow_initial"],
         )
         assert upper.attrs["process_name"] == "Upper"
+        # attrs must stay callable-free: base_attrs2 resolves behavior via
+        # Process._registry (keyed by the process_name string), not by stashing
+        # advance/calculate in attrs. Callables would also break NetCDF/zarr
+        # serialization and pickle/deepcopy of the dataset.
         for val in upper.attrs.values():
             assert not callable(val), f"callable found in attrs: {val}"
 
@@ -121,6 +125,7 @@ class TestRegressionAttrs2:
             model.run(dt, np.int32(dimensions["n_time"]))
 
         # -- buffer sharing (by-reference wiring) --
+        # Serial case: internal data are not deleted/closed by finalize.
         assert (
             model.model_dict["upper"]["param_common"].values
             is model.model_dict["lower"]["param_common"].values
