@@ -1,6 +1,6 @@
 """
-test_up_low_regression_attrs2_mpi.py
-=====================================
+test_up_low_regression_mpi.py
+=============================
 pytest-mpi MPI streaming regression for the Upper/Lower toy model via ModelMPI.
 
 Shares `dimensions`, `make_toy_input`, and `compute_answers` with the serial
@@ -17,7 +17,7 @@ globally. `param_up_1` is in the file but dropped by the streaming path
 (ModelMPI warns -- asserted explicitly).
 
 Run with:
-    mpirun -n 4 pytest --with-mpi tests/test_up_low_regression_attrs2_mpi.py -v
+    mpirun -n 4 pytest --with-mpi tests/test_up_low_regression_mpi.py -v
 
 Prerequisites: pytest-mpi installed; run under mpirun with >= 2 ranks.
 """
@@ -34,8 +34,8 @@ import xarray as xr
 from mpi4py import MPI
 
 sys.path.insert(0, str(pl.Path(__file__).parent.parent))
-from base_attrs2 import ModelMPI
-from processes_attrs2 import Lower, Upper
+from model import ModelMPI
+from processes_concrete import Lower, Upper
 
 
 @pytest.fixture(scope="module")
@@ -130,7 +130,7 @@ def mpi_run(mpi_paths):
 
 
 @pytest.mark.mpi(min_size=2)
-class TestRegressionAttrs2MPI:
+class TestRegressionMPI:
     """MPI streaming regression for the Upper/Lower toy model via ModelMPI."""
 
     # -- structural buffer sharing (one ds_mpi) --

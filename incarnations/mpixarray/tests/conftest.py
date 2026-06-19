@@ -1,7 +1,7 @@
 """Shared fixtures for the incarnations/mpixarray regression tests.
 
-The serial (test_up_low_regression_attrs2.py) and MPI
-(test_up_low_regression_attrs2_mpi.py) regressions build the SAME toy
+The serial (test_up_low_regression.py) and MPI
+(test_up_low_regression_mpi.py) regressions build the SAME toy
 Upper/Lower model from ONE input dataset (`make_toy_input`) and validate against
 the SAME vectorized answers (`compute_answers`). Differences between the two are
 intentional and explicit:

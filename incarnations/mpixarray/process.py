@@ -1,18 +1,14 @@
 """
-base_attrs2.py
-==============
-Revised Process/accessor design. Compared with base_attrs.py:
+process.py
+==========
+The Process framework for incarnations/mpixarray: the DataArrayMeta field
+descriptor, the Process ABC, and the PWS xarray accessor. Concrete processes
+(Upper, Lower, ...) subclass Process in processes_concrete.py; the orchestrators
+(Model, ModelMPI) live in model.py.
 
-  base_attrs.py                      base_attrs2.py
-  -------------                      --------------
-  PWSAccessor dispatches via         PWS accessor dispatches via
-    ds.attrs["advance"](ds)            self._process.advance()
-    ds.attrs["calculate"](ds, dt)      self._process.calculate(dt)
-  advance/calculate are staticmethods  advance/calculate are instance methods
-  callables stored in ds.attrs       only ds.attrs["process_name"] (str) stored
-  standalone _make_process() fn      Process.new() classmethod
-  @process decorator                 Process.__init_subclass__ auto-registers
-  PWS._registry manual               Process._registry automatic
+The PWS accessor dispatches via self._process.advance()/calculate(); only the
+string ds.attrs["process_name"] is stored in attrs (no callables), and
+subclasses auto-register in Process._registry via __init_subclass__.
 
 Motivation: Polymorphism with the xarray accessor
 --------------------------------------------------
@@ -63,24 +59,16 @@ Run tests with: pytest tests/ -v
 
 import dataclasses
 import pathlib as pl
-import warnings
 from abc import ABC, abstractmethod
 from typing import Literal
 
 import numpy as np
 import xarray as xr
-from base import Input, Model, Output, open_xr  # noqa: F401
 
-# Optional MPI support -- present when mpixarray is installed.
-try:
-    from mpixarray import open_dataset as mpi_open_dataset
-
-    MPI_AVAILABLE = True
-except ImportError:
-    MPI_AVAILABLE = False
+from data_io import Input, open_xr
 
 # ---------------------------------------------------------------------------
-# DataArrayMeta -- unchanged from base_attrs.py
+# DataArrayMeta -- field descriptor for Process subclasses
 # ---------------------------------------------------------------------------
 
 
@@ -379,269 +367,3 @@ class PWS:
 
     def get_var_names(self) -> tuple[str, ...]:
         return self._process.get_var_names()
-
-
-# ---------------------------------------------------------------------------
-# Model (serial) and ModelMPI
-# ---------------------------------------------------------------------------
-
-
-class ModelAttrs(Model):  # noqa: keep for backward compat
-    """Serial model for Process subclasses from base_attrs2.py.
-
-    Calls cls.new(**init_dict) for each process. MPI is not used.
-
-    Usage:
-        with ModelAttrs(process_dict, control) as model:
-            model.run(dt, n_steps)
-    """
-
-    def _initialize_inputs_and_proceses(self) -> None:  # noqa: spelling
-        """Like Model._initialize_inputs_and_proceses but dispatches via
-        cls.new() for Process subclasses that define it."""
-        for kk, vv in self._process_dict.items():
-            init_dict = {kkk: vvv for kkk, vvv in vv.items() if kkk != "class"}
-
-            inputs_req = vv["class"].get_inputs()
-            input_outputs_req = vv["class"].get_mutable_inputs()
-            all_inputs = inputs_req + input_outputs_req
-
-            for ii in all_inputs:
-                if ii in init_dict.keys():
-                    data_or_file = init_dict[ii]
-                    if ii in inputs_req:
-                        read_only = True
-                    else:
-                        raise ValueError("This should not happen from file.")
-                    if ii not in self.inputs_dict.keys():
-                        init_dict[ii] = Input(
-                            data_or_file,
-                            read_only=read_only,
-                            load=self._load_all,
-                        )
-                        self.inputs_dict[ii] = init_dict[ii]
-                        assert init_dict[ii].data is self.inputs_dict[ii].data
-                        del data_or_file
-                    else:
-                        init_dict[ii] = self.inputs_dict[ii]
-                else:
-                    for pp in self.get_preceeding_processes(kk):
-                        proc = self.model_dict[pp]
-                        if isinstance(proc, xr.Dataset):
-                            var_names = proc.pws.get_var_names()  # type: ignore[attr-defined]
-                        else:
-                            var_names = proc.get_variables()
-                        if ii in var_names:
-                            init_dict[ii] = self.model_dict[pp][ii]
-
-            cls = vv["class"]
-            self.model_dict[kk] = cls.new(**init_dict)
-
-        return
-
-
-class ModelMPI(ModelAttrs):
-    """MPI streaming model: one space-decomposed dataset, time-streamed.
-
-    Catches up to the mpixarray streaming API:
-
-        open_dataset -> parallelize(dims=["space"]) -> set_streaming("time")
-        -> open_writer -> declare buffers -> create -> iter_time -> write
-
-    A *single* decomposed dataset (``ds_mpi``) carries every process's state,
-    parameters, per-step input buffers, and streaming outputs. Because there
-    is one dataset, cross-process buffer sharing (param_common, forcing_common,
-    Upper.flow -> Lower.flow) is *structural* -- the same named variable -- not
-    emulated by hand and asserted with ``a.values is b.values``.
-
-    The single ``parallelize()`` call is the spatial decomposition: the seam
-    where a Discretization will live. For now there is exactly one
-    discretization ("space"); multiple discretizations are future work.
-
-    control dict:
-        input_file        single combined input source (forcings + time-varying
-                          params as (time, space); static params + ICs as (space,))
-        output_file       streamed output file
-        output_var_names  state vars to stream to disk (see note below)
-
-    process_dict carries only the classes and their order (order defines the
-    Upper -> Lower dependency direction):
-        {"upper": {"class": Upper}, "lower": {"class": Lower}}
-
-    NOTE (mpixarray limitation): declaring a 2nd ``to_netcdf=True`` variable
-    currently trips the "cannot pickle 'module' object" deepcopy (the first
-    such declaration stamps the writer handle onto the shared coord attrs, and
-    the next ``from_numpy`` deepcopies them). So Phase 1 streams ONE output var
-    to disk; validate any others from final in-memory state. Revisit when that
-    mpixarray deepcopy bug is fixed.
-
-    Usage:
-        with ModelMPI(process_dict, control) as model:
-            model.run(dt)
-    """
-
-    def __init__(self, process_dict: dict, control: dict) -> None:
-        self._process_dict = process_dict
-        self._control = control
-        self._finalized = False
-        self.model_dict: dict = {}     # proc_name -> bound Process instance
-        self.inputs_dict: dict = {}    # unused: inputs stream from step.mpi.src
-        self._build()
-
-    # -- introspection helpers ------------------------------------------
-
-    def _proc_classes(self) -> dict:
-        return {kk: vv["class"] for kk, vv in self._process_dict.items()}
-
-    def _all_variable_names(self) -> set:
-        names: set = set()
-        for cls in self._proc_classes().values():
-            names |= set(cls.get_var_names())
-        return names
-
-    # -- construction ---------------------------------------------------
-
-    def _build(self) -> None:
-        f64 = np.float64
-        control = self._control
-        input_file = str(control["input_file"])
-        output_file = str(control["output_file"])
-        out_var_names = list(control["output_var_names"])
-
-        # ---- Discretization: open + decompose once over space ----
-        ds_input, comm = mpi_open_dataset(input_file)
-        self._ds_input = ds_input
-        n_time = int(ds_input.sizes["time"])
-        self._ntime = n_time
-
-        ds_input_mpi, comm = ds_input.mpi.parallelize(
-            dims=["space"], scheme="single", comm=comm
-        )
-        self._comm = comm
-
-        # ---- Stream over time. set_streaming drops the time-dimensioned
-        #      input vars (served per step via step.mpi.src) and keeps the
-        #      space-only static params + ICs as local buffers on ds_mpi. ----
-        ds_mpi = ds_input_mpi.mpi.set_streaming(
-            "time", window=1, out_times=list(range(n_time))
-        )
-
-        # Realize the static (space-only) survivors -- params + ICs -- in
-        # memory. Otherwise they stay lazy file-backed and each `.values`
-        # re-reads, so buffer sharing (param_common is ...) would not hold.
-        for name in list(ds_mpi.data_vars):
-            ds_mpi[name] = ds_mpi[name].load()
-
-        proc_classes = self._proc_classes()
-
-        # Time-varying parameters don't fit the streaming dichotomy
-        # (set_streaming drops time-dim vars; static params must be space-only).
-        # Phase 1 drops them -- warn explicitly. See pws_phoenix/CLAUDE.md.
-        for proc_name, cls in proc_classes.items():
-            for pname, meta in _dict_of_kind(cls, "parameter").items():
-                if "time" in meta.dims:
-                    warnings.warn(
-                        f"Time-varying parameter {pname!r} {meta.dims} on "
-                        f"process {proc_name!r} is unsupported in the MPI "
-                        f"streaming path (Phase 1) and is dropped.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-
-        # File-backed inputs that were dropped: refilled from src each step.
-        # An input is file-backed (vs. produced upstream) if no process owns
-        # a variable of that name.
-        var_names = self._all_variable_names()
-        file_input_names: list = []
-        for cls in proc_classes.values():
-            for ii in tuple(cls.get_inputs()) + tuple(cls.get_mutable_inputs()):
-                if ii not in var_names and ii not in file_input_names:
-                    file_input_names.append(ii)
-        self._file_input_names = file_input_names
-
-        # ---- Open writer ----
-        ds_mpi.mpi.open_writer(output_file, comm=comm)
-
-        # ---- Declare buffers: to_netcdf=False FIRST, to_netcdf=True LAST,
-        #      then create() (mpixarray declaration-ordering gotcha). ----
-        def _declare(name, dims, fill, to_netcdf):
-            ds_mpi.mpi[name] = {
-                "dims": dims,
-                "dtype": f64,
-                "fill_value": f64(fill),
-                "to_netcdf": to_netcdf,
-                "comm": comm,
-            }
-
-        declared: set = set()
-        # (a) state variables -- one buffer per name across processes
-        for cls in proc_classes.values():
-            for name in cls.get_var_names():
-                if name not in declared:
-                    _declare(name, ("space",), np.nan, False)
-                    declared.add(name)
-        # (b) per-step input buffers (refilled from src)
-        for name in file_input_names:
-            if name not in declared:
-                _declare(name, ("space",), np.nan, False)
-                declared.add(name)
-        # (c) streaming output buffers (to_netcdf=True) -- declared LAST
-        output_map: dict = {}  # state var name -> on-disk output buffer name
-        for name in out_var_names:
-            buf = f"{name}_out"
-            _declare(buf, ("time", "space"), 0.0, True)
-            output_map[name] = buf
-        self._output_map = output_map
-
-        ds_mpi.mpi.create(coords=None, data_vars=None)
-
-        # ---- Load initial conditions into state buffers. ICs are the
-        #      space-only vars that survived set_streaming (from the file). ----
-        for cls in proc_classes.values():
-            for name, meta in cls.get_variables().items():
-                if meta.initial is not None and meta.initial in ds_mpi.data_vars:
-                    ds_mpi[name].values[:] = ds_mpi[meta.initial].values
-
-        self._ds_mpi = ds_mpi
-
-        # ---- Bind processes to the shared dataset (no .pws: one dataset
-        #      hosts many processes, so dispatch on instances directly). ----
-        for proc_name, cls in proc_classes.items():
-            self.model_dict[proc_name] = cls(ds_mpi)
-
-    # -- run ------------------------------------------------------------
-
-    def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:
-        """Stream the time loop via iter_time(); n_steps is ignored (the
-        streaming source defines the count)."""
-        if self._finalized:
-            raise RuntimeError("Cannot run a finalized Model.")
-        ds_mpi = self._ds_mpi
-        procs = list(self.model_dict.values())
-        for step in ds_mpi.mpi.iter_time():
-            src = step.mpi.src
-            # Refill this step's input buffers from the source slab.
-            for name in self._file_input_names:
-                step[name].values[:] = src[name].values[0, :]
-            # Bind processes to the current step (shares the persistent
-            # state buffers, so the Markov chain carries across steps).
-            for proc in procs:
-                proc._obj = step
-            for proc in procs:
-                proc.advance()
-            for proc in procs:
-                proc.calculate(dt)
-            # Record state into the streaming output slab(s) and write.
-            for src_name, buf in self._output_map.items():
-                step[buf].values[0, :] = step[src_name].values[:]
-                if step.mpi.is_output_step:
-                    step[buf].mpi.write()
-
-    # -- finalize -------------------------------------------------------
-
-    def finalize(self) -> None:
-        if self._finalized:
-            return
-        self._ds_mpi.mpi.finalize()
-        self._ds_input.mpi.finalize()
-        self._finalized = True

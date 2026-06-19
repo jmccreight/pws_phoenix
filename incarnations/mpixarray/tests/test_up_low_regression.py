@@ -1,9 +1,9 @@
-"""Serial regression for base_attrs2.py -- Upper/Lower toy model via ModelAttrs.
+"""Serial regression for the Upper/Lower toy model via Model (model.py).
 
 Shares `dimensions`, `make_toy_input`, and `compute_answers` with the MPI
 regression (see conftest.py). The one toy dataset is either kept in memory or
 round-tripped through per-input NetCDF files (the `memory`/`file`
-parameterization) and fed to ModelAttrs; output is a single zarr store.
+parameterization) and fed to Model; output is a single zarr store.
 """
 
 import pathlib as pl
@@ -14,15 +14,16 @@ import pytest
 import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent.parent))
-from base_attrs2 import ModelAttrs, Process
-from processes_attrs2 import Lower, Upper
+from model import Model
+from process import Process
+from processes_concrete import Lower, Upper
 
 # Upper's and Lower's parameter sets (union passed to both; each selects its own)
 PARAM_NAMES = ["param_up_0", "param_up_1", "param_low_0", "param_common"]
 
 
-class TestRegressionAttrs2:
-    """Regression tests for the base_attrs2.py serial process design."""
+class TestRegression:
+    """Regression tests for the serial Process design (model.py / process.py)."""
 
     # ============ FIXTURES ============
 
@@ -95,7 +96,7 @@ class TestRegressionAttrs2:
             flow_initial=toy_ds["flow_initial"],
         )
         assert upper.attrs["process_name"] == "Upper"
-        # attrs must stay callable-free: base_attrs2 resolves behavior via
+        # attrs must stay callable-free: process.py resolves behavior via
         # Process._registry (keyed by the process_name string), not by stashing
         # advance/calculate in attrs. Callables would also break NetCDF/zarr
         # serialization and pickle/deepcopy of the dataset.
@@ -103,7 +104,7 @@ class TestRegressionAttrs2:
             assert not callable(val), f"callable found in attrs: {val}"
 
     def test_model_regression(self, dimensions, model_inputs, control_config, answers):
-        """Full regression: run ModelAttrs, check buffer sharing, numerics, output."""
+        """Full regression: run Model, check buffer sharing, numerics, output."""
         process_dict = {
             "upper": {
                 "class": Upper,
@@ -121,7 +122,7 @@ class TestRegressionAttrs2:
         }
 
         dt = np.float64(1.0)
-        with ModelAttrs(process_dict, control_config) as model:
+        with Model(process_dict, control_config) as model:
             model.run(dt, np.int32(dimensions["n_time"]))
 
         # -- buffer sharing (by-reference wiring) --

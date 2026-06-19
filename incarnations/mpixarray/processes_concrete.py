@@ -1,39 +1,20 @@
 """
-processes_attrs2.py
-===================
-Upper and Lower as explicit Process subclasses using base_attrs2.py.
+processes_concrete.py
+=====================
+Upper and Lower: concrete Process subclasses for the toy Upper/Lower model.
 
-Compare with processes_attrs.py:
-
-  processes_attrs.py                 processes_attrs2.py
-  ------------------                 -------------------
-  @process                           class Upper(Process):  # no decorator
-  class Upper:                           ...
-      @staticmethod                      def advance(self):
-      def advance(ds): ...                   self._obj[...] = ...
-      @staticmethod
-      def calculate(ds, dt): ...         def calculate(self, dt):
-                                             self._calculate(...)
-
-                                         @staticmethod
-                                         def _calculate(...):  # numba target
-                                             ...
-
-  Upper(parameters=..., **kwargs)    Upper.new(parameters=..., **kwargs)
-
-Key differences from processes_attrs.py:
-  - No @process decorator -- Upper/Lower are plain Process subclasses
-  - Auto-registered in Process._registry via __init_subclass__
-  - Construction via Upper.new(...) -- classmethod on the ABC
-  - advance(self) / calculate(self, dt) are instance methods using self._obj
+  - No decorator -- Upper/Lower subclass Process directly.
+  - Auto-registered in Process._registry via __init_subclass__.
+  - Construction via Upper.new(...) -- classmethod on the ABC.
+  - advance(self) / calculate(self, dt) are instance methods using self._obj.
   - _calculate is a @staticmethod taking raw numpy arrays -- the natural
-    target for @numba.jit when performance work begins
+    target for @numba.jit when performance work begins.
   - Upper/Lower added as class attrs on PWS for construction syntax:
       Upper.new(...) or xr.Dataset.pws.Upper.new(...)
 """
 
 import numpy as np
-from base_attrs2 import PWS, DataArrayMeta, Process
+from process import PWS, DataArrayMeta, Process
 
 
 class Upper(Process):

@@ -70,9 +70,13 @@ If additional context arises about this project which is useful to add, please l
 
 # incarnations/mpixarray design notes
 
-`incarnations/mpixarray/` blends the serial xr Process framework
-(`base_attrs2.py`, `processes_attrs2.py`) with mpixarray's streaming MPI IO.
-Phase 1 is implemented and tested (serial via pytest; MPI via pytest-mpi).
+`incarnations/mpixarray/` blends the serial xr Process framework (from
+`incarnations/xr/`) with mpixarray's streaming MPI IO. The code is split into
+`data_io.py` (IO primitives), `process.py` (the Process framework + `PWS`
+accessor), `model.py` (`Model` serial + `ModelMPI` streaming), and
+`processes_concrete.py` (the toy Upper/Lower processes); the import stack is
+`data_io ← process ← model` and `process ← processes_concrete`. Phase 1 is
+implemented and tested (serial via pytest; MPI via pytest-mpi).
 
 ## Core decision: discretization = the unit of decomposition
 
@@ -81,7 +85,7 @@ The unit of MPI decomposition (and of barriers / the shared dataset) is the
 "one dataset per discretization." The toy model has exactly one (`space`);
 multiple discretizations are Phase 2.
 
-## Serial path (`Model` / `ModelAttrs`, `base.py` + `base_attrs2.py`)
+## Serial path (`Model` in `model.py`)
 
 - `Process.new()` builds a per-process `xr.Dataset`: parameters loaded in place
   on the shared parent, inputs wired by reference. Cross-process buffer sharing
@@ -89,12 +93,12 @@ multiple discretizations are Phase 2.
   reference and checked with `a.values is b.values`.
 - The `PWS` accessor dispatches `advance()`/`calculate()` via
   `ds.attrs["process_name"]` → `Process._registry`.
-- Output: `base.Output` — a buffered, time-chunked **zarr** writer (adapted
+- Output: `data_io.Output` — a buffered, time-chunked **zarr** writer (adapted
   from pywatershed `base/output.py`): one store at `output_dir/output.zarr`,
   all output vars as data_vars, lazy-init sized to `n_times`, full-chunk region
   writes + a partial tail at `finalize`. (netCDF4 was dropped.)
 
-## MPI path (`ModelMPI`, `base_attrs2.py`) — single-decomposition streaming
+## MPI path (`ModelMPI` in `model.py`) — single-decomposition streaming
 
 Uses the real mpixarray streaming API:
 `open_dataset → parallelize(dims=["space"]) → set_streaming("time") →
@@ -177,3 +181,159 @@ still need a naming discipline or sub-grouping.
 Moot for *users* (`ds_mpi` is never inspected interactively); this is a
 *developer*-facing concern -- reasoning plus the buffer-sharing correctness
 invariant.
+
+## Forward design (June 2026 discussion): structure, schedule, open topics
+
+A working model from design discussion -- **not yet implemented**; it frames the
+move from the single-discretization toy to multi-grid pws. Expands on the
+container-model topic above.
+
+Target structure -- a tree (conceptually a DataTree; see the data-model caveat):
+`Model (root) → {discretizations, maps} → {processes, transforms}`.
+
+- **Model (root):** time, config/options ("Global"), and the run schedule.
+- **Discretization:** a grid -- coords + topology + grid-shared data (inherited
+  by its processes). One discretization can back several processes.
+- **Process:** lives on one discretization; private state + params; `advance` /
+  `calculate` operate on its view.
+- **Map:** couples two discretizations; **bidirectional**, holding a fwd and a
+  rev transform (e.g. disaggregate `dis0→dis1`, aggregate `dis1→dis0`), usually
+  parameterized by cross-grid weights. Maps are also where cross-discretization
+  MPI partitioning/comm will live (internal, never user-facing).
+
+Containment (where data/code live) -- general multi-grid example:
+
+```
+Model (root)                       -- time, config + run schedule
+|
++- Discretization: dis0 (hru)      -- coords, topology, grid-shared data
+|  +- Process: Snow
+|  +- Process: ...
+|
++- Discretization: dis1 (terrain/veg, finer)
+|  +- Process: Shading
+|
++- Map: dis0 <-> dis1              -- fwd dis0->dis1 (disaggregate)
+                                      rev dis1->dis0 (aggregate)
+```
+
+```mermaid
+graph TD
+    Model["Model (root): time, config + schedule"]
+    Model --> D0["Discretization dis0 (hru)<br/>coords, topology, grid-shared data"]
+    Model --> D1["Discretization dis1 (finer)<br/>coords, topology"]
+    Model --> Map["Map dis0 ⇄ dis1<br/>fwd: disaggregate · rev: aggregate"]
+    D0 --> Snow["Process: Snow"]
+    D1 --> Shade["Process: Shading"]
+    Map -. couples .- D0
+    Map -. couples .- D1
+```
+
+The current toy model is the degenerate single-grid case:
+
+```
+Model
++- Discretization: space
+   +- Process: Upper
+   +- Process: Lower            (Upper.flow -> Lower.flow shared within grid)
+```
+
+**Schedule (sub-timestep graph).** Keep two graphs separate: *containment*
+(above) vs *execution order* (what runs).
+
+- **Process order is optional** -- defaults to a known order, subsetted to the
+  active processes. **Grid correspondences (maps) are required** (defined once;
+  never placed in the order).
+- **Maps are implied,** not scheduled -- inserted at each grid boundary in the
+  order. The order says *when* to cross; each process's declared I/O says *what*
+  the map carries (the consumer's inputs last produced on another grid).
+- **Validation:** error if any process input is not found (forcing / prior
+  output / mappable via a registered map).
+- **Scope: explicit (one-pass) solutions only.** Iterative cross-grid coupling
+  (fixed-point loops) is deliberately out of scope for now (it would need a loop,
+  not a flat order).
+
+Execution example -- author writes only the order; the Model inserts the map
+steps where consecutive processes change grid:
+
+```
+author: [ Snow.dis0, Shading.dis1, SnowMelt.dis0 ]
+
+Model expands to:
+   Snow      (dis0)
+     | map dis0->dis1   (carries Snow outputs Shading needs)
+   Shading   (dis1)
+     | map dis1->dis0   (carries Shading outputs SnowMelt needs)
+   SnowMelt  (dis0)
+```
+
+**Open topics (not yet decided):**
+
+- **Data model (the hard one).** Be skeptical of hierarchy/DataTree as the
+  *physical* layout: the data model's #1 job is zero-copy buffer sharing, which a
+  tree does not give (DataTree inherits coords, not data vars; shared vars are
+  cross-cutting and fight the tree). DataTree is also serial-only today
+  (mpixarray lacks it), so adopting it re-forks serial vs MPI. Reframe: separate
+  the *conceptual* hierarchy (a view/API: namespacing, output groups) from the
+  *physical* layout (a flat pool of shared buffers). The question is "same
+  structure or decoupled?", not "DataTree y/n." (See container-model unification.)
+- **Process composition** (a Process *has* a sub-Process; in the pywatershed dev
+  branch): a second, orthogonal hierarchy (process-containment vs
+  discretization-containment). Decide encapsulated (outer declares the union I/O;
+  inner hidden from the scheduler) vs transparent.
+- **FlowGraph** (pywatershed; a `Process` subclass that is itself a graph of
+  heterogeneous node units, with `_addtl_output_vars`): REVISIT when the code is
+  shared -- stress-tests composition + the data model.
+- **Also:** a buffer-ownership rule (one owner, others view -- the zero-copy
+  invariant made explicit); restart/checkpoint (serialize full state incl.
+  `*_previous`); process-instance multiplicity (can a type appear >1x? keys /
+  identity); the single-rate-time assumption (one dt for all).
+
+## Input structuring: serial vs MPI, multi-file / datatree (June 2026)
+
+Design discussion -- **not yet implemented.** Dislike of the "kitchen sink"
+all-in-one MPI input file, which gets worse as processes grow. This is the
+input-side **mirror of the data-model open topic** above (same logical-vs-
+physical split); one naming/namespacing convention should serve all three:
+input grouping <-> runtime var names <-> output groups.
+
+**The asymmetry today:**
+
+- **Serial is already structured** -- the `file` path writes one NetCDF *per
+  logical input* (`parameters.nc`, `forcing_0.nc`, ...) and the Model dedups
+  shared files. Multi-file input already works.
+- **MPI is the kitchen sink** -- `make_toy_input(...).to_netcdf(one_file)`,
+  then `open_dataset -> parallelize -> set_streaming`. The single file is
+  forced by the *dataset-anchored* streaming API: `set_streaming`/`iter_time`
+  drive **one** time loop over **one** dataset. So the gap is MPI-only.
+
+**DataTree's honest fit:** attractive as *input packaging* -- an on-disk
+hierarchy (`/parameters/upper`, `/forcing`, ...) gives the structure +
+namespacing wanted, and DataTree-on-zarr is a real format. But mpixarray
+can't parallelize/stream a DataTree (serial-only there; no cross-node buffer
+sharing), so **flatten it to flat Dataset(s) before handing it to mpixarray.**
+That makes datatree *storage sugar*, not a runtime container -- which dodges
+the mpixarray-fork problems.
+
+**The lever -- split static vs streamed inputs:**
+
+- *Static* (params, ICs; space-only): trivially merged into the one `ds_mpi`
+  after `parallelize`, load-once. Multi-file here is ~free and keeps Phase 1's
+  structural sharing.
+- *Streamed* (time-varying forcings; time x space): the **only** hard part --
+  multiple streamed files = multiple `iter_time` loops to co-step.
+
+**Two strategies (the "merge or manage" framing):**
+
+- **merge** -- combine into one stream; keeps structural buffer sharing, but
+  the merge must stay stream-compatible.
+- **manage** -- co-iterate N streams; keeps disk structured, but needs API
+  support *and* reintroduces cross-stream buffer sharing.
+
+**Crux question for the mpixarray dev:** can >= 2 parallelized + streamed
+datasets be co-iterated (or merged) into one streaming view?
+
+**Near-term, low-risk path:** accept structured / multi-file (or a DataTree)
+input, **merge/flatten the static parts into the one `ds_mpi` before
+`parallelize`,** and defer multi-*streamed*-forcing to the dev question above.
+Keeps Phase 1 intact and makes input-authoring symmetric with serial.
