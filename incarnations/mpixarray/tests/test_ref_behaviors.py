@@ -1,11 +1,10 @@
 """
 MREs for numpy buffer-sharing through xarray DataArrays and Datasets.
 
-Purpose:
-  1. Document xarray behaviour that base.py relies on for zero-copy
-     inter-process communication.
-  2. Candidate tests for the xarray test suite.
-
+Ported from incarnations/xr (retired; see git history). Documents the xarray
+behaviour that process.py's Process.new() relies on for zero-copy inter-process
+buffer sharing in the serial path, and is a candidate test set for the xarray
+test suite.
 
 General finding (current xarray, numpy-backed DataArrays)
 ----------------------------------------------------------
@@ -21,16 +20,18 @@ variables are backed by NetCDF readers, not numpy arrays. In that case,
 variable selection produces a new lazy Dataset and each .values access reads
 from disk, producing a fresh numpy array -- buffer identity is NOT preserved.
 
-This is the operation in Process.__init__:
+This is why Process.new() (process.py) loads the needed parameters in place on
+the shared parent Dataset *before* selecting them:
 
-    self.data = parameters[list(self.get_parameters())]
+    for pp in param_names:
+        parameters[pp].load()           # selective in-place load -> buffers
+    ds = parameters[list(param_names)]  # selection now preserves identity
 
-In practice, parameters come from files opened via xr.open_dataset. The copy
-DOES happen there, and the .values= trick on line 216 of base.py is
-load-bearing, not redundant. The "copy above" comment is correct.
-The .values= trick forces a read on the shared parent Dataset (caching the
-numpy array there), then assigns that cached array into self.data, so all
-processes sharing the same file end up pointing at the same buffer.
+Without the selective .load(), file-backed parameters would copy on selection
+and cross-process sharing (param_common, etc.) would silently break. Inputs are
+then wired by reference via `ds[ii] = inp.current_values`, which __setitem__
+keeps zero-copy (Section 1), so Input.advance()'s [:] updates propagate to every
+process sharing the buffer (Section 3).
 """
 
 import numpy as np
@@ -121,13 +122,11 @@ class TestSetitemPreservesBuffer:
         assert ds["v1"].values is subset["v1"].values is arr
         assert ds["v2"].values is subset["v2"].values is arr2
 
-    def test_variable_selection_file_backed_copies_buffer(
-        self, nc_params_file
-    ):
+    def test_variable_selection_file_backed_copies_buffer(self, nc_params_file):
         # Lazy file-backed Dataset: variable selection produces a new lazy
         # Dataset. Each .values access reads from disk -- fresh numpy array
         # each time, so buffer identity is NOT preserved across the selection.
-        # This is why the .values= trick in Process.__init__ is load-bearing.
+        # This is why the selective .load() in Process.new() is load-bearing.
         ds = xr.open_dataset(nc_params_file)
         subset = ds[["v1", "v2"]]
         assert subset["v1"].values is not ds["v1"].values
@@ -154,8 +153,8 @@ class TestSetitemPreservesBuffer:
         # in-place, leaving other variables (v3) still lazy.
         # Subsequent variable selection on the partially-loaded Dataset
         # preserves buffer identity for the loaded variables only.
-        # This is more memory-efficient than ds.load() when only a subset
-        # of variables is needed -- the Process.__init__ use case.
+        # This is the Process.new() use case (more memory-efficient than
+        # ds.load() when only a subset of variables is needed).
         var_list = ["v1", "v2"]
         ds = xr.open_dataset(nc_params_file)
         for vv in var_list:

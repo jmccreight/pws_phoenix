@@ -70,8 +70,10 @@ If additional context arises about this project which is useful to add, please l
 
 # incarnations/mpixarray design notes
 
-`incarnations/mpixarray/` blends the serial xr Process framework (from
-`incarnations/xr/`) with mpixarray's streaming MPI IO. The code is split into
+`incarnations/mpixarray/` blends the serial xr Process framework (developed in
+`incarnations/xr/`, since retired -- see git history; its design summary is
+distilled in "Prior art" below) with mpixarray's streaming MPI IO. The code is
+split into
 `data_io.py` (IO primitives), `process.py` (the Process framework + `PWS`
 accessor), `model.py` (`Model` serial + `ModelMPI` streaming), and
 `processes_concrete.py` (the toy Upper/Lower processes); the import stack is
@@ -337,3 +339,54 @@ datasets be co-iterated (or merged) into one streaming view?
 input, **merge/flatten the static parts into the one `ds_mpi` before
 `parallelize`,** and defer multi-*streamed*-forcing to the dev question above.
 Keeps Phase 1 intact and makes input-authoring symmetric with serial.
+
+## Prior art: xarray-simlab & Landlab (from the retired xr design summary, Apr 2026)
+
+Distilled from `incarnations/xr/design_summary.md` (retired -- full text in git
+history). These comparisons still inform the direction.
+
+**xarray-simlab** (https://xarray-simlab.readthedocs.io)
+- *Variable declaration:* simlab uses class-level, attrs-style declarations with
+  `intent` (`xs.variable(dims='x', intent='inout')`, `xs.foreign(Other, 'v',
+  intent='in')`). Our `DataArrayMeta` fields are the same spirit; `xs.foreign` is
+  the explicit, build-time-checked equivalent of our by-name inter-process input
+  wiring (we resolve at runtime).
+- *Dependency resolution:* simlab builds an explicit DAG and topologically sorts;
+  we use process order -- equivalent for linear chains, less safe for diamonds
+  (see the schedule notes above).
+- *Data sharing:* simlab routes foreign vars through a state store each step
+  (more copying); ours is zero-copy numpy-reference sharing -- faster but
+  dependent on xarray/numpy internals (hence `tests/test_ref_behaviors.py`).
+- *Interface:* simlab is `xr.Dataset` in/out (notebook-friendly); ours is
+  explicit config + separate streamed IO (better for long / MPI runs).
+- *Net:* simlab is more polished / compositional / ecosystem-integrated; ours
+  makes more deliberate performance/memory choices and is more transparent about
+  in-memory layout.
+
+**Landlab** (https://landlab.readthedocs.io)
+- *Sharing:* Landlab components read/write a shared `ModelGrid` field dict
+  (implicit sharing by field-name string -- a global namespace); we wire numpy
+  buffers explicitly at init (asserted) -- more transparent in the framework,
+  less at the script level.
+- *Grid-centricity:* Landlab is deeply 2D-grid-centric; ours is
+  dimension-agnostic (space is just an xarray dim -- natural for HRUs /
+  sub-basins / 1D reaches; Landlab wins for gridded 2D PDEs).
+- *Component interface:* Landlab's `_input_var_names`/`_output_var_names` +
+  `run_one_step(dt)` parallels our `get_inputs()`/`get_variables()`; we split
+  `advance()` (state bookkeeping) from `calculate(dt)` (physics) -- cleaner when
+  advance is non-trivial (saving `*_previous`).
+
+**Architecture conclusion (Landlab coupling) -- feeds the Maps/Discretization
+design.** From the summary's Section 9 (detail in
+`external_repos/landlab/landlab_overview.md`):
+- A formal **Discretization** (an `xr.Dataset` of HRU areas / connectivity /
+  slopes) is worthwhile independent of Landlab and is the **natural unit of MPI
+  partitioning** -- the core decision at the top of these notes.
+- Keep coupled models on **separate grids**; compute **conservative mapping
+  operators offline** as **sparse weight matrices**; use **BMI** as the runtime
+  exchange layer (no shared grid object). Same shape as the bidirectional
+  **Maps** in the forward-design section (fwd/rev transforms, cross-grid weights).
+
+**Still-open items noted in the summary:** normalize paths (`.resolve()`) before
+file dedup; cross-input time-consistency validation (relates to *Input
+structuring* above); finish or remove the from-file `get_mutable_inputs` path.

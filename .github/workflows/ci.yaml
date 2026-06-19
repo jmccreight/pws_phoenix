@@ -11,46 +11,43 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_COLOR: 1
-    strategy:
-      matrix:
-        python-version: ["3.14"]
+    defaults:
+      run:
+        shell: bash -el {0}  # login shell so the micromamba env is active
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+      # Build the pwpx serial dev env from environment.yaml (prefer .yaml). The
+      # MPI/mpixarray stack is intentionally absent -- CI runs serial tests only;
+      # the MPI streaming test runs locally / on HPC. See pws_phoenix/CLAUDE.md.
+      - name: Set up environment (pwpx)
+        uses: mamba-org/setup-micromamba@v2
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-xdist pytest-cov numpy xarray netcdf4 pathlib ruff mypy
-          # Install additional dependencies if requirements file exists
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f environment.yml ]; then pip install -r <(grep -E "^\s*-\s+" environment.yml | sed 's/^\s*-\s*//'); fi
+          environment-file: environment.yaml
+          cache-environment: true
 
       - name: Lint
-        run: ruff check incarnations/xr/
+        run: ruff check incarnations/mpixarray/
 
       - name: Format
-        run: ruff format --check incarnations/xr/
+        run: ruff format --check incarnations/mpixarray/
 
       - name: mypy
-        run: mypy --check-untyped-defs incarnations/xr/
+        run: mypy --check-untyped-defs --ignore-missing-imports incarnations/mpixarray/
 
-      - name: Run tests
+      - name: Run serial tests
         run: |
-          cd incarnations/xr
+          cd incarnations/mpixarray
           python -m pytest tests/ -vv -n=4 \
-          --cov=. --cov-report=xml --cov-report=term-missing \
-          --junitxml=junit.xml -o junit_family=legacy
+            --ignore=tests/test_up_low_regression_mpi.py \
+            --cov=. --cov-report=xml --cov-report=term-missing \
+            --junitxml=junit.xml -o junit_family=legacy
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
-          file: ./incarnations/xr/coverage.xml
+          file: ./incarnations/mpixarray/coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
@@ -58,14 +55,14 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results-${{ matrix.python-version }}
-          path: ./incarnations/xr/junit.xml
+          name: test-results
+          path: ./incarnations/mpixarray/junit.xml
 
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v5
         with:
-          file: ./incarnations/xr/junit.xml
+          file: ./incarnations/mpixarray/junit.xml
           report_type: test_results
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false

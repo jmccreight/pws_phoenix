@@ -16,7 +16,8 @@
 
 ## Internal design considerations
 
-See pws_phoenix/incarnations/xr/design_summary.md
+See CLAUDE.md for design notes and discussion (incl. the xarray-simlab /
+Landlab comparisons distilled from the retired xr design summary).
 
 1. Within process parallelism (over space): embarassing parallel; DAG ordered parallelism
 2. Use xarray accessor pattern (?)
