@@ -122,7 +122,9 @@ class TestSetitemPreservesBuffer:
         assert ds["v1"].values is subset["v1"].values is arr
         assert ds["v2"].values is subset["v2"].values is arr2
 
-    def test_variable_selection_file_backed_copies_buffer(self, nc_params_file):
+    def test_variable_selection_file_backed_copies_buffer(
+        self, nc_params_file
+    ):
         # Lazy file-backed Dataset: variable selection produces a new lazy
         # Dataset. Each .values access reads from disk -- fresh numpy array
         # each time, so buffer identity is NOT preserved across the selection.

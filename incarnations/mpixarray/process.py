@@ -105,7 +105,9 @@ def _proc_subclass_mro(cls: type) -> tuple[type, ...]:
     giving consistent ordering when walking the hierarchy.
     """
     _exclude = {"Process", "ABC", "object"}
-    return tuple(cc for cc in reversed(cls.__mro__) if cc.__name__ not in _exclude)
+    return tuple(
+        cc for cc in reversed(cls.__mro__) if cc.__name__ not in _exclude
+    )
 
 
 def _keys_of_kind(cls: type, kind: str) -> tuple[str, ...]:
@@ -335,7 +337,9 @@ class PWS:
 
     def __init__(self, xarray_obj: xr.Dataset) -> None:
         self._obj = xarray_obj
-        self._process = Process._registry[self._obj.attrs["process_name"]](self._obj)
+        self._process = Process._registry[self._obj.attrs["process_name"]](
+            self._obj
+        )
 
     # ------------------------------------------------------------------
     # Computation

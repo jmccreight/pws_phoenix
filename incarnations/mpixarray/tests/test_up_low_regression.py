@@ -59,7 +59,12 @@ class TestRegression:
             "storage_initial": data_dir / "storage_initial.nc",
         }
         toy_ds[PARAM_NAMES].to_netcdf(paths["parameters"])
-        for name in ("forcing_0", "forcing_common", "flow_initial", "storage_initial"):
+        for name in (
+            "forcing_0",
+            "forcing_common",
+            "flow_initial",
+            "storage_initial",
+        ):
             toy_ds[name].to_netcdf(paths[name])
         return paths
 
@@ -103,7 +108,9 @@ class TestRegression:
         for val in upper.attrs.values():
             assert not callable(val), f"callable found in attrs: {val}"
 
-    def test_model_regression(self, dimensions, model_inputs, control_config, answers):
+    def test_model_regression(
+        self, dimensions, model_inputs, control_config, answers
+    ):
         """Full regression: run Model, check buffer sharing, numerics, output."""
         process_dict = {
             "upper": {

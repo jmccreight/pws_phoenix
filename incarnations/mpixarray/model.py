@@ -88,7 +88,10 @@ class Model:
         # overrides __init__, so it never reaches this block.
         self.output = None
         if "output_var_names" in control or "output_dir" in control:
-            if "output_var_names" not in control or "output_dir" not in control:
+            if (
+                "output_var_names" not in control
+                or "output_dir" not in control
+            ):
                 raise ValueError(
                     "output_var_names and output_dir must both be specified "
                     "in the control dict."
@@ -304,8 +307,8 @@ class ModelMPI(Model):
         self._process_dict = process_dict
         self._control = control
         self._finalized = False
-        self.model_dict: dict = {}     # proc_name -> bound Process instance
-        self.inputs_dict: dict = {}    # unused: inputs stream from step.mpi.src
+        self.model_dict: dict = {}  # proc_name -> bound Process instance
+        self.inputs_dict: dict = {}  # unused: inputs stream from step.mpi.src
         self._build()
 
     # -- introspection helpers ------------------------------------------
@@ -374,7 +377,9 @@ class ModelMPI(Model):
         var_names = self._all_variable_names()
         file_input_names: list = []
         for cls in proc_classes.values():
-            for ii in tuple(cls.get_inputs()) + tuple(cls.get_mutable_inputs()):
+            for ii in tuple(cls.get_inputs()) + tuple(
+                cls.get_mutable_inputs()
+            ):
                 if ii not in var_names and ii not in file_input_names:
                     file_input_names.append(ii)
         self._file_input_names = file_input_names
@@ -419,7 +424,10 @@ class ModelMPI(Model):
         #      space-only vars that survived set_streaming (from the file). ----
         for cls in proc_classes.values():
             for name, meta in cls.get_variables().items():
-                if meta.initial is not None and meta.initial in ds_mpi.data_vars:
+                if (
+                    meta.initial is not None
+                    and meta.initial in ds_mpi.data_vars
+                ):
                     ds_mpi[name].values[:] = ds_mpi[meta.initial].values
 
         self._ds_mpi = ds_mpi

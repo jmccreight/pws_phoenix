@@ -27,8 +27,8 @@ def dimensions():
     n_space = 20
     start_year = 2000
     start_time = np.datetime64(f"{start_year}-01-01")
-    end_time = (
-        np.datetime64(f"{start_year + n_years}-01-01") - np.timedelta64(1, "D")
+    end_time = np.datetime64(f"{start_year + n_years}-01-01") - np.timedelta64(
+        1, "D"
     )
     time = np.arange(start_time, end_time, dtype="datetime64[D]")
     space = np.arange(n_space)
