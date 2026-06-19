@@ -24,7 +24,9 @@ import xarray as xr
 # import surface minimal; the MPI path streams via mpixarray and never uses it.
 
 
-def open_xr(path: pl.Path, load: bool = False) -> Union[xr.DataArray, xr.Dataset]:
+def open_xr(
+    path: pl.Path, load: bool = False
+) -> Union[xr.DataArray, xr.Dataset]:
     """Open a NetCDF file and return a DataArray (single var) or Dataset."""
     ds = xr.open_dataset(path)
     da_ds: Union[xr.DataArray, xr.Dataset]
@@ -137,7 +139,7 @@ class Output:
         self.current_time_step = 0
 
         # zarr store, opened lazily on the first chunk write
-        self._zarr_store = None
+        self._zarr_store: Any = None  # zarr handle; Any (zarr is untyped here)
         self._zarr_initialized = False
 
     def initialize_variable_tracking(self, model_dict: Dict[str, Any]) -> None:
@@ -163,7 +165,9 @@ class Output:
                     break
 
             if not found:
-                raise ValueError(f"Variable '{var_name}' not found in any process")
+                raise ValueError(
+                    f"Variable '{var_name}' not found in any process"
+                )
 
         self._initialize_buffers()
 
@@ -172,7 +176,9 @@ class Output:
         for var_name, var_ref in self.variable_refs.items():
             # Buffer: (time_chunk_size, *spatial_dims)
             buffer_shape = (self.time_chunk_size,) + var_ref.shape
-            self.data_buffers[var_name] = np.empty(buffer_shape, dtype=var_ref.dtype)
+            self.data_buffers[var_name] = np.empty(
+                buffer_shape, dtype=var_ref.dtype
+            )
 
     def collect_current_timestep(self, time_index: int) -> None:
         """Buffer this step's values; flush a full chunk when the buffer fills.
@@ -215,10 +221,14 @@ class Output:
                     var_ref.coords[spatial_dim].values,
                 )
             # One chunk spans the full spatial extent; time chunked by buffer.
-            encoding[var_name] = {"chunks": (self.time_chunk_size,) + spatial_shape}
+            encoding[var_name] = {
+                "chunks": (self.time_chunk_size,) + spatial_shape
+            }
 
         ds = xr.Dataset(data_vars, coords=coords)
-        ds.to_zarr(self.output_store, mode="w", encoding=encoding, consolidated=False)
+        ds.to_zarr(
+            self.output_store, mode="w", encoding=encoding, consolidated=False
+        )
         self._zarr_store = zarr.open(str(self.output_store), mode="r+")
         self._zarr_initialized = True
 
@@ -229,9 +239,9 @@ class Output:
         chunk_end = self.current_time_step
         chunk_start = chunk_end - self.time_chunk_size
         for var_name in self.variable_names:
-            self._zarr_store[var_name][chunk_start:chunk_end] = self.data_buffers[
-                var_name
-            ]
+            self._zarr_store[var_name][chunk_start:chunk_end] = (
+                self.data_buffers[var_name]
+            )
 
     def finalize(self) -> None:
         """Region-write any remaining partial buffer and release the store."""
@@ -242,7 +252,7 @@ class Output:
             chunk_end = self.current_time_step
             chunk_start = chunk_end - remaining
             for var_name in self.variable_names:
-                self._zarr_store[var_name][chunk_start:chunk_end] = self.data_buffers[
-                    var_name
-                ][:remaining]
+                self._zarr_store[var_name][chunk_start:chunk_end] = (
+                    self.data_buffers[var_name][:remaining]
+                )
         self._zarr_store = None

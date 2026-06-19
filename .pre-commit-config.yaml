@@ -4,7 +4,14 @@ repos:
     rev: v1.11.0
     hooks:
       - id: mypy
+        name: mypy (incarnations/xr)
         args: [--check-untyped-defs, incarnations/xr/]
+        pass_filenames: false
+        always_run: true
+        additional_dependencies: [numpy, xarray, netCDF4, pytest]
+      - id: mypy
+        name: mypy (incarnations/mpixarray)
+        args: [--check-untyped-defs, --ignore-missing-imports, incarnations/mpixarray/]
         pass_filenames: false
         always_run: true
         additional_dependencies: [numpy, xarray, netCDF4, pytest]

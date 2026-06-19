@@ -45,6 +45,9 @@ def mpi_paths(dimensions, make_toy_input):
     comm = MPI.COMM_WORLD
     tmp = tempfile.mkdtemp() if comm.rank == 0 else None
     tmp = comm.bcast(tmp, root=0)
+    assert (
+        tmp is not None
+    )  # set on rank 0, broadcast to all -> narrows str|None -> str
     data_dir = pl.Path(tmp) / "toy_model_mpi_data"
     input_file = data_dir / "model_input.nc"
     output_file = data_dir / "model_output.nc"
@@ -91,7 +94,9 @@ def mpi_run(mpi_paths):
     control = {
         "input_file": mpi_paths["input_file"],
         "output_file": mpi_paths["output_file"],
-        "output_var_names": ["flow"],  # one streamed output (see ModelMPI note)
+        "output_var_names": [
+            "flow"
+        ],  # one streamed output (see ModelMPI note)
     }
 
     # ModelMPI warns that the time-varying param_up_1 is dropped -- capture it so
@@ -117,10 +122,12 @@ def mpi_run(mpi_paths):
         # the shared buffer/ref checks need to happen before model.finalize()
         # because that deletes/closees ds_mpi.
         "shared_param_common": (
-            upper._obj["param_common"].values is lower._obj["param_common"].values
+            upper._obj["param_common"].values
+            is lower._obj["param_common"].values
         ),
         "shared_forcing_common": (
-            upper._obj["forcing_common"].values is lower._obj["forcing_common"].values
+            upper._obj["forcing_common"].values
+            is lower._obj["forcing_common"].values
         ),
         "shared_flow": upper._obj["flow"].values is lower._obj["flow"].values,
     }
@@ -154,7 +161,9 @@ class TestRegressionMPI:
             return
         with xr.open_dataset(mpi_run["output_file"]) as ds_out:
             flow_out = ds_out["flow_out"].values  # (n_time, n_space) global
-        np.testing.assert_allclose(flow_out, answers["expected_flow"], rtol=1e-12)
+        np.testing.assert_allclose(
+            flow_out, answers["expected_flow"], rtol=1e-12
+        )
 
     # -- Lower process: final storage_previous, gathered globally --
     def test_storage_previous_final(self, mpi_run, answers):
