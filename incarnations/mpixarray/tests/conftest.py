@@ -10,8 +10,9 @@ intentional and explicit:
     files); MPI writes ONE combined file and streams it.
   - `time` and `space` are real dim-coordinates (required by mpixarray's
     `set_streaming`/`parallelize`; the serial path reads them the same way).
-  - serial uses `param_up_1` (a time-varying parameter); the MPI streaming path
-    drops it and warns (see ModelMPI) -- a Phase 2 design question.
+  - both serial and MPI now use `param_up_1`, a cyclic-monthly time-varying
+    parameter `(month, space)`, indexed each step via `time.month` (it stays
+    resident through `set_streaming`, since `month` is not the streaming dim).
   - output backend differs (serial zarr store vs MPI streamed NetCDF).
 """
 
@@ -45,9 +46,10 @@ def dimensions():
 def make_toy_input():
     """Factory returning the unified toy input Dataset.
 
-    `time`/`space` are dim-coordinates. Vars: forcing_0, forcing_common
-    (time, space); param_up_0, param_up_1 (time-varying), param_low_0,
-    param_common, flow_initial, storage_initial (space). Deterministic per seed.
+    `time`/`space`/`month` are dim-coordinates. Vars: forcing_0,
+    forcing_common (time, space); param_up_1 (month, space, cyclic-monthly);
+    param_up_0, param_low_0, param_common, flow_initial, storage_initial
+    (space). Deterministic per seed.
     """
 
     def _make(dimensions: dict, seed: int = 42) -> xr.Dataset:
@@ -66,8 +68,8 @@ def make_toy_input():
                 forcing_common=(["time", "space"], np.ones((n_time, n_space))),
                 param_up_0=(["space"], rng.uniform(0.1, 1, n_space)),
                 param_up_1=(
-                    ["time", "space"],
-                    rng.uniform(0.1, 1, (n_time, n_space)),
+                    ["month", "space"],
+                    rng.uniform(0.1, 1, (12, n_space)),
                 ),
                 param_low_0=(["space"], rng.uniform(0.17, 0.23, n_space)),
                 param_common=(["space"], np.zeros(n_space)),
@@ -77,6 +79,7 @@ def make_toy_input():
             coords=dict(
                 time=("time", dimensions["time"]),
                 space=("space", dimensions["space"]),
+                month=("month", np.arange(1, 13)),
             ),
         )
 
@@ -87,11 +90,17 @@ def make_toy_input():
 def compute_answers():
     """Factory for the vectorized ground-truth Upper/Lower solution."""
 
-    def _compute(forcing_0, flow_initial, storage_initial, n_time) -> dict:
+    def _compute(
+        forcing_0, flow_initial, storage_initial, n_time, param_up_1, time
+    ) -> dict:
         forcing_0 = np.asarray(forcing_0)
         flow_initial = np.asarray(flow_initial)
         storage_initial = np.asarray(storage_initial)
+        param_up_1 = np.asarray(param_up_1)
         n_space = forcing_0.shape[1]
+
+        # day -> month index (0-11), matching Time.month - 1
+        months = np.asarray(time).astype("datetime64[M]").astype(int) % 12
 
         expected_flow = np.zeros((n_time, n_space))
         expected_flow_prev = np.zeros((n_time, n_space))
@@ -100,7 +109,8 @@ def compute_answers():
                 flow_initial if tt == 0 else expected_flow[tt - 1, :]
             )
             expected_flow[tt, :] = (
-                expected_flow_prev[tt, :] * 0.95 + forcing_0[tt, :]
+                expected_flow_prev[tt, :] * 0.95
+                + forcing_0[tt, :] * param_up_1[months[tt], :]
             )
 
         expected_storage = np.zeros((n_time, n_space))

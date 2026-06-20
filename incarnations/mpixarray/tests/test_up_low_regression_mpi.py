@@ -10,11 +10,12 @@ gather results -- lives in module-scoped fixtures, where ALL collective MPI ops
 happen. The test_* methods are pure (collective-free) asserts, so a failing rank
 can never interrupt a collective and hang the others.
 
-Phase 1: one space-decomposed dataset streamed over time. `flow` is streamed to
-disk and validated over all timesteps (global); `storage_previous` (not streamed
--- the one-`to_netcdf`-var limit) is validated from final state, gathered
-globally. `param_up_1` is in the file but dropped by the streaming path
-(ModelMPI warns -- asserted explicitly).
+One space-decomposed dataset streamed over time. `flow` is streamed to disk and
+validated over all timesteps (global); `storage_previous` (not streamed -- the
+one-`to_netcdf`-var limit) is validated from final state, gathered globally.
+`param_up_1` is a cyclic-monthly time-varying parameter `(month, space)` that
+stays resident through `set_streaming` (asserted) and modulates `flow` via
+`time.month` -- so the streamed-`flow` check also validates it.
 
 Run with:
     mpirun -n 4 pytest --with-mpi tests/test_up_low_regression_mpi.py -v
@@ -26,7 +27,6 @@ import pathlib as pl
 import shutil
 import sys
 import tempfile
-import warnings
 
 import numpy as np
 import pytest
@@ -82,6 +82,8 @@ def answers(dimensions, make_toy_input, compute_answers):
         ds["flow_initial"].values,
         ds["storage_initial"].values,
         dimensions["n_time"],
+        ds["param_up_1"].values,
+        dimensions["time"],
     )
 
 
@@ -99,17 +101,17 @@ def mpi_run(mpi_paths):
         ],  # one streamed output (see ModelMPI note)
     }
 
-    # ModelMPI warns that the time-varying param_up_1 is dropped -- capture it so
-    # the drop is asserted explicitly (and warning-as-error configs don't fail).
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        model = ModelMPI(process_dict, control)
-    param_up_1_warned = any("param_up_1" in str(w.message) for w in caught)
-
+    model = ModelMPI(process_dict, control)
     model.run(np.float64(1.0))
 
     upper = model.model_dict["upper"]
     lower = model.model_dict["lower"]
+    # param_up_1 (cyclic-monthly time-varying param) should stay resident on
+    # ds_mpi with its `month` dim -- captured before finalize.
+    param_up_1_resident = "param_up_1" in model._ds_mpi.data_vars
+    param_up_1_has_month = (
+        param_up_1_resident and "month" in model._ds_mpi["param_up_1"].dims
+    )
     # storage_previous isn't streamed, so gather its final state globally as the
     # Lower-process check (single scheme -> rank-ordered contiguous blocks).
     storage_prev_final = np.concatenate(
@@ -117,7 +119,8 @@ def mpi_run(mpi_paths):
     )
     result = {
         "output_file": mpi_paths["output_file"],
-        "param_up_1_warned": param_up_1_warned,
+        "param_up_1_resident": param_up_1_resident,
+        "param_up_1_has_month": param_up_1_has_month,
         "storage_prev_final": storage_prev_final,
         # the shared buffer/ref checks need to happen before model.finalize()
         # because that deletes/closees ds_mpi.
@@ -151,11 +154,13 @@ class TestRegressionMPI:
     def test_shared_flow_upper_lower(self, mpi_run):
         assert mpi_run["shared_flow"]
 
-    # -- intentional difference vs serial: time-varying param dropped + warned --
-    def test_param_up_1_dropped_warns(self, mpi_run):
-        assert mpi_run["param_up_1_warned"]
+    # -- time-varying param stays resident (month axis survives set_streaming) --
+    def test_param_up_1_resident(self, mpi_run):
+        assert mpi_run["param_up_1_resident"]
+        assert mpi_run["param_up_1_has_month"]
 
-    # -- streamed flow over all timesteps (global), validated on rank 0 --
+    # -- streamed flow over all timesteps (global); also validates that the
+    #    cyclic-monthly param_up_1 modulates flow -- validated on rank 0 --
     def test_streamed_flow_all_timesteps(self, mpi_run, answers):
         if MPI.COMM_WORLD.rank != 0:
             return

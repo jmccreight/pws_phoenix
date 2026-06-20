@@ -66,6 +66,7 @@ import numpy as np
 import xarray as xr
 
 from data_io import Input, open_xr
+from globals import Time
 
 # ---------------------------------------------------------------------------
 # DataArrayMeta -- field descriptor for Process subclasses
@@ -156,7 +157,7 @@ class Process(ABC):
 
         ds = Upper.new(parameters=..., forcing_0=..., flow_initial=...)
         ds.pws.advance()
-        ds.pws.calculate(dt)
+        ds.pws.calculate(dt, time)
 
     Numba:
         Heavy inner computation should be delegated to a @staticmethod
@@ -170,7 +171,7 @@ class Process(ABC):
                 flow_prev[:] *= 0.95
                 flow_prev[:] += forcing
 
-            def calculate(self, dt: np.float64) -> None:
+            def calculate(self, dt: np.float64, time: Time) -> None:
                 self._calculate(
                     self._obj["flow_previous"].values,
                     self._obj["forcing_0"].values,
@@ -274,7 +275,7 @@ class Process(ABC):
         """Copy current state to *_previous variables for the next timestep."""
 
     @abstractmethod
-    def calculate(self, dt: np.float64) -> None:
+    def calculate(self, dt: np.float64, time: Time) -> None:
         """Update state variables for one timestep of length dt."""
 
     # ------------------------------------------------------------------
@@ -327,7 +328,7 @@ class PWS:
     Usage:
         ds = Upper.new(parameters=..., **kwargs)
         ds.pws.advance()
-        ds.pws.calculate(dt)
+        ds.pws.calculate(dt, time)
         ds.pws.get_parameters()     # -> tuple[str, ...]
         ds.pws.get_inputs()         # -> tuple[str, ...]
         ds.pws.get_mutable_inputs() # -> tuple[str, ...]
@@ -349,9 +350,9 @@ class PWS:
         """Advance process state to the next timestep."""
         self._process.advance()
 
-    def calculate(self, dt: np.float64) -> None:
+    def calculate(self, dt: np.float64, time: Time) -> None:
         """Perform calculations for the current timestep."""
-        self._process.calculate(dt)
+        self._process.calculate(dt, time)
 
     # ------------------------------------------------------------------
     # Introspection -- delegates to the Process subclass classmethods

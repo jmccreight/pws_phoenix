@@ -75,6 +75,8 @@ class TestRegression:
             toy_ds["flow_initial"].values,
             toy_ds["storage_initial"].values,
             dimensions["n_time"],
+            toy_ds["param_up_1"].values,
+            dimensions["time"],
         )
 
     @pytest.fixture

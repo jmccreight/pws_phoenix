@@ -14,6 +14,7 @@ Upper and Lower: concrete Process subclasses for the toy Upper/Lower model.
 """
 
 import numpy as np
+from globals import Time
 from process import PWS, DataArrayMeta, Process
 
 
@@ -29,9 +30,9 @@ class Upper(Process):
     )
     param_up_1 = DataArrayMeta(
         kind="parameter",
-        dims=("time", "space"),
+        dims=("month", "space"),
         dtype=np.float64,
-        description="Upper zone parameter 1 (time-varying)",
+        description="Upper zone parameter 1 (time-varying: cyclic monthly)",
     )
     param_common = DataArrayMeta(
         kind="parameter",
@@ -76,15 +77,19 @@ class Upper(Process):
     def _calculate(
         flow_previous: np.ndarray,
         forcing_0: np.ndarray,
+        param_up_1: np.ndarray,
         dt: np.float64,
     ) -> np.ndarray:
         # Pure numpy -- decorate with @numba.jit when ready
-        return flow_previous * np.float64(0.95) + forcing_0
+        return flow_previous * np.float64(0.95) + forcing_0 * param_up_1
 
-    def calculate(self, dt: np.float64) -> None:
+    def calculate(self, dt: np.float64, time: Time) -> None:
+        # param_up_1 is cyclic-monthly; index by current month
+        param_up_1_now = self._obj["param_up_1"].values[time.month - 1]
         self._obj["flow"].values[:] = self._calculate(
             self._obj["flow_previous"].values,
             self._obj["forcing_0"].values,
+            param_up_1_now,
             dt,
         )
 
@@ -147,7 +152,7 @@ class Lower(Process):
         # Pure numpy -- decorate with @numba.jit when ready
         return storage_previous * np.float64(0.95) + flow * np.float64(0.12)
 
-    def calculate(self, dt: np.float64) -> None:
+    def calculate(self, dt: np.float64, time: Time) -> None:
         self._obj["storage"].values[:] = self._calculate(
             self._obj["storage_previous"].values,
             self._obj["flow"].values,

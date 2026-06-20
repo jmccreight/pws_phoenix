@@ -26,6 +26,7 @@ import numpy as np
 import xarray as xr
 
 from data_io import Input, Output, open_xr
+from globals import Time
 from process import _dict_of_kind  # also registers the `pws` xr accessor
 
 # Optional MPI support -- present when mpixarray is installed. The serial Model
@@ -197,6 +198,7 @@ class Model:
         self.ntime = data.sizes["time"]
         self.times = data["time"]
         self.time_index = data["time"]
+        self.time = Time(self.times)
 
     def get_preceeding_processes(self, proc_name: str) -> List[str]:
         """Return process names defined before proc_name."""
@@ -222,9 +224,9 @@ class Model:
         """Calculate all processes."""
         for vv in self.model_dict.values():
             if isinstance(vv, xr.Dataset):
-                vv.pws.calculate(dt)
+                vv.pws.calculate(dt, self.time)
             else:
-                vv.calculate(dt)
+                vv.calculate(dt, self.time)
 
     def run(self, dt: np.float64, n_steps: np.int32) -> None:
         """Run simulation for n_steps time steps."""
@@ -233,6 +235,7 @@ class Model:
         for tt in range(n_steps):
             self.current_time_index[0] = tt
             self.current_time[0] = self.times[tt].values
+            self.time.set_index(tt)
             self.advance()
             self.calculate(dt=dt)
             if self.output is not None:
@@ -336,6 +339,7 @@ class ModelMPI(Model):
         self._ds_input = ds_input
         n_time = int(ds_input.sizes["time"])
         self._ntime = n_time
+        self.time = Time(ds_input["time"])
 
         ds_input_mpi, comm = ds_input.mpi.parallelize(
             dims=["space"], scheme="single", comm=comm
@@ -357,18 +361,18 @@ class ModelMPI(Model):
 
         proc_classes = self._proc_classes()
 
-        # Time-varying parameters don't fit the streaming dichotomy
-        # (set_streaming drops time-dim vars; static params must be space-only).
-        # Phase 1 drops them -- warn explicitly. See pws_phoenix/CLAUDE.md.
+        # Taxonomy guard: a parameter on the model `time` axis is really an
+        # input. A true time-varying parameter lives on its own axis (e.g.
+        # `month`) and stays resident. See pws_phoenix/CLAUDE.md.
         for proc_name, cls in proc_classes.items():
             for pname, meta in _dict_of_kind(cls, "parameter").items():
                 if "time" in meta.dims:
-                    warnings.warn(
-                        f"Time-varying parameter {pname!r} {meta.dims} on "
-                        f"process {proc_name!r} is unsupported in the MPI "
-                        f"streaming path (Phase 1) and is dropped.",
-                        UserWarning,
-                        stacklevel=2,
+                    raise ValueError(
+                        f"Parameter {pname!r} on process {proc_name!r} has "
+                        f"the model 'time' dim {meta.dims}: a variable on "
+                        "model time is an input, not a parameter. Use a "
+                        "non-'time' axis (e.g. 'month') for a time-varying "
+                        "parameter."
                     )
 
         # File-backed inputs that were dropped: refilled from src each step.
@@ -446,7 +450,8 @@ class ModelMPI(Model):
             raise RuntimeError("Cannot run a finalized Model.")
         ds_mpi = self._ds_mpi
         procs = list(self.model_dict.values())
-        for step in ds_mpi.mpi.iter_time():
+        for tt, step in enumerate(ds_mpi.mpi.iter_time()):
+            self.time.set_index(tt)
             src = step.mpi.src
             # Refill this step's input buffers from the source slab.
             for name in self._file_input_names:
@@ -458,7 +463,7 @@ class ModelMPI(Model):
             for proc in procs:
                 proc.advance()
             for proc in procs:
-                proc.calculate(dt)
+                proc.calculate(dt, self.time)
             # Record state into the streaming output slab(s) and write.
             for src_name, buf in self._output_map.items():
                 step[buf].values[0, :] = step[src_name].values[:]

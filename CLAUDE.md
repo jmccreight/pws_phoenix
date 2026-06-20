@@ -87,6 +87,38 @@ The unit of MPI decomposition (and of barriers / the shared dataset) is the
 "one dataset per discretization." The toy model has exactly one (`space`);
 multiple discretizations are Phase 2.
 
+## Variable taxonomy: parameters vs inputs (by relationship to model time)
+
+A field's `kind` (`DataArrayMeta.kind`) and its time axis decide how the
+framework treats it. The discriminator is the variable's time coordinate vs
+**model time** (daily, fixed, known at init):
+
+- **Static parameter** (`kind="parameter"`, no time axis) -- a fixed property /
+  calibration. Loaded once, resident, read-only. (`param_up_0`, `param_common`)
+- **Time-varying parameter** (`kind="parameter"`, a time axis whose coordinates
+  are **not** model time) -- varies in time but is indexed by a *derived*
+  coordinate. Common forms:
+  - *cyclic* -- repeats on a calendar cycle (`month` 1-12, `season`); indexed by
+    `f(model_time)`, e.g. `param_up_1[time.month - 1]`.
+  - *coarse linear* -- monotonic but coarser than model time (per-year,
+    per-(year,month)); indexed by flooring model time.
+  Resident (its own small axis kept whole; space-decomposed in MPI), read-only;
+  the current slice is looked up each step. The toy's `param_up_1` is
+  cyclic-monthly `(month, space)`, indexed in `Upper.calculate` via `time.month`.
+- **Input / time-varying input** (`kind="input"` / `"mutable_input"`, time axis
+  **==** model time) -- external forcing/boundary data, one model-time slice
+  served per step in lockstep. (`forcing_0`, `forcing_common`)
+
+**Rule (enforced in `ModelMPI._build`):** a `parameter` declared on the model
+`time` axis is a misdeclaration -- a variable on model time is an *input*, so a
+time-varying parameter must use a non-`time` axis. This also corrects the old
+"time-varying params are neither static nor streaming" framing: a cyclic param
+is **resident + indexed**, distinct from a *streamed* input.
+
+To the *Process*, the current slice looks like an input -- a `(space,)` array.
+The process holds `time` and does the lookup; `_calculate` receives raw numpy
+(the `(space,)` slice), never the `Time` object (numba boundary).
+
 ## Serial path (`Model` in `model.py`)
 
 - `Process.new()` builds a per-process `xr.Dataset`: parameters loaded in place
@@ -126,8 +158,9 @@ open_writer → declare buffers → create → iter_time → write`.
   shared coord attrs, and the next `from_numpy` deepcopies them). So we stream
   `flow` to disk and validate `storage_previous` from final in-memory state.
 - `set_streaming` requires the streaming dim to be a real dim-coordinate.
-- Time-varying parameters (e.g. `param_up_1`, `(time, space)`) are deferred --
-  neither static-space nor streaming-input.
+- A non-`time` extra dim on a resident var (e.g. a `(month, space)` cyclic
+  time-varying parameter) is assumed to survive `set_streaming` untouched (it is
+  not the streaming dim) and stay space-decomposed -- the toy exercises this.
 
 ## IO is intentionally NOT apples-to-apples
 
@@ -136,16 +169,55 @@ context, so the two ends are deliberately divergent -- do **not** homogenize
 them via a shared writer. (Only matters when isolating compute-vs-IO time in a
 scaling study.)
 
+## Global state: `Time` + `Options` (the "Global" split)
+
+The "Global" item is split into two objects with different lifetimes and reach
+(rather than one bundled pywatershed-style `Control`):
+
+- **`Time`** (`globals.py`, implemented) -- the model clock: runtime state,
+  passed **all the way down** to a process's `calculate(dt, time)` and
+  transparent for debugging. Daily, fixed, known at init. Exposes `.current` (a
+  `datetime64`), `.month`, `.year`; `set_index(i)` points it at a timestep.
+  - *Serial:* the Model drives the loop and calls `time.set_index(tt)`.
+  - *MPI:* mpixarray owns the time *loop*, so `Time` is **synced from** each
+    streaming `step` (`enumerate(iter_time())`). A Process reads it identically
+    either way -- this keeps the serial/MPI fork from deepening.
+- **`Options`** (not yet a class) -- construction-time run config, consumed at
+  *build* and baked into processes; a Process never needs it at runtime. The
+  Model `control` dict plays this role today.
+
+Mechanism notes:
+
+- `Time` is **passed as an argument** to `calculate`, not stashed on the dataset
+  (the serial `pws` accessor is built lazily, so passing is cleaner and uniform
+  with MPI). `advance()` stays **time-free** -- pure `*_previous` bookkeeping.
+- numba boundary: the `Time` object reaches `calculate()`; into a
+  `@staticmethod _calculate` pass raw scalars (e.g. a month index), since numba
+  can't take the object.
+- `time.month` is what a time-varying parameter indexes on (`Upper.calculate`).
+
+**Calendar helpers (ported from pywatershed `utils/time_utils.py`).**
+`Time` exposes `year`, `month`, `day_of_month`, `doy` (day-of-year), and `dowy`
+(day-of-water-year, Oct 1) -- all matching pywatershed's formulas. All fields
+are **1-based** (calendar-natural, = pywatershed's `zero_based=False` default);
+positional time-varying-parameter lookup therefore indexes with `field - 1`
+(convention (A); see `Upper.calculate` and `tests/test_time.py`). Still in
+pywatershed if needed: `jsol` (days since solstice, niche) and `epiweek` (needs
+the `epiweeks` dep).
+
 ## Phase 2 backlog (separable, layered on top)
 
-- A `Global` class (time/config -- note streaming owns the time *loop*).
+- `Options` class -- the construction-time half of the old "Global" item
+  (`Time` is implemented; see "Global state: `Time` + `Options`" above). The
+  Model `control` dict serves as `Options` for now.
 - The full `Discretization` class: physical/topology role + multiple
   discretizations (incl. whether `set_streaming` aligns across ≥2 of them).
 - `ModelInputs` / `input_spec()` / `resolve_inputs()` / `init_run_phase()` lazy
   lifecycle (`get_inputs()` is already classmethod-level; streaming's `create()`
   is a latent `init_run_phase`).
-- Time-varying parameters; multi-output-var streaming once the deepcopy bug is
-  fixed.
+- Multi-output-var streaming once the mpixarray deepcopy bug is fixed.
+  (Cyclic-monthly time-varying parameters are implemented -- see "Variable
+  taxonomy".) Coarse-linear (e.g. per-(year,month)) time-varying params remain.
 
 ## Next design topic: container-model unification
 
