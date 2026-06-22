@@ -148,8 +148,13 @@ open_writer → declare buffers → create → iter_time → write`.
 - Inputs: time-dimensioned file vars are dropped by `set_streaming` and refilled
   each step from `step.mpi.src`; static space-only params/ICs survive on
   `ds_mpi` (loaded into memory so their buffers are shared by reference).
-- The single `parallelize()` call is the **Discretization seam** -- keep it one
-  isolated call so promoting it to a real Discretization later is lift-and-shift.
+- `parallelize()` now lives in **`Discretization`** (`discretization.py`):
+  `disc.decompose(ds)` does the space split (MPI) or identity (serial,
+  `comm=None`). `set_streaming` (time) stays in `ModelMPI`. The datasets:
+  `ds_mpi` (decomposed) -> `ds_mpi_stream` (streaming). Model/ModelMPI hold
+  `self.discretizations` (a `dict[str, Discretization]` keyed by grid name; one
+  entry `"space"` for now) -- so a 2nd grid is just another key. More grids +
+  dataset-ownership next.
 
 ## Known mpixarray limits (Phase 1)
 

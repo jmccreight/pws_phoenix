@@ -107,15 +107,15 @@ def mpi_run(mpi_paths):
     upper = model.model_dict["upper"]
     lower = model.model_dict["lower"]
     # param_up_1 (cyclic-monthly time-varying param) should stay resident on
-    # ds_mpi with its `month` dim -- captured before finalize.
-    param_up_1_resident = "param_up_1" in model._ds_mpi.data_vars
+    # ds_mpi_stream with its `month` dim -- captured before finalize.
+    param_up_1_resident = "param_up_1" in model._ds_mpi_stream.data_vars
     param_up_1_has_month = (
-        param_up_1_resident and "month" in model._ds_mpi["param_up_1"].dims
+        param_up_1_resident and "month" in model._ds_mpi_stream["param_up_1"].dims
     )
     # storage_previous isn't streamed, so gather its final state globally as the
     # Lower-process check (single scheme -> rank-ordered contiguous blocks).
     storage_prev_final = np.concatenate(
-        comm.allgather(model._ds_mpi["storage_previous"].values.copy())
+        comm.allgather(model._ds_mpi_stream["storage_previous"].values.copy())
     )
     result = {
         "output_file": mpi_paths["output_file"],
@@ -123,7 +123,7 @@ def mpi_run(mpi_paths):
         "param_up_1_has_month": param_up_1_has_month,
         "storage_prev_final": storage_prev_final,
         # the shared buffer/ref checks need to happen before model.finalize()
-        # because that deletes/closees ds_mpi.
+        # because that deletes/closees ds_mpi_stream.
         "shared_param_common": (
             upper._obj["param_common"].values
             is lower._obj["param_common"].values
@@ -143,7 +143,7 @@ def mpi_run(mpi_paths):
 class TestRegressionMPI:
     """MPI streaming regression for the Upper/Lower toy model via ModelMPI."""
 
-    # -- structural buffer sharing (one ds_mpi) --
+    # -- structural buffer sharing (one ds_mpi_stream) --
     # Asserts happen here but the boolean was evaluated before model.finalize
     def test_shared_param_common(self, mpi_run):
         assert mpi_run["shared_param_common"]

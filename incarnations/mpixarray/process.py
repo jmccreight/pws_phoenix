@@ -201,7 +201,7 @@ class Process(ABC):
         in-place on the shared parent and wiring inputs by reference.
 
         The MPI path does NOT use new(): ModelMPI builds one space-decomposed
-        streaming dataset and binds processes to it directly (cls(ds_mpi)),
+        streaming dataset (ds_mpi_stream); processes bind to it directly,
         so buffer sharing there is structural rather than emulated.
 
         Args:

@@ -26,6 +26,7 @@ import numpy as np
 import xarray as xr
 
 from data_io import Input, Output, open_xr
+from discretization import Discretization
 from globals import Time
 from process import _dict_of_kind  # also registers the `pws` xr accessor
 
@@ -76,6 +77,7 @@ class Model:
         del self._process_dict
 
         self._set_time()
+        self.discretizations = {"space": Discretization("space")}
 
         self.current_time_index = np.array([0], dtype=np.int32)
         self.current_time = (
@@ -274,15 +276,16 @@ class ModelMPI(Model):
         open_dataset -> parallelize(dims=["space"]) -> set_streaming("time")
         -> open_writer -> declare buffers -> create -> iter_time -> write
 
-    A *single* decomposed dataset (``ds_mpi``) carries every process's state,
-    parameters, per-step input buffers, and streaming outputs. Because there
-    is one dataset, cross-process buffer sharing (param_common, forcing_common,
+    A *single* decomposed dataset (``ds_mpi_stream``) carries every process's
+    state, parameters, per-step input buffers, and streaming outputs. Because
+    there is one dataset, cross-process buffer sharing (param_common,
+    forcing_common,
     Upper.flow -> Lower.flow) is *structural* -- the same named variable -- not
     emulated by hand and asserted with ``a.values is b.values``.
 
-    The single ``parallelize()`` call is the spatial decomposition: the seam
-    where a Discretization will live. For now there is exactly one
-    discretization ("space"); multiple discretizations are future work.
+    The spatial decomposition now lives in ``Discretization``
+    (discretization.py; serial gets a degenerate one). For now there is exactly
+    one discretization ("space"); multiple discretizations are future work.
 
     control dict:
         input_file        single combined input source (forcings + time-varying
@@ -341,23 +344,23 @@ class ModelMPI(Model):
         self._ntime = n_time
         self.time = Time(ds_input["time"])
 
-        ds_input_mpi, comm = ds_input.mpi.parallelize(
-            dims=["space"], scheme="single", comm=comm
-        )
+        self.discretizations = {"space": Discretization("space", comm=comm)}
+        ds_mpi = self.discretizations["space"].decompose(ds_input)
+        comm = self.discretizations["space"].comm  # parallelize may refine
         self._comm = comm
 
         # ---- Stream over time. set_streaming drops the time-dimensioned
         #      input vars (served per step via step.mpi.src) and keeps the
-        #      space-only static params + ICs as local buffers on ds_mpi. ----
-        ds_mpi = ds_input_mpi.mpi.set_streaming(
+        #      space-only static params + ICs as buffers on ds_mpi_stream. ----
+        ds_mpi_stream = ds_mpi.mpi.set_streaming(
             "time", window=1, out_times=list(range(n_time))
         )
 
         # Realize the static (space-only) survivors -- params + ICs -- in
         # memory. Otherwise they stay lazy file-backed and each `.values`
         # re-reads, so buffer sharing (param_common is ...) would not hold.
-        for name in list(ds_mpi.data_vars):
-            ds_mpi[name] = ds_mpi[name].load()
+        for name in list(ds_mpi_stream.data_vars):
+            ds_mpi_stream[name] = ds_mpi_stream[name].load()
 
         proc_classes = self._proc_classes()
 
@@ -389,12 +392,12 @@ class ModelMPI(Model):
         self._file_input_names = file_input_names
 
         # ---- Open writer ----
-        ds_mpi.mpi.open_writer(output_file, comm=comm)
+        ds_mpi_stream.mpi.open_writer(output_file, comm=comm)
 
         # ---- Declare buffers: to_netcdf=False FIRST, to_netcdf=True LAST,
         #      then create() (mpixarray declaration-ordering gotcha). ----
         def _declare(name, dims, fill, to_netcdf):
-            ds_mpi.mpi[name] = {
+            ds_mpi_stream.mpi[name] = {
                 "dims": dims,
                 "dtype": f64,
                 "fill_value": f64(fill),
@@ -422,7 +425,7 @@ class ModelMPI(Model):
             output_map[name] = buf
         self._output_map = output_map
 
-        ds_mpi.mpi.create(coords=None, data_vars=None)
+        ds_mpi_stream.mpi.create(coords=None, data_vars=None)
 
         # ---- Load initial conditions into state buffers. ICs are the
         #      space-only vars that survived set_streaming (from the file). ----
@@ -430,16 +433,18 @@ class ModelMPI(Model):
             for name, meta in cls.get_variables().items():
                 if (
                     meta.initial is not None
-                    and meta.initial in ds_mpi.data_vars
+                    and meta.initial in ds_mpi_stream.data_vars
                 ):
-                    ds_mpi[name].values[:] = ds_mpi[meta.initial].values
+                    ds_mpi_stream[name].values[:] = ds_mpi_stream[
+                        meta.initial
+                    ].values
 
-        self._ds_mpi = ds_mpi
+        self._ds_mpi_stream = ds_mpi_stream
 
         # ---- Bind processes to the shared dataset (no .pws: one dataset
         #      hosts many processes, so dispatch on instances directly). ----
         for proc_name, cls in proc_classes.items():
-            self.model_dict[proc_name] = cls(ds_mpi)
+            self.model_dict[proc_name] = cls(ds_mpi_stream)
 
     # -- run ------------------------------------------------------------
 
@@ -448,9 +453,9 @@ class ModelMPI(Model):
         streaming source defines the count)."""
         if self._finalized:
             raise RuntimeError("Cannot run a finalized Model.")
-        ds_mpi = self._ds_mpi
+        ds_mpi_stream = self._ds_mpi_stream
         procs = list(self.model_dict.values())
-        for tt, step in enumerate(ds_mpi.mpi.iter_time()):
+        for tt, step in enumerate(ds_mpi_stream.mpi.iter_time()):
             self.time.set_index(tt)
             src = step.mpi.src
             # Refill this step's input buffers from the source slab.
@@ -475,6 +480,6 @@ class ModelMPI(Model):
     def finalize(self) -> None:
         if self._finalized:
             return
-        self._ds_mpi.mpi.finalize()
+        self._ds_mpi_stream.mpi.finalize()
         self._ds_input.mpi.finalize()
         self._finalized = True
