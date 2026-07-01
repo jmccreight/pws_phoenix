@@ -22,7 +22,9 @@ class Dummy:
 
 class Input:
     def __init__(
-        self, data: np.ndarray, calc_method: Literal["numpy", "numba"] = "numba"
+        self,
+        data: np.ndarray,
+        calc_method: Literal["numpy", "numba"] = "numba",
     ) -> None:
         # could dispatch float vs int types here
         if calc_method == "numpy":
@@ -123,7 +125,8 @@ class Upper:
         def calculate(self, dt: np.float64) -> None:
             for loc in range(self.n_loc):
                 self.flow[loc] = (
-                    self.flow_previous[loc] * np.float64(0.95) + self.forcing_0[loc]
+                    self.flow_previous[loc] * np.float64(0.95)
+                    + self.forcing_0[loc]
                 )
             return
 
@@ -187,9 +190,9 @@ class Lower:
 
         def calculate(self, dt: np.float64) -> None:
             for loc in range(self.n_loc):
-                self.storage[loc] = (self.storage_previous[loc] * np.float64(0.95)) + (
-                    self.flow[loc] * np.float64(0.12)
-                )
+                self.storage[loc] = (
+                    self.storage_previous[loc] * np.float64(0.95)
+                ) + (self.flow[loc] * np.float64(0.12))
             return
 
 
@@ -229,10 +232,15 @@ class Model:
             n_max_classes = 20  # the number of args available in CalcNumba
             # default to Dummy for all classes
             inst_list_full = [Dummy() for ii in range(n_max_classes)]
-            spec = [(f"a{ii + 1}", typeof(vv)) for ii, vv in enumerate(inst_list_full)]
+            spec = [
+                (f"a{ii + 1}", typeof(vv))
+                for ii, vv in enumerate(inst_list_full)
+            ]
 
             # fill the class_list and spec with inputs and model classes
-            inst_list = list(self.inputs_dict.values()) + list(self.model_dict.values())
+            inst_list = list(self.inputs_dict.values()) + list(
+                self.model_dict.values()
+            )
             for ii, vv in enumerate(inst_list):
                 inst_list_full[ii] = vv.calc
                 spec[ii] = (f"a{ii + 1}", typeof(vv.calc))
@@ -285,7 +293,9 @@ class Model:
                 verbose = False
                 if verbose:
                     print(f"{tt=}")
-                    print(f"{self.inputs_dict['forcing_0'].calc.current_values=}")
+                    print(
+                        f"{self.inputs_dict['forcing_0'].calc.current_values=}"
+                    )
                     print(f"{self.model_dict['upper'].calc.forcing_0=}")
                     print(f"{self.model_dict['upper'].calc.flow=}")
                     print(f"{self.model_dict['lower'].calc.flow=}")
@@ -474,7 +484,9 @@ if __name__ == "__main__":
                 print(f"{output_storage.mean()}")
 
             else:
-                np.testing.assert_equal(output_flow, model.model_dict["upper"].flow)
+                np.testing.assert_equal(
+                    output_flow, model.model_dict["upper"].flow
+                )
                 np.testing.assert_equal(
                     output_storage, model.model_dict["lower"].storage
                 )
