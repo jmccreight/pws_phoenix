@@ -32,6 +32,7 @@ class Discretization:
     def __init__(self, dims: list[str], *, comm: Any = None) -> None:
         self.dims = list(dims)
         self.comm = comm
+        self.dataset: Any = None  # the grid's shared dataset (set by the Model)
 
     @property
     def is_distributed(self) -> bool:

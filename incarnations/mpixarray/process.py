@@ -191,6 +191,11 @@ class Process(ABC):
     def __init__(self, xarray_obj: xr.Dataset) -> None:
         self._obj = xarray_obj
 
+    def __getitem__(self, key: str) -> xr.DataArray:
+        """Subscript delegates to the bound dataset (a process is a view of its
+        grid's shared dataset)."""
+        return self._obj[key]
+
     @classmethod
     def new(
         cls,

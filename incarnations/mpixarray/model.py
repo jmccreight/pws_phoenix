@@ -3,18 +3,19 @@ model.py
 ========
 Orchestrators for the mpixarray Process framework:
 
-  - Model:    serial orchestrator -- loads data, builds each process via its
-              Process.new() factory, wires dependencies (inputs by reference ->
-              cross-process buffer sharing), runs the serial time loop, and
-              writes output via the Output collector (one zarr store).
+  - Model:    serial orchestrator -- loads data, assembles one shared dataset
+              per discretization (grid) and binds each process to it directly
+              (cross-process buffer sharing is structural -- the same named
+              variable), runs the serial time loop, and writes output via the
+              Output collector (one zarr store).
   - ModelMPI: MPI streaming orchestrator -- one space-decomposed dataset
               streamed over time (mpixarray). Subclasses Model but overrides
               __init__/run/finalize; there, buffer sharing is structural (all
               processes view one decomposed dataset).
 
-Model is process-aware by design (it builds processes via Process.new() and
-dispatches through the `pws` accessor); there is no separate process-agnostic
-orchestrator layer.
+Model is process-aware by design (it assembles each grid's shared dataset from
+its processes' field specs and binds the process instances to it); there is no
+separate process-agnostic orchestrator layer.
 """
 
 import pathlib as pl
@@ -28,7 +29,7 @@ import xarray as xr
 from data_io import Input, Output, open_xr
 from discretization import Discretization
 from globals import Time
-from process import _dict_of_kind  # also registers the `pws` xr accessor
+from process import _FILL_VALUE, _dict_of_kind  # import registers `pws`
 
 # Optional MPI support -- present when mpixarray is installed. The serial Model
 # never needs it; ModelMPI does, and fails at construction if it is absent.
@@ -43,10 +44,11 @@ except ImportError:
 class Model:
     """Serial simulation orchestrator for Process subclasses.
 
-    Loads data, builds each process via its Process.new() factory, wires
-    dependencies (inputs by reference -> cross-process buffer sharing), runs
-    the serial time loop, and writes output via the Output collector (one zarr
-    store) when the control dict requests it.
+    Loads data, assembles one shared dataset per discretization (grid) and
+    binds each process to it directly (cross-process buffer sharing is
+    structural -- the same named variable), runs the serial time loop, and
+    writes output via the Output collector (one zarr store) when the control
+    dict requests it.
 
     Usage:
         with Model(process_dict, control) as model:
@@ -68,6 +70,13 @@ class Model:
             kk: self._resolve_grid(vv) for kk, vv in self._process_dict.items()
         }
         self.maps: Dict[str, Any] = maps or {}
+        # one Discretization per distinct home grid (grid name = dict key; the
+        # framework's spatial dim is "space" for all). The dis owns the grid's
+        # shared dataset, assembled + attached during _initialize below.
+        grids = dict.fromkeys(self._proc_grid.values())
+        self.discretizations: Dict[str, Discretization] = {
+            g: Discretization(["space"]) for g in grids
+        }
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._finalized = False
 
@@ -83,18 +92,7 @@ class Model:
         self._initialize_inputs_and_proceses()
         del self._process_dict
 
-        # grid -> a dataset on that grid (one process per grid, toy-only) so
-        # Maps can resolve their source dataset; multi-process grids later.
-        self._grid_ds: Dict[str, Any] = {}
-        for proc_name, grid in self._proc_grid.items():
-            self._grid_ds.setdefault(grid, self.model_dict[proc_name])
-
         self._set_time()
-        # one Discretization per distinct home grid. The Process framework's
-        # spatial dim is "space" for every grid (different grids = different
-        # datasets/sizes on that dim); the grid *name* is the dict key.
-        grids = dict.fromkeys(self._proc_grid.values())
-        self.discretizations = {g: Discretization(["space"]) for g in grids}
 
         self.current_time_index = np.array([0], dtype=np.int32)
         self.current_time = (
@@ -175,61 +173,79 @@ class Model:
         return grid if grid is not None else "space"
 
     def _initialize_inputs_and_proceses(self) -> None:  # noqa: spelling
-        """Build each process via its Process.new() factory; wire inputs by
-        reference (preserving cross-process buffer sharing) and the upstream
-        variables produced by preceding processes."""
-        for kk, vv in self._process_dict.items():
-            init_dict = {
-                kkk: vvv
-                for kkk, vvv in vv.items()
-                if kkk not in ("class", "discretization")
-            }
+        """Assemble ONE shared dataset per grid from its processes' field specs,
+        then bind each process to it. Same-named vars are added once, so cross-
+        process sharing (param_common, Upper.flow -> Lower.flow) is structural.
+        Each grid's Discretization owns the resulting dataset."""
+        grid_procs: Dict[str, List[str]] = {}
+        for kk in self._process_dict:
+            grid_procs.setdefault(self._proc_grid[kk], []).append(kk)
 
-            inputs_req = vv["class"].get_inputs()
-            input_outputs_req = vv["class"].get_mutable_inputs()
-            all_inputs = inputs_req + input_outputs_req
+        for grid, proc_names in grid_procs.items():
+            grid_ds = xr.Dataset()
+            for kk in proc_names:
+                self._add_process_fields(kk, grid, grid_ds)
+            self.discretizations[grid].dataset = grid_ds
+            for kk in proc_names:
+                self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
 
-            for ii in all_inputs:
-                if ii in init_dict.keys():
-                    data_or_file = init_dict[ii]
-                    if ii in inputs_req:
-                        read_only = True
-                    else:
-                        raise ValueError("This should not happen from file.")
-                    if ii not in self.inputs_dict.keys():
-                        init_dict[ii] = Input(
-                            data_or_file,
-                            read_only=read_only,
-                            load=self._load_all,
-                        )
-                        self.inputs_dict[ii] = init_dict[ii]
-                        assert init_dict[ii].data is self.inputs_dict[ii].data
-                        del data_or_file
-                    else:
-                        init_dict[ii] = self.inputs_dict[ii]
-                else:
-                    grid = self._proc_grid[kk]
-                    for pp in self.get_preceeding_processes(kk):
-                        if self._proc_grid[pp] != grid:
-                            continue  # cross-grid -> a Map feeds this
-                        proc = self.model_dict[pp]
-                        if isinstance(proc, xr.Dataset):
-                            var_names = proc.pws.get_var_names()  # type: ignore[attr-defined]
-                        else:
-                            var_names = proc.get_variables()
-                        if ii in var_names:
-                            init_dict[ii] = self.model_dict[pp][ii]
-                            break
-                    else:
-                        # no same-grid producer -> a Map feeds this cross-grid
-                        # input; wire it to the feeding Map's target buffer.
-                        for mm in self.maps.values():
-                            if mm.target_grid == grid and mm.target_var == ii:
-                                init_dict[ii] = mm.target_values
-                                break
+    def _add_process_fields(
+        self, proc_name: str, grid: str, grid_ds: xr.Dataset
+    ) -> None:
+        """Add a process's params / inputs / state vars to its grid's shared
+        dataset, skipping names already present (structural sharing)."""
+        vv = self._process_dict[proc_name]
+        cls = vv["class"]
+        init_dict = {
+            kkk: vvv
+            for kkk, vvv in vv.items()
+            if kkk not in ("class", "discretization")
+        }
 
-            cls = vv["class"]
-            self.model_dict[kk] = cls.new(**init_dict)
+        # -- parameters: loaded once from the process's `parameters` dataset --
+        parameters = init_dict.get("parameters")
+        if isinstance(parameters, pl.Path):
+            parameters = xr.open_dataset(parameters)
+        for pp in cls.get_parameters():
+            if pp in grid_ds:
+                continue
+            parameters[pp].load()
+            grid_ds[pp] = parameters[pp]
+            grid_ds[pp].values.flags.writeable = False
+
+        # -- inputs (read-only + mutable) --
+        inputs_req = cls.get_inputs()
+        for ii in inputs_req + cls.get_mutable_inputs():
+            if ii in grid_ds:
+                continue  # produced/added on this grid -> structural share
+            if ii in init_dict:
+                if ii not in self.inputs_dict:
+                    self.inputs_dict[ii] = Input(
+                        init_dict[ii],
+                        read_only=(ii in inputs_req),
+                        load=self._load_all,
+                    )
+                grid_ds[ii] = self.inputs_dict[ii].current_values
+            else:
+                # cross-grid input -> the feeding Map's target buffer
+                for mm in self.maps.values():
+                    if mm.target_grid == grid and mm.target_var == ii:
+                        grid_ds[ii] = mm.target_values
+                        break
+
+        # -- state variables: initialised (fill + optional initial), once --
+        for name, meta in cls.get_variables().items():
+            if name in grid_ds:
+                continue
+            shape = tuple(grid_ds.sizes[d] for d in meta.dims)
+            da = xr.DataArray(
+                np.full(shape, _FILL_VALUE[meta.dtype], dtype=meta.dtype),
+                dims=meta.dims,
+                attrs={"description": meta.description},
+            )
+            if meta.initial is not None and meta.initial in init_dict:
+                da[:] = init_dict[meta.initial]
+            grid_ds[name] = da
 
     def _set_time(self) -> None:
         """Set time dimensions from the first input's `time` dim-coordinate."""
@@ -240,25 +256,12 @@ class Model:
         self.time_index = data["time"]
         self.time = Time(self.times)
 
-    def get_preceeding_processes(self, proc_name: str) -> List[str]:
-        """Return process names defined before proc_name."""
-        preceding = []
-        for pp in self._process_dict:
-            if proc_name != pp:
-                preceding.append(pp)
-            else:
-                return preceding
-        raise ValueError("Unreachable.")
-
     def advance(self) -> None:
         """Advance all inputs and processes."""
         for ii in self.inputs_dict.values():
             ii.advance()
         for pp in self.model_dict.values():
-            if isinstance(pp, xr.Dataset):
-                pp.pws.advance()
-            else:
-                pp.advance()
+            pp.advance()
 
     def calculate(self, dt: np.float64) -> None:
         """Calculate each process, first applying any Maps that feed its grid."""
@@ -266,11 +269,8 @@ class Model:
             grid = self._proc_grid[proc_name]
             for mm in self.maps.values():
                 if mm.target_grid == grid:
-                    mm.apply(self._grid_ds[mm.source_grid])
-            if isinstance(vv, xr.Dataset):
-                vv.pws.calculate(dt, self.time)
-            else:
-                vv.calculate(dt, self.time)
+                    mm.apply(self.discretizations[mm.source_grid].dataset)
+            vv.calculate(dt, self.time)
 
     def run(self, dt: np.float64, n_steps: np.int32) -> None:
         """Run simulation for n_steps time steps."""
