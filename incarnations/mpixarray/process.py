@@ -180,6 +180,10 @@ class Process(ABC):
 
     _registry: dict[str, type] = {}
 
+    # Home grid (co-registration). None = the model's single/default grid; a
+    # subclass may set a default, a process_dict entry can override it.
+    discretization: str | None = None
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         Process._registry[cls.__name__] = cls

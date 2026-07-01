@@ -46,12 +46,6 @@ class Upper(Process):
         dtype=np.float64,
         description="Primary forcing (read-only)",
     )
-    forcing_common = DataArrayMeta(
-        kind="input",
-        dims=("space",),
-        dtype=np.float64,
-        description="Common forcing shared with Lower (read-only)",
-    )
     flow = DataArrayMeta(
         kind="variable",
         dims=("space",),
@@ -116,11 +110,11 @@ class Lower(Process):
         dtype=np.float64,
         description="Flow from Upper (read-only input)",
     )
-    forcing_common = DataArrayMeta(
+    forcing_low = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
-        description="Common forcing shared with Upper (read-only)",
+        description="Lower zone's own forcing (read-only)",
     )
     storage = DataArrayMeta(
         kind="variable",
@@ -147,15 +141,21 @@ class Lower(Process):
     def _calculate(
         storage_previous: np.ndarray,
         flow: np.ndarray,
+        forcing_low: np.ndarray,
         dt: np.float64,
     ) -> np.ndarray:
         # Pure numpy -- decorate with @numba.jit when ready
-        return storage_previous * np.float64(0.95) + flow * np.float64(0.12)
+        return (
+            storage_previous * np.float64(0.95)
+            + flow * np.float64(0.12)
+            + forcing_low * np.float64(0.10)
+        )
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         self._obj["storage"].values[:] = self._calculate(
             self._obj["storage_previous"].values,
             self._obj["flow"].values,
+            self._obj["forcing_low"].values,
             dt,
         )
 

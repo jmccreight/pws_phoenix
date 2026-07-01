@@ -44,7 +44,7 @@ class TestRegression:
             return {
                 "parameters": toy_ds[PARAM_NAMES],
                 "forcing_0": toy_ds["forcing_0"],
-                "forcing_common": toy_ds["forcing_common"],
+                "forcing_low": toy_ds["forcing_low"],
                 "flow_initial": toy_ds["flow_initial"],
                 "storage_initial": toy_ds["storage_initial"],
             }
@@ -54,14 +54,14 @@ class TestRegression:
         paths = {
             "parameters": data_dir / "parameters.nc",
             "forcing_0": data_dir / "forcing_0.nc",
-            "forcing_common": data_dir / "forcing_common.nc",
+            "forcing_low": data_dir / "forcing_low.nc",
             "flow_initial": data_dir / "flow_initial.nc",
             "storage_initial": data_dir / "storage_initial.nc",
         }
         toy_ds[PARAM_NAMES].to_netcdf(paths["parameters"])
         for name in (
             "forcing_0",
-            "forcing_common",
+            "forcing_low",
             "flow_initial",
             "storage_initial",
         ):
@@ -77,6 +77,7 @@ class TestRegression:
             dimensions["n_time"],
             toy_ds["param_up_1"].values,
             dimensions["time"],
+            toy_ds["forcing_low"].values,
         )
 
     @pytest.fixture
@@ -99,7 +100,6 @@ class TestRegression:
         upper = Upper.new(
             parameters=toy_ds[["param_up_0", "param_up_1", "param_common"]],
             forcing_0=toy_ds["forcing_0"][0],
-            forcing_common=toy_ds["forcing_common"][0],
             flow_initial=toy_ds["flow_initial"],
         )
         assert upper.attrs["process_name"] == "Upper"
@@ -118,13 +118,12 @@ class TestRegression:
             "upper": {
                 "class": Upper,
                 "forcing_0": model_inputs["forcing_0"],
-                "forcing_common": model_inputs["forcing_common"],
                 "flow_initial": model_inputs["flow_initial"],
                 "parameters": model_inputs["parameters"],
             },
             "lower": {
                 "class": Lower,
-                "forcing_common": model_inputs["forcing_common"],
+                "forcing_low": model_inputs["forcing_low"],
                 "storage_initial": model_inputs["storage_initial"],
                 "parameters": model_inputs["parameters"],
             },
@@ -140,10 +139,6 @@ class TestRegression:
             model.model_dict["upper"]["param_common"].values
             is model.model_dict["lower"]["param_common"].values
         ), "Shared parameter references broken"
-        assert (
-            model.model_dict["upper"]["forcing_common"].values
-            is model.model_dict["lower"]["forcing_common"].values
-        ), "Shared forcing references broken"
         assert (
             model.model_dict["upper"]["flow"].values
             is model.model_dict["lower"]["flow"].values

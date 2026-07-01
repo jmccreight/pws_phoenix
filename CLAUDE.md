@@ -444,6 +444,40 @@ Model expands to:
   `*_previous`); process-instance multiplicity (can a type appear >1x? keys /
   identity); the single-rate-time assumption (one dt for all).
 
+## Build plan: multi-grid, incremental (June 2026)
+
+The path from the single-grid toy to the multi-grid object model, with the
+smallest/riskiest piece (cross-rank comm) last.
+
+- **(deferred) Single-grid container-unification.** Give the dis its real job:
+  own the grid's one shared dataset; serial stops building N per-process
+  datasets and drops the `a.values is b.values` asserts; both paths bind
+  processes directly (`process._obj = dis.dataset`), no `.pws` dispatch.
+  Tree-agnostic. *Deferred* in favour of the multi-grid demo; revisit to retire
+  the asserts / once a grid hosts >1 process.
+- **Step A -- serial two-grid + Map + scheduler (no MPI).** Upper on grid1,
+  Lower on grid2 (different dims/sizes), a simple sparse-weight **Map**
+  (grid1 -> grid2), run order Upper -> map -> Lower. Proves the **Map** class,
+  the **scheduler**, the multi-grid object model, and **process->grid
+  co-registration** -- all in serial, on the `discretizations` dict (no tree,
+  no mpixarray dependency). New two-grid toy + test; the single-grid toy is left
+  untouched.
+- **Step B -- mixed parallelization + comm (the real target).** Make grid1
+  distributed (MPI), grid2 serial. The Map now crosses the parallel boundary ->
+  a **distributed sparse mat-vec** (allgather the input, or allreduce the
+  output), plus the serial-grid choice: **replicated on all ranks** (simple;
+  redundant compute) vs **single-rank** (less compute; gather/scatter; mind the
+  allgather-not-bare-`assert` deadlock lesson from `ref_behaviors`). Gated on
+  mpixarray. Models a real pattern: distributed fine grid (HRUs) -> small serial
+  coarse grid (channel network).
+
+**Two questions for the mpixarray dev** (alongside the streaming-tree question):
+1. Can >= 2 parallelized + streamed datasets be co-iterated / merged into one
+   streaming view (the streaming-tree / multi-stream crux)?
+2. Can mpixarray host **heterogeneous** grids in one parallel run (one
+   decomposed, one serial/replicated) and move data **across** them
+   (gather / scatter / allreduce) for a Map?
+
 ## Input structuring: serial vs MPI, multi-file / datatree (June 2026)
 
 Design discussion -- **not yet implemented.** Dislike of the "kitchen sink"

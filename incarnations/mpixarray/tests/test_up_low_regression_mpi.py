@@ -84,6 +84,7 @@ def answers(dimensions, make_toy_input, compute_answers):
         dimensions["n_time"],
         ds["param_up_1"].values,
         dimensions["time"],
+        ds["forcing_low"].values,
     )
 
 
@@ -128,10 +129,6 @@ def mpi_run(mpi_paths):
             upper._obj["param_common"].values
             is lower._obj["param_common"].values
         ),
-        "shared_forcing_common": (
-            upper._obj["forcing_common"].values
-            is lower._obj["forcing_common"].values
-        ),
         "shared_flow": upper._obj["flow"].values is lower._obj["flow"].values,
     }
     model.finalize()
@@ -147,9 +144,6 @@ class TestRegressionMPI:
     # Asserts happen here but the boolean was evaluated before model.finalize
     def test_shared_param_common(self, mpi_run):
         assert mpi_run["shared_param_common"]
-
-    def test_shared_forcing_common(self, mpi_run):
-        assert mpi_run["shared_forcing_common"]
 
     def test_shared_flow_upper_lower(self, mpi_run):
         assert mpi_run["shared_flow"]

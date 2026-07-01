@@ -22,19 +22,15 @@ from typing import Any
 
 
 class Discretization:
-    """Unit of spatial decomposition; a grid, identified by ``name``.
+    """Unit of spatial decomposition; a grid.
 
-    ``dims`` (the spatial dim(s)) defaults to ``[name]`` -- the common case
-    where the grid is a single dimension named like itself.
+    Identity is the Model's ``discretizations`` dict key, not stored here.
     serial: degenerate (``comm=None``, full extent, ``decompose`` is identity).
     MPI: wraps ``parallelize`` over ``dims`` and carries the comm.
     """
 
-    def __init__(
-        self, name: str, dims: list[str] | None = None, *, comm: Any = None
-    ) -> None:
-        self.name = name
-        self.dims = list(dims) if dims is not None else [name]
+    def __init__(self, dims: list[str], *, comm: Any = None) -> None:
+        self.dims = list(dims)
         self.comm = comm
 
     @property

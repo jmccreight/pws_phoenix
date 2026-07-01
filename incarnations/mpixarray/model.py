@@ -61,6 +61,11 @@ class Model:
     ) -> None:
         self._passed_process_dict = process_dict
         self._process_dict = deepcopy(process_dict)
+        # process name -> home grid (co-registration: process_dict override,
+        # else the class default, else the single default grid "space").
+        self._proc_grid: Dict[str, str] = {
+            kk: self._resolve_grid(vv) for kk, vv in self._process_dict.items()
+        }
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._finalized = False
 
@@ -77,7 +82,11 @@ class Model:
         del self._process_dict
 
         self._set_time()
-        self.discretizations = {"space": Discretization("space")}
+        # one Discretization per distinct home grid. The Process framework's
+        # spatial dim is "space" for every grid (different grids = different
+        # datasets/sizes on that dim); the grid *name* is the dict key.
+        grids = dict.fromkeys(self._proc_grid.values())
+        self.discretizations = {g: Discretization(["space"]) for g in grids}
 
         self.current_time_index = np.array([0], dtype=np.int32)
         self.current_time = (
@@ -151,12 +160,22 @@ class Model:
                 self._opened_files.append(opened)
         return shared
 
+    def _resolve_grid(self, entry: Dict[str, Any]) -> str:
+        """A process entry's home grid: process_dict override, else the class
+        default (`Process.discretization`), else the single grid "space"."""
+        grid = entry.get("discretization") or entry["class"].discretization
+        return grid if grid is not None else "space"
+
     def _initialize_inputs_and_proceses(self) -> None:  # noqa: spelling
         """Build each process via its Process.new() factory; wire inputs by
         reference (preserving cross-process buffer sharing) and the upstream
         variables produced by preceding processes."""
         for kk, vv in self._process_dict.items():
-            init_dict = {kkk: vvv for kkk, vvv in vv.items() if kkk != "class"}
+            init_dict = {
+                kkk: vvv
+                for kkk, vvv in vv.items()
+                if kkk not in ("class", "discretization")
+            }
 
             inputs_req = vv["class"].get_inputs()
             input_outputs_req = vv["class"].get_mutable_inputs()
@@ -279,7 +298,6 @@ class ModelMPI(Model):
     A *single* decomposed dataset (``ds_mpi_stream``) carries every process's
     state, parameters, per-step input buffers, and streaming outputs. Because
     there is one dataset, cross-process buffer sharing (param_common,
-    forcing_common,
     Upper.flow -> Lower.flow) is *structural* -- the same named variable -- not
     emulated by hand and asserted with ``a.values is b.values``.
 
@@ -344,7 +362,7 @@ class ModelMPI(Model):
         self._ntime = n_time
         self.time = Time(ds_input["time"])
 
-        self.discretizations = {"space": Discretization("space", comm=comm)}
+        self.discretizations = {"space": Discretization(["space"], comm=comm)}
         ds_mpi = self.discretizations["space"].decompose(ds_input)
         comm = self.discretizations["space"].comm  # parallelize may refine
         self._comm = comm
