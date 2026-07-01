@@ -1,0 +1,6 @@
+# Ruff configuration for pws_phoenix.
+#
+# Line length is pinned here (referenced by CLAUDE.md's python conventions);
+# everything else uses ruff defaults. Applies to all subdirectories, since
+# ruff walks up to the nearest config -- including incarnations/.
+line-length = 79

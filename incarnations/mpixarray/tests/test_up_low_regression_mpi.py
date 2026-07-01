@@ -111,7 +111,8 @@ def mpi_run(mpi_paths):
     # ds_mpi_stream with its `month` dim -- captured before finalize.
     param_up_1_resident = "param_up_1" in model._ds_mpi_stream.data_vars
     param_up_1_has_month = (
-        param_up_1_resident and "month" in model._ds_mpi_stream["param_up_1"].dims
+        param_up_1_resident
+        and "month" in model._ds_mpi_stream["param_up_1"].dims
     )
     # storage_previous isn't streamed, so gather its final state globally as the
     # Lower-process check (single scheme -> rank-ordered contiguous blocks).

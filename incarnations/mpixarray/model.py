@@ -202,13 +202,19 @@ class Model:
             if kkk not in ("class", "discretization")
         }
 
-        # -- parameters: loaded once from the process's `parameters` dataset --
-        parameters = init_dict.get("parameters")
+        # -- parameters: a Dataset (or a Path opened here), loaded once.
+        # Required when the process declares any parameter. --
+        parameters: xr.Dataset | pl.Path | None = init_dict.get("parameters")
         if isinstance(parameters, pl.Path):
             parameters = xr.open_dataset(parameters)
         for pp in cls.get_parameters():
             if pp in grid_ds:
                 continue
+            if parameters is None:
+                raise ValueError(
+                    f"process '{proc_name}' declares parameter '{pp}' but "
+                    "no 'parameters' were supplied"
+                )
             parameters[pp].load()
             grid_ds[pp] = parameters[pp]
             grid_ds[pp].values.flags.writeable = False
@@ -241,9 +247,7 @@ class Model:
         for name, meta in cls.get_variables().items():
             if name in grid_ds:
                 continue
-            dims = tuple(
-                real_dim if dd == "space" else dd for dd in meta.dims
-            )
+            dims = tuple(real_dim if dd == "space" else dd for dd in meta.dims)
             shape = tuple(grid_ds.sizes[dd] for dd in dims)
             da = xr.DataArray(
                 np.full(shape, _FILL_VALUE[meta.dtype], dtype=meta.dtype),
