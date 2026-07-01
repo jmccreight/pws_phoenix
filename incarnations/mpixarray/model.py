@@ -58,6 +58,7 @@ class Model:
         process_dict: Dict[str, Any],
         control: Dict[str, Any],
         load_all: Union[bool, None] = None,
+        maps: Union[Dict[str, Any], None] = None,
     ) -> None:
         self._passed_process_dict = process_dict
         self._process_dict = deepcopy(process_dict)
@@ -66,6 +67,7 @@ class Model:
         self._proc_grid: Dict[str, str] = {
             kk: self._resolve_grid(vv) for kk, vv in self._process_dict.items()
         }
+        self.maps: Dict[str, Any] = maps or {}
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._finalized = False
 
@@ -80,6 +82,12 @@ class Model:
         self.inputs_dict: Dict[str, Input] = {}
         self._initialize_inputs_and_proceses()
         del self._process_dict
+
+        # grid -> a dataset on that grid (one process per grid, toy-only) so
+        # Maps can resolve their source dataset; multi-process grids later.
+        self._grid_ds: Dict[str, Any] = {}
+        for proc_name, grid in self._proc_grid.items():
+            self._grid_ds.setdefault(grid, self.model_dict[proc_name])
 
         self._set_time()
         # one Discretization per distinct home grid. The Process framework's
@@ -200,7 +208,10 @@ class Model:
                     else:
                         init_dict[ii] = self.inputs_dict[ii]
                 else:
+                    grid = self._proc_grid[kk]
                     for pp in self.get_preceeding_processes(kk):
+                        if self._proc_grid[pp] != grid:
+                            continue  # cross-grid -> a Map feeds this
                         proc = self.model_dict[pp]
                         if isinstance(proc, xr.Dataset):
                             var_names = proc.pws.get_var_names()  # type: ignore[attr-defined]
@@ -208,6 +219,14 @@ class Model:
                             var_names = proc.get_variables()
                         if ii in var_names:
                             init_dict[ii] = self.model_dict[pp][ii]
+                            break
+                    else:
+                        # no same-grid producer -> a Map feeds this cross-grid
+                        # input; wire it to the feeding Map's target buffer.
+                        for mm in self.maps.values():
+                            if mm.target_grid == grid and mm.target_var == ii:
+                                init_dict[ii] = mm.target_values
+                                break
 
             cls = vv["class"]
             self.model_dict[kk] = cls.new(**init_dict)
@@ -242,8 +261,12 @@ class Model:
                 pp.advance()
 
     def calculate(self, dt: np.float64) -> None:
-        """Calculate all processes."""
-        for vv in self.model_dict.values():
+        """Calculate each process, first applying any Maps that feed its grid."""
+        for proc_name, vv in self.model_dict.items():
+            grid = self._proc_grid[proc_name]
+            for mm in self.maps.values():
+                if mm.target_grid == grid:
+                    mm.apply(self._grid_ds[mm.source_grid])
             if isinstance(vv, xr.Dataset):
                 vv.pws.calculate(dt, self.time)
             else:
