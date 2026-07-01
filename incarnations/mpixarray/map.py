@@ -41,7 +41,7 @@ class Map:
         self.target_var = target_var
         self.weights = np.asarray(weights)
         self.target_values = xr.DataArray(
-            np.zeros(self.weights.shape[0]), dims=["space"]
+            np.zeros(self.weights.shape[0]), dims=[target_grid]
         )
 
     def apply(self, source_ds: Any) -> None:

@@ -70,12 +70,12 @@ class Model:
             kk: self._resolve_grid(vv) for kk, vv in self._process_dict.items()
         }
         self.maps: Dict[str, Any] = maps or {}
-        # one Discretization per distinct home grid (grid name = dict key; the
-        # framework's spatial dim is "space" for all). The dis owns the grid's
-        # shared dataset, assembled + attached during _initialize below.
+        # one Discretization per distinct home grid; the grid's dict key IS its
+        # real spatial dim name (1-D grids: grid identity == dim). The dis owns
+        # the grid's shared dataset, assembled + attached during _initialize.
         grids = dict.fromkeys(self._proc_grid.values())
         self.discretizations: Dict[str, Discretization] = {
-            g: Discretization(["space"]) for g in grids
+            g: Discretization([g]) for g in grids
         }
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._finalized = False
@@ -233,14 +233,21 @@ class Model:
                         grid_ds[ii] = mm.target_values
                         break
 
-        # -- state variables: initialised (fill + optional initial), once --
+        # -- state variables: initialised (fill + optional initial), once.
+        # A process declares its spatial dim as the placeholder "space"; bind
+        # it to this grid's real dim (the grid key). Params/inputs already
+        # arrive on the real dim, so only state vars need resolving. --
+        real_dim = self.discretizations[grid].dims[0]
         for name, meta in cls.get_variables().items():
             if name in grid_ds:
                 continue
-            shape = tuple(grid_ds.sizes[d] for d in meta.dims)
+            dims = tuple(
+                real_dim if dd == "space" else dd for dd in meta.dims
+            )
+            shape = tuple(grid_ds.sizes[dd] for dd in dims)
             da = xr.DataArray(
                 np.full(shape, _FILL_VALUE[meta.dtype], dtype=meta.dtype),
-                dims=meta.dims,
+                dims=dims,
                 attrs={"description": meta.description},
             )
             if meta.initial is not None and meta.initial in init_dict:
