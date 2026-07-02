@@ -78,7 +78,7 @@ def answers(dimensions, make_toy_input, compute_answers):
     recomputes identical answers from an in-memory copy (no file read needed)."""
     ds = make_toy_input(dimensions)
     return compute_answers(
-        ds["forcing_0"].values,
+        ds["forcing_up"].values,
         ds["flow_initial"].values,
         ds["storage_initial"].values,
         dimensions["n_time"],
@@ -126,9 +126,9 @@ def mpi_run(mpi_paths):
         "storage_prev_final": storage_prev_final,
         # the shared buffer/ref checks need to happen before model.finalize()
         # because that deletes/closees ds_mpi_stream.
-        "shared_param_common": (
-            upper._obj["param_common"].values
-            is lower._obj["param_common"].values
+        "param_shared_name": (
+            upper._obj["param_shared_name"].values
+            is lower._obj["param_shared_name"].values
         ),
         "shared_flow": upper._obj["flow"].values is lower._obj["flow"].values,
     }
@@ -143,8 +143,8 @@ class TestRegressionMPI:
 
     # -- structural buffer sharing (one ds_mpi_stream) --
     # Asserts happen here but the boolean was evaluated before model.finalize
-    def test_shared_param_common(self, mpi_run):
-        assert mpi_run["shared_param_common"]
+    def test_param_shared_name(self, mpi_run):
+        assert mpi_run["param_shared_name"]
 
     def test_shared_flow_upper_lower(self, mpi_run):
         assert mpi_run["shared_flow"]

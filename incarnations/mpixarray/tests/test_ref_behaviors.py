@@ -28,10 +28,10 @@ the shared parent Dataset *before* selecting them:
     ds = parameters[list(param_names)]  # selection now preserves identity
 
 Without the selective .load(), file-backed parameters would copy on selection
-and cross-process sharing (param_common, etc.) would silently break. Inputs are
-then wired by reference via `ds[ii] = inp.current_values`, which __setitem__
-keeps zero-copy (Section 1), so Input.advance()'s [:] updates propagate to every
-process sharing the buffer (Section 3).
+and cross-process sharing (param_shared_name, etc.) would silently break.
+Inputs are then wired by reference via `ds[ii] = inp.current_values`, which
+__setitem__ keeps zero-copy (Section 1), so Input.advance()'s [:] updates
+propagate to every process sharing the buffer (Section 3).
 """
 
 import numpy as np

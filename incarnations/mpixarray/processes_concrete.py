@@ -34,13 +34,13 @@ class Upper(Process):
         dtype=np.float64,
         description="Upper zone parameter 1 (time-varying: cyclic monthly)",
     )
-    param_common = DataArrayMeta(
+    param_shared_name = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
         description="Parameter shared with Lower",
     )
-    forcing_0 = DataArrayMeta(
+    forcing_up = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
@@ -70,19 +70,19 @@ class Upper(Process):
     @staticmethod
     def _calculate(
         flow_previous: np.ndarray,
-        forcing_0: np.ndarray,
+        forcing_up: np.ndarray,
         param_up_1: np.ndarray,
         dt: np.float64,
     ) -> np.ndarray:
         # Pure numpy -- decorate with @numba.jit when ready
-        return flow_previous * np.float64(0.95) + forcing_0 * param_up_1
+        return flow_previous * np.float64(0.95) + forcing_up * param_up_1
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         # param_up_1 is cyclic-monthly; index by current month
         param_up_1_now = self._obj["param_up_1"].values[time.month - 1]
         self._obj["flow"].values[:] = self._calculate(
             self._obj["flow_previous"].values,
-            self._obj["forcing_0"].values,
+            self._obj["forcing_up"].values,
             param_up_1_now,
             dt,
         )
@@ -98,7 +98,7 @@ class Lower(Process):
         dtype=np.float64,
         description="Lower zone parameter 0",
     )
-    param_common = DataArrayMeta(
+    param_shared_name = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,

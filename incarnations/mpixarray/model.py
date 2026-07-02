@@ -174,9 +174,9 @@ class Model:
 
     def _initialize_inputs_and_proceses(self) -> None:  # noqa: spelling
         """Assemble ONE shared dataset per grid from its processes' field specs,
-        then bind each process to it. Same-named vars are added once, so cross-
-        process sharing (param_common, Upper.flow -> Lower.flow) is structural.
-        Each grid's Discretization owns the resulting dataset."""
+        then bind each process to it. Same-named vars are added once, so
+        cross-process sharing (param_shared_name, Upper.flow -> Lower.flow) is
+        structural. Each grid's Discretization owns the resulting dataset."""
         grid_procs: Dict[str, List[str]] = {}
         for kk in self._process_dict:
             grid_procs.setdefault(self._proc_grid[kk], []).append(kk)
@@ -331,7 +331,7 @@ class ModelMPI(Model):
 
     A *single* decomposed dataset (``ds_mpi_stream``) carries every process's
     state, parameters, per-step input buffers, and streaming outputs. Because
-    there is one dataset, cross-process buffer sharing (param_common,
+    there is one dataset, cross-process buffer sharing (param_shared_name,
     Upper.flow -> Lower.flow) is *structural* -- the same named variable -- not
     emulated by hand and asserted with ``a.values is b.values``.
 
@@ -410,7 +410,8 @@ class ModelMPI(Model):
 
         # Realize the static (space-only) survivors -- params + ICs -- in
         # memory. Otherwise they stay lazy file-backed and each `.values`
-        # re-reads, so buffer sharing (param_common is ...) would not hold.
+        # re-reads, so buffer sharing (param_shared_name is ...) would not
+        # hold.
         for name in list(ds_mpi_stream.data_vars):
             ds_mpi_stream[name] = ds_mpi_stream[name].load()
 

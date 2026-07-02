@@ -46,10 +46,10 @@ def dimensions():
 def make_toy_input():
     """Factory returning the unified toy input Dataset.
 
-    `time`/`space`/`month` are dim-coordinates. Vars: forcing_0, forcing_low
+    `time`/`space`/`month` are dim-coordinates. Vars: forcing_up, forcing_low
     (time, space; independent forcings for Upper/Lower); param_up_1 (month,
-    space, cyclic-monthly); param_up_0, param_low_0, param_common, flow_initial,
-    storage_initial (space). Deterministic per seed.
+    space, cyclic-monthly); param_up_0, param_low_0, param_shared_name,
+    flow_initial, storage_initial (space). Deterministic per seed.
     """
 
     def _make(dimensions: dict, seed: int = 42) -> xr.Dataset:
@@ -61,8 +61,8 @@ def make_toy_input():
             np.arange(0, 2 * np.pi * n_years, 2 * np.pi * n_years / n_time)
         )
         shifts = rng.uniform(10, 100, n_space)
-        forcing_0 = sin_data[:, np.newaxis] + shifts[np.newaxis, :]
-        # Lower's own forcing -- deterministic and unrelated to forcing_0 (cos
+        forcing_up = sin_data[:, np.newaxis] + shifts[np.newaxis, :]
+        # Lower's own forcing -- deterministic and unrelated to forcing_up (cos
         # + a fixed per-space shift), so it doesn't perturb the rng draws.
         cos_data = np.cos(
             np.arange(0, 2 * np.pi * n_years, 2 * np.pi * n_years / n_time)
@@ -71,7 +71,7 @@ def make_toy_input():
         forcing_low = cos_data[:, np.newaxis] + shifts_low[np.newaxis, :]
         return xr.Dataset(
             data_vars=dict(
-                forcing_0=(["time", "space"], forcing_0),
+                forcing_up=(["time", "space"], forcing_up),
                 forcing_low=(["time", "space"], forcing_low),
                 param_up_0=(["space"], rng.uniform(0.1, 1, n_space)),
                 param_up_1=(
@@ -79,7 +79,7 @@ def make_toy_input():
                     rng.uniform(0.1, 1, (12, n_space)),
                 ),
                 param_low_0=(["space"], rng.uniform(0.17, 0.23, n_space)),
-                param_common=(["space"], np.zeros(n_space)),
+                param_shared_name=(["space"], np.zeros(n_space)),
                 flow_initial=(["space"], rng.uniform(100, 1000, n_space)),
                 storage_initial=(["space"], rng.uniform(100, 500, n_space)),
             ),
@@ -98,7 +98,7 @@ def compute_answers():
     """Factory for the vectorized ground-truth Upper/Lower solution."""
 
     def _compute(
-        forcing_0,
+        forcing_up,
         flow_initial,
         storage_initial,
         n_time,
@@ -106,12 +106,12 @@ def compute_answers():
         time,
         forcing_low,
     ) -> dict:
-        forcing_0 = np.asarray(forcing_0)
+        forcing_up = np.asarray(forcing_up)
         flow_initial = np.asarray(flow_initial)
         storage_initial = np.asarray(storage_initial)
         param_up_1 = np.asarray(param_up_1)
         forcing_low = np.asarray(forcing_low)
-        n_space = forcing_0.shape[1]
+        n_space = forcing_up.shape[1]
 
         # day -> month index (0-11), matching Time.month - 1
         months = np.asarray(time).astype("datetime64[M]").astype(int) % 12
@@ -124,7 +124,7 @@ def compute_answers():
             )
             expected_flow[tt, :] = (
                 expected_flow_prev[tt, :] * 0.95
-                + forcing_0[tt, :] * param_up_1[months[tt], :]
+                + forcing_up[tt, :] * param_up_1[months[tt], :]
             )
 
         expected_storage = np.zeros((n_time, n_space))

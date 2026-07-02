@@ -81,7 +81,7 @@ class DataArrayMeta:
         class Upper(Process):
             param_up_0 = DataArrayMeta(kind="parameter", dims=("space",),
                                        dtype=np.float64)
-            forcing_0  = DataArrayMeta(kind="input",     dims=("space",),
+            forcing_up  = DataArrayMeta(kind="input",     dims=("space",),
                                        dtype=np.float64)
             flow       = DataArrayMeta(kind="variable",  dims=("space",),
                                        dtype=np.float64, initial="flow_initial")
@@ -155,7 +155,7 @@ class Process(ABC):
         Call the classmethod new() on the concrete subclass to build the
         xr.Dataset, then access .pws to get the configured accessor:
 
-        ds = Upper.new(parameters=..., forcing_0=..., flow_initial=...)
+        ds = Upper.new(parameters=..., forcing_up=..., flow_initial=...)
         ds.pws.advance()
         ds.pws.calculate(dt, time)
 
@@ -174,7 +174,7 @@ class Process(ABC):
             def calculate(self, dt: np.float64, time: Time) -> None:
                 self._calculate(
                     self._obj["flow_previous"].values,
-                    self._obj["forcing_0"].values,
+                    self._obj["forcing_up"].values,
                 )
     """
 

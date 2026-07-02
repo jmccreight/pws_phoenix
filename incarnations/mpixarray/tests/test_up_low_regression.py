@@ -19,7 +19,7 @@ from process import Process
 from processes_concrete import Lower, Upper
 
 # Upper's and Lower's parameter sets (union passed to both; each selects its own)
-PARAM_NAMES = ["param_up_0", "param_up_1", "param_low_0", "param_common"]
+PARAM_NAMES = ["param_up_0", "param_up_1", "param_low_0", "param_shared_name"]
 
 
 class TestRegression:
@@ -43,7 +43,7 @@ class TestRegression:
         if request.param == "memory":
             return {
                 "parameters": toy_ds[PARAM_NAMES],
-                "forcing_0": toy_ds["forcing_0"],
+                "forcing_up": toy_ds["forcing_up"],
                 "forcing_low": toy_ds["forcing_low"],
                 "flow_initial": toy_ds["flow_initial"],
                 "storage_initial": toy_ds["storage_initial"],
@@ -53,14 +53,14 @@ class TestRegression:
         data_dir.mkdir(exist_ok=True)
         paths = {
             "parameters": data_dir / "parameters.nc",
-            "forcing_0": data_dir / "forcing_0.nc",
+            "forcing_up": data_dir / "forcing_up.nc",
             "forcing_low": data_dir / "forcing_low.nc",
             "flow_initial": data_dir / "flow_initial.nc",
             "storage_initial": data_dir / "storage_initial.nc",
         }
         toy_ds[PARAM_NAMES].to_netcdf(paths["parameters"])
         for name in (
-            "forcing_0",
+            "forcing_up",
             "forcing_low",
             "flow_initial",
             "storage_initial",
@@ -71,7 +71,7 @@ class TestRegression:
     @pytest.fixture
     def answers(self, toy_ds, dimensions, compute_answers):
         return compute_answers(
-            toy_ds["forcing_0"].values,
+            toy_ds["forcing_up"].values,
             toy_ds["flow_initial"].values,
             toy_ds["storage_initial"].values,
             dimensions["n_time"],
@@ -98,8 +98,10 @@ class TestRegression:
     def test_process_name_in_attrs(self, toy_ds):
         """ds.attrs['process_name'] is set and no callables are stored in attrs."""
         upper = Upper.new(
-            parameters=toy_ds[["param_up_0", "param_up_1", "param_common"]],
-            forcing_0=toy_ds["forcing_0"][0],
+            parameters=toy_ds[
+                ["param_up_0", "param_up_1", "param_shared_name"]
+            ],
+            forcing_up=toy_ds["forcing_up"][0],
             flow_initial=toy_ds["flow_initial"],
         )
         assert upper.attrs["process_name"] == "Upper"
@@ -117,7 +119,7 @@ class TestRegression:
         process_dict = {
             "upper": {
                 "class": Upper,
-                "forcing_0": model_inputs["forcing_0"],
+                "forcing_up": model_inputs["forcing_up"],
                 "flow_initial": model_inputs["flow_initial"],
                 "parameters": model_inputs["parameters"],
             },
@@ -136,8 +138,8 @@ class TestRegression:
         # -- buffer sharing (by-reference wiring) --
         # Serial case: internal data are not deleted/closed by finalize.
         assert (
-            model.model_dict["upper"]["param_common"].values
-            is model.model_dict["lower"]["param_common"].values
+            model.model_dict["upper"]["param_shared_name"].values
+            is model.model_dict["lower"]["param_shared_name"].values
         ), "Shared parameter references broken"
         assert (
             model.model_dict["upper"]["flow"].values

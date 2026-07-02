@@ -52,11 +52,11 @@ class TestTwoGrid:
             dict(
                 param_up_0=(["hru"], rng.uniform(0.1, 1, N_HRU)),
                 param_up_1=(["month", "hru"], pu1),
-                param_common=(["hru"], np.zeros(N_HRU)),
+                param_shared_name=(["hru"], np.zeros(N_HRU)),
             ),
             coords=dict(month=("month", np.arange(1, 13))),
         )
-        up_forcing_0 = xr.DataArray(
+        forcing_up = xr.DataArray(
             sin[:, None] + rng.uniform(10, 100, N_HRU)[None, :],
             dims=["time", "hru"],
             coords={"time": dimensions["time"]},
@@ -69,10 +69,10 @@ class TestTwoGrid:
         low_params = xr.Dataset(
             dict(
                 param_low_0=(["segment"], rng.uniform(0.17, 0.23, N_SEG)),
-                param_common=(["segment"], np.zeros(N_SEG)),
+                param_shared_name=(["segment"], np.zeros(N_SEG)),
             )
         )
-        low_forcing_low = xr.DataArray(
+        forcing_low = xr.DataArray(
             rng.uniform(1, 3, (n_time, N_SEG)),
             dims=["time", "segment"],
             coords={"time": dimensions["time"]},
@@ -82,10 +82,10 @@ class TestTwoGrid:
         )
         return dict(
             up_params=up_params,
-            up_forcing_0=up_forcing_0,
+            forcing_up=forcing_up,
             up_flow_initial=up_flow_initial,
             low_params=low_params,
-            low_forcing_low=low_forcing_low,
+            forcing_low=forcing_low,
             low_storage_initial=low_storage_initial,
         )
 
@@ -96,10 +96,10 @@ class TestTwoGrid:
         n_time = dimensions["n_time"]
         time = np.asarray(dimensions["time"])
         months = time.astype("datetime64[M]").astype(int) % 12
-        f0 = toy["up_forcing_0"].values
+        f0 = toy["forcing_up"].values
         pu1 = toy["up_params"]["param_up_1"].values
         flow_init = toy["up_flow_initial"].values
-        fl = toy["low_forcing_low"].values
+        fl = toy["forcing_low"].values
         stor_init = toy["low_storage_initial"].values
 
         flow = np.zeros((n_time, N_HRU))
@@ -124,14 +124,14 @@ class TestTwoGrid:
                 "class": Upper,
                 "discretization": "hru",
                 "parameters": toy["up_params"],
-                "forcing_0": toy["up_forcing_0"],
+                "forcing_up": toy["forcing_up"],
                 "flow_initial": toy["up_flow_initial"],
             },
             "lower": {
                 "class": Lower,
                 "discretization": "segment",
                 "parameters": toy["low_params"],
-                "forcing_low": toy["low_forcing_low"],
+                "forcing_low": toy["forcing_low"],
                 "storage_initial": toy["low_storage_initial"],
                 # NOTE: "flow" is NOT provided -- the Map feeds it.
             },
