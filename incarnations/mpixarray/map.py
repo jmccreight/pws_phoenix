@@ -9,16 +9,21 @@ Construction is keyword-only; the ``{source: target}`` dicts read "from -> to":
 
     Map(weights=w, grid={"hru": "segment"}, variable={"flow": "flow"})
 
-Step-A scope: one-way, serial, dense weights, single-entry dicts (one Map
-carrying several variables across the same grid pair with the same weights is
-a possible future extension). ``apply()`` fills the map's own
-``target_values`` buffer, which the Model wires as the consumer process's
-cross-grid input -- so writing it feeds the consumer directly (zero-copy).
-Scheduling/validation (apply once per step, before the first consumer, after
-all declared source-grid writers; weights shape vs grid sizes) lives in
-``Model._resolve_maps``. Bidirectional (fwd/rev) transforms, sparse weights,
-and the cross-rank comm for a distributed source grid (Step B) are future
-work (see pws_phoenix/CLAUDE.md).
+Scope: one-way, dense weights, single-entry dicts (one Map carrying several
+variables across the same grid pair with the same weights is a possible
+future extension). ``apply()`` fills the map's own ``target_values`` buffer,
+which the Model wires as the consumer process's cross-grid input -- so
+writing it feeds the consumer directly (zero-copy). Scheduling/validation
+(apply once per step, before the first consumer, after all declared
+source-grid writers; weights shape vs grid sizes) lives in
+``Model._resolve_maps``.
+
+``MapMPI`` (Step B) crosses the parallel boundary: source grid distributed,
+target grid serial/replicated -- a distributed mat-vec (local partial
+product + Allreduce). This is the INTERIM cross-grid comm; the mpixarray
+streaming-datatree work is expected to absorb this role (see
+pws_phoenix/CLAUDE.md). Bidirectional (fwd/rev) transforms and sparse
+weights are future work.
 """
 
 from typing import Any
@@ -62,7 +67,48 @@ class Map:
         )
 
     def apply(self, source_ds: Any) -> None:
-        """Remap ``source_ds[source_var]`` into ``target_values`` (in place)."""
-        self.target_values.values[:] = (
-            self.weights @ source_ds[self.source_var].values
+        """Remap ``source_ds[source_var]`` into ``target_values`` (in place,
+        no per-step allocation)."""
+        np.matmul(
+            self.weights,
+            source_ds[self.source_var].values,
+            out=self.target_values.values,
         )
+
+
+class MapMPI(Map):
+    """Map whose SOURCE grid is space-decomposed (MPI) and whose target grid
+    is serial, replicated on every rank.
+
+    Construction is identical to ``Map`` (global weights); the decomposition
+    is configured afterwards by ModelMPI via ``set_decomposition()``, once
+    ``parallelize`` has determined each rank's extent.
+
+    ``apply()`` is a distributed mat-vec: each rank multiplies its local
+    weight columns by its local source slice, then ``Allreduce`` (SUM, the
+    mpi4py default op) fills ``target_values`` identically on every rank --
+    exactly what the replicated target grid consumes, with no further
+    exchange. Communicates ``(n_target,)`` doubles per apply (vs allgathering
+    the ``(n_source,)`` input) -- the right trade for a big source grid
+    feeding a small target grid.
+    """
+
+    def set_decomposition(self, comm: Any, start: int, stop: int) -> None:
+        """Configure this rank's slice ``[start, stop)`` of the source dim.
+        Called by ModelMPI at build time."""
+        self._comm = comm
+        # One-time contiguous copy of this rank's weight columns (the sliced
+        # view is non-contiguous and would slow every per-step matmul).
+        self._weights_local = np.ascontiguousarray(self.weights[:, start:stop])
+        # Per-step partial-product window buffer, reused every apply.
+        self._partial = np.zeros(self.weights.shape[0])
+
+    def apply(self, source_ds: Any) -> None:
+        """Distributed remap: local partial product, then Allreduce(SUM)
+        into ``target_values`` (in place, on every rank)."""
+        np.matmul(
+            self._weights_local,
+            source_ds[self.source_var].values,
+            out=self._partial,
+        )
+        self._comm.Allreduce(self._partial, self.target_values.values)

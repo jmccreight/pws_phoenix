@@ -93,6 +93,128 @@ def make_toy_input():
     return _make
 
 
+# ---------------------------------------------------------------------------
+# Two-grid toy (Upper on "hru" -> Map -> Lower on "segment"): shared by the
+# serial (test_two_grid.py) and MPI Step B (test_two_grid_mpi.py) tests.
+# Deterministic per seed, so every MPI rank rebuilds identical data (the
+# replication of the serial "segment" grid relies on this).
+# ---------------------------------------------------------------------------
+
+# N_HRU divides evenly over 2 and 4 ranks (uneven decomposition is a
+# separate concern from the Step B cross-grid comm under test).
+N_HRU = 8
+N_SEG = 4
+
+
+@pytest.fixture(scope="session")
+def two_grid_weights():
+    """(N_SEG, N_HRU): each segment aggregates two HRUs by averaging."""
+    ww = np.zeros((N_SEG, N_HRU))
+    for seg in range(N_SEG):
+        ww[seg, 2 * seg] = 0.5
+        ww[seg, 2 * seg + 1] = 0.5
+    return ww
+
+
+@pytest.fixture(scope="session")
+def make_two_grid_toy():
+    """Factory for the two-grid toy inputs: Upper's on dim "hru" (N_HRU),
+    Lower's on "segment" (N_SEG) -- each grid's key is its real dim;
+    separate datasets. `flow` is NOT given to Lower (the Map feeds it).
+    `hru` and `time` are real dim-coordinates (mpixarray's `parallelize`/
+    `set_streaming` need them on the distributed grid)."""
+
+    def _make(dimensions: dict, seed: int = 11) -> dict:
+        n_time = dimensions["n_time"]
+        rng = np.random.default_rng(seed)
+        sin = np.sin(np.arange(0, 2 * np.pi, 2 * np.pi / n_time))
+        pu1 = rng.uniform(0.1, 1, (12, N_HRU))
+        hru_coord = np.arange(N_HRU)
+
+        # -- grid "hru" (Upper) --
+        up_params = xr.Dataset(
+            dict(
+                param_up_0=(["hru"], rng.uniform(0.1, 1, N_HRU)),
+                param_up_1=(["month", "hru"], pu1),
+                param_shared_name=(["hru"], np.zeros(N_HRU)),
+            ),
+            coords=dict(
+                month=("month", np.arange(1, 13)),
+                hru=("hru", hru_coord),
+            ),
+        )
+        forcing_up = xr.DataArray(
+            sin[:, None] + rng.uniform(10, 100, N_HRU)[None, :],
+            dims=["time", "hru"],
+            coords={"time": dimensions["time"], "hru": hru_coord},
+        )
+        up_flow_initial = xr.DataArray(
+            rng.uniform(100, 1000, N_HRU),
+            dims=["hru"],
+            coords={"hru": hru_coord},
+        )
+
+        # -- grid "segment" (Lower) --
+        low_params = xr.Dataset(
+            dict(
+                param_low_0=(["segment"], rng.uniform(0.17, 0.23, N_SEG)),
+                param_shared_name=(["segment"], np.zeros(N_SEG)),
+            )
+        )
+        forcing_low = xr.DataArray(
+            rng.uniform(1, 3, (n_time, N_SEG)),
+            dims=["time", "segment"],
+            coords={"time": dimensions["time"]},
+        )
+        low_storage_initial = xr.DataArray(
+            rng.uniform(100, 500, N_SEG), dims=["segment"]
+        )
+        return dict(
+            up_params=up_params,
+            forcing_up=forcing_up,
+            up_flow_initial=up_flow_initial,
+            low_params=low_params,
+            forcing_low=forcing_low,
+            low_storage_initial=low_storage_initial,
+        )
+
+    return _make
+
+
+@pytest.fixture(scope="session")
+def compute_two_grid_answers():
+    """Factory for the two-grid ground truth: Upper.flow (hru) ->
+    W @ flow -> Lower.storage (segment)."""
+
+    def _compute(toy: dict, weights, dimensions: dict) -> dict:
+        n_time = dimensions["n_time"]
+        time = np.asarray(dimensions["time"])
+        months = time.astype("datetime64[M]").astype(int) % 12
+        f0 = toy["forcing_up"].values
+        pu1 = toy["up_params"]["param_up_1"].values
+        flow_init = toy["up_flow_initial"].values
+        fl = toy["forcing_low"].values
+        stor_init = toy["low_storage_initial"].values
+
+        flow = np.zeros((n_time, N_HRU))
+        flow_prev = np.zeros((n_time, N_HRU))
+        for tt in range(n_time):
+            flow_prev[tt] = flow_init if tt == 0 else flow[tt - 1]
+            flow[tt] = flow_prev[tt] * 0.95 + f0[tt] * pu1[months[tt]]
+
+        storage = np.zeros((n_time, N_SEG))
+        storage_prev = np.zeros((n_time, N_SEG))
+        for tt in range(n_time):
+            flow_seg = weights @ flow[tt]
+            storage_prev[tt] = stor_init if tt == 0 else storage[tt - 1]
+            storage[tt] = (
+                storage_prev[tt] * 0.95 + flow_seg * 0.12 + fl[tt] * 0.10
+            )
+        return dict(flow=flow, storage=storage)
+
+    return _compute
+
+
 @pytest.fixture(scope="session")
 def compute_answers():
     """Factory for the vectorized ground-truth Upper/Lower solution."""

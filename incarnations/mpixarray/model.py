@@ -20,7 +20,6 @@ separate process-agnostic orchestrator layer.
 
 import pathlib as pl
 import warnings
-from copy import deepcopy
 from typing import Any, Dict, List, Literal, Union
 
 import numpy as np
@@ -62,8 +61,13 @@ class Model:
         load_all: Union[bool, None] = None,
         maps: Union[Dict[str, Any], None] = None,
     ) -> None:
-        self._passed_process_dict = process_dict
-        self._process_dict = deepcopy(process_dict)
+        # Structure-only copy (NO deepcopy): the model may replace values
+        # (Path -> opened object) without mutating the caller's dict, but the
+        # data are shared by reference -- the caller's in-memory arrays ARE
+        # the working buffers, and the model's read-only flags (parameters,
+        # read-only inputs) apply to them. See "Prime directive: memory" in
+        # pws_phoenix/CLAUDE.md.
+        self._process_dict = {kk: dict(vv) for kk, vv in process_dict.items()}
         # process name -> home grid (co-registration: process_dict override,
         # else the class default, else the single default grid "space").
         self._proc_grid: Dict[str, str] = {
@@ -95,24 +99,22 @@ class Model:
         self._set_time()
 
         self.current_time_index = np.array([0], dtype=np.int32)
-        self.current_time = (
-            np.array([self.times[0].values], dtype="datetime64[D]")
-            if self.times is not None
-            else np.array([0], dtype=np.int32)
+        self.current_time = np.array(
+            [self.times[0].values], dtype="datetime64[D]"
         )
 
         # Optional output collector (serial path). Created when the control
         # dict requests output. The MPI path streams output via mpixarray and
         # overrides __init__, so it never reaches this block.
         self.output = None
-        if "output_var_names" in control or "output_dir" in control:
+        if "output_var_names" in control or "output_store" in control:
             if (
                 "output_var_names" not in control
-                or "output_dir" not in control
+                or "output_store" not in control
             ):
                 raise ValueError(
-                    "output_var_names and output_dir must both be specified "
-                    "in the control dict."
+                    "output_var_names and output_store must both be "
+                    "specified in the control dict."
                 )
             if "time_chunk_size" in control:
                 time_chunk_size = control["time_chunk_size"]
@@ -126,8 +128,7 @@ class Model:
             self.output = Output(
                 time_chunk_size=time_chunk_size,
                 variable_names=control["output_var_names"],
-                output_store=pl.Path(control["output_dir"]) / "output.zarr",
-                n_times=self.ntime,
+                output_store=pl.Path(control["output_store"]),
                 time_values=self.times.values,
             )
             self.output.initialize_variable_tracking(self.model_dict)
@@ -285,7 +286,9 @@ class Model:
                 da[:] = init_dict[meta.initial]
             grid_ds[name] = da
 
-    def _resolve_maps(self) -> None:
+    def _resolve_maps(
+        self, grid_sizes: Union[Dict[str, int], None] = None
+    ) -> None:
         """Assign each Map to its FIRST consumer in the execution order and
         validate the one-pass schedule. A mapped value is a per-step constant
         after its single apply -- guaranteed statically here (one variable
@@ -312,8 +315,17 @@ class Model:
                     f"Map '{map_name}': source variable '{mm.source_var}' "
                     f"not found on grid '{mm.source_grid}'."
                 )
-            n_target = target_ds.sizes[mm.target_grid]
-            n_source = source_ds.sizes[mm.source_grid]
+            # grid_sizes overrides a grid's dataset size for the weights
+            # shape check (ModelMPI passes the GLOBAL size of the
+            # decomposed grid; its dataset only knows the rank-local
+            # extent).
+            sizes_override = grid_sizes or {}
+            n_target = sizes_override.get(
+                mm.target_grid, target_ds.sizes.get(mm.target_grid)
+            )
+            n_source = sizes_override.get(
+                mm.source_grid, source_ds.sizes.get(mm.source_grid)
+            )
             if mm.weights.shape != (n_target, n_source):
                 raise ValueError(
                     f"Map '{map_name}': weights shape {mm.weights.shape} != "
@@ -376,6 +388,11 @@ class Model:
 
     def _set_time(self) -> None:
         """Set time dimensions from the first input's `time` dim-coordinate."""
+        if not self.inputs_dict:
+            raise ValueError(
+                "The model has no time-dimensioned inputs to set the "
+                "clock from (inputs_dict is empty)."
+            )
         kk0 = list(self.inputs_dict.keys())[0]
         data = self.inputs_dict[kk0].data
         self.ntime = data.sizes["time"]
@@ -438,32 +455,48 @@ class Model:
 
 
 class ModelMPI(Model):
-    """MPI streaming model: one space-decomposed dataset, time-streamed.
+    """MPI streaming model: a distributed grid time-streamed via mpixarray,
+    plus optional serial grids replicated on every rank, coupled by Maps.
 
-    Catches up to the mpixarray streaming API:
+    The distributed grid (``control["mpi_grid"]``, default ``"space"``)
+    keeps the Phase 1 pipeline:
 
-        open_dataset -> parallelize(dims=["space"]) -> set_streaming("time")
+        open_dataset -> parallelize(dims=[mpi_grid]) -> set_streaming("time")
         -> open_writer -> declare buffers -> create -> iter_time -> write
 
-    A *single* decomposed dataset (``ds_mpi_stream``) carries every process's
-    state, parameters, per-step input buffers, and streaming outputs. Because
-    there is one dataset, cross-process buffer sharing (param_shared_name,
-    Upper.flow -> Lower.flow) is *structural* -- the same named variable -- not
-    emulated by hand and asserted with ``a.values is b.values``.
-
-    The spatial decomposition now lives in ``Discretization``
-    (discretization.py; serial gets a degenerate one). For now there is exactly
-    one discretization ("space"); multiple discretizations are future work.
+    ONE decomposed dataset (``ds_mpi_stream``) carries the distributed
+    grid's state, parameters, per-step input buffers, and streaming outputs
+    -- cross-process buffer sharing there is *structural* (the same named
+    variable). Serial grids (Step B) are assembled by the SERIAL machinery
+    (``_add_process_fields`` + ``Input``), identically on every rank -- that
+    IS the replication (uniform SPMD run loop; no rank branches); their data
+    never enter the mpixarray dataset. A Map whose source is the distributed
+    grid must be a ``MapMPI`` (distributed mat-vec: local partial product +
+    Allreduce fills the target buffer on every rank). Serial->distributed
+    maps (scatter) are not implemented. This hand-rolled cross-grid comm is
+    the INTERIM implementation; the mpixarray streaming-datatree work is
+    expected to absorb it.
 
     control dict:
-        input_file        single combined input source (forcings + time-varying
-                          params as (time, space); static params + ICs as (space,))
-        output_file       streamed output file
-        output_var_names  state vars to stream to disk (see note below)
+        input_file        single combined input source for the DISTRIBUTED
+                          grid (forcings + time-varying params as
+                          (time, mpi_grid); static params + ICs as
+                          (mpi_grid,))
+        output_file       streamed output file (distributed grid, NetCDF)
+        output_var_names  state vars to write, routed by OWNING grid:
+                          distributed-grid vars stream to output_file (see
+                          note below); serial-grid vars are collected by a
+                          rank-0 zarr Output at output_store (everyone
+                          computes, one writes)
+        output_store      the zarr store path itself (".zarr" suffix, used
+                          verbatim); required iff serial-grid output vars
+                          are requested
+        time_chunk_size   serial-grid Output time chunking (default 365)
+        mpi_grid          name of the distributed grid/dim (default "space")
 
-    process_dict carries only the classes and their order (order defines the
-    Upper -> Lower dependency direction):
-        {"upper": {"class": Upper}, "lower": {"class": Lower}}
+    process_dict is as in Model (order = schedule; serial-grid entries carry
+    "discretization" + their data); distributed-grid entries need only
+    {"class": ...} -- their data come from input_file.
 
     NOTE (mpixarray limitation): declaring a 2nd ``to_netcdf=True`` variable
     currently trips the "cannot pickle 'module' object" deepcopy (the first
@@ -473,28 +506,32 @@ class ModelMPI(Model):
     mpixarray deepcopy bug is fixed.
 
     Usage:
-        with ModelMPI(process_dict, control) as model:
+        with ModelMPI(process_dict, control, maps=maps) as model:
             model.run(dt)
     """
 
-    def __init__(self, process_dict: dict, control: dict) -> None:
-        self._process_dict = process_dict
+    def __init__(
+        self,
+        process_dict: dict,
+        control: dict,
+        maps: Union[Dict[str, Any], None] = None,
+    ) -> None:
+        # Structure-only copy, as in Model (serial-grid Path values are
+        # replaced in place by _load_paths_to_data).
+        self._process_dict = {kk: dict(vv) for kk, vv in process_dict.items()}
         self._control = control
+        self.maps: Dict[str, Any] = maps or {}
+        self._proc_grid: Dict[str, str] = {
+            kk: self._resolve_grid(vv) for kk, vv in self._process_dict.items()
+        }
         self._finalized = False
         self.model_dict: dict = {}  # proc_name -> bound Process instance
-        self.inputs_dict: dict = {}  # unused: inputs stream from step.mpi.src
+        # Serial-grid Inputs, advanced in lockstep with the stream (the
+        # distributed grid's inputs stream from step.mpi.src instead).
+        self.inputs_dict: Dict[str, Input] = {}
+        self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
+        self._load_all = True  # serial-grid data are small; keep in memory
         self._build()
-
-    # -- introspection helpers ------------------------------------------
-
-    def _proc_classes(self) -> dict:
-        return {kk: vv["class"] for kk, vv in self._process_dict.items()}
-
-    def _all_variable_names(self) -> set:
-        names: set = set()
-        for cls in self._proc_classes().values():
-            names |= set(cls.get_var_names())
-        return names
 
     # -- construction ---------------------------------------------------
 
@@ -504,17 +541,41 @@ class ModelMPI(Model):
         input_file = str(control["input_file"])
         output_file = str(control["output_file"])
         out_var_names = list(control["output_var_names"])
+        mpi_grid = control.get("mpi_grid", "space")
+        self._mpi_grid = mpi_grid
 
-        # ---- Discretization: open + decompose once over space ----
+        mpi_classes = {
+            kk: vv["class"]
+            for kk, vv in self._process_dict.items()
+            if self._proc_grid[kk] == mpi_grid
+        }
+
+        # Taxonomy guard (all grids): a parameter on the model `time` axis
+        # is really an input. A true time-varying parameter lives on its own
+        # axis (e.g. `month`) and stays resident. See pws_phoenix/CLAUDE.md.
+        for proc_name, vv in self._process_dict.items():
+            for pname, meta in _dict_of_kind(vv["class"], "parameter").items():
+                if "time" in meta.dims:
+                    raise ValueError(
+                        f"Parameter {pname!r} on process {proc_name!r} has "
+                        f"the model 'time' dim {meta.dims}: a variable on "
+                        "model time is an input, not a parameter. Use a "
+                        "non-'time' axis (e.g. 'month') for a time-varying "
+                        "parameter."
+                    )
+
+        # ---- Distributed grid: open + decompose once over mpi_grid ----
         ds_input, comm = mpi_open_dataset(input_file)
         self._ds_input = ds_input
         n_time = int(ds_input.sizes["time"])
         self._ntime = n_time
         self.time = Time(ds_input["time"])
 
-        self.discretizations = {"space": Discretization(["space"], comm=comm)}
-        ds_mpi = self.discretizations["space"].decompose(ds_input)
-        comm = self.discretizations["space"].comm  # parallelize may refine
+        self.discretizations = {
+            mpi_grid: Discretization([mpi_grid], comm=comm)
+        }
+        ds_mpi = self.discretizations[mpi_grid].decompose(ds_input)
+        comm = self.discretizations[mpi_grid].comm  # parallelize may refine
         self._comm = comm
 
         # ---- Stream over time. set_streaming drops the time-dimensioned
@@ -531,32 +592,19 @@ class ModelMPI(Model):
         for name in list(ds_mpi_stream.data_vars):
             ds_mpi_stream[name] = ds_mpi_stream[name].load()
 
-        proc_classes = self._proc_classes()
-
-        # Taxonomy guard: a parameter on the model `time` axis is really an
-        # input. A true time-varying parameter lives on its own axis (e.g.
-        # `month`) and stays resident. See pws_phoenix/CLAUDE.md.
-        for proc_name, cls in proc_classes.items():
-            for pname, meta in _dict_of_kind(cls, "parameter").items():
-                if "time" in meta.dims:
-                    raise ValueError(
-                        f"Parameter {pname!r} on process {proc_name!r} has "
-                        f"the model 'time' dim {meta.dims}: a variable on "
-                        "model time is an input, not a parameter. Use a "
-                        "non-'time' axis (e.g. 'month') for a time-varying "
-                        "parameter."
-                    )
-
         # File-backed inputs that were dropped: refilled from src each step.
-        # An input is file-backed (vs. produced upstream) if no process owns
-        # a variable of that name.
-        var_names = self._all_variable_names()
+        # Distributed grid only -- an input there is file-backed (vs.
+        # produced upstream) if no distributed-grid process owns a variable
+        # of that name. Serial-grid inputs go through Input objects instead.
+        mpi_var_names: set = set()
+        for cls in mpi_classes.values():
+            mpi_var_names |= set(cls.get_var_names())
         file_input_names: list = []
-        for cls in proc_classes.values():
+        for cls in mpi_classes.values():
             for ii in tuple(cls.get_inputs()) + tuple(
                 cls.get_mutable_inputs()
             ):
-                if ii not in var_names and ii not in file_input_names:
+                if ii not in mpi_var_names and ii not in file_input_names:
                     file_input_names.append(ii)
         self._file_input_names = file_input_names
 
@@ -567,9 +615,41 @@ class ModelMPI(Model):
         ]
         if missing:
             raise ValueError(
-                f"input(s) {missing} are not produced by any process and "
-                f"were not found in input_file {input_file!r}."
+                f"input(s) {missing} are not produced by any process on "
+                f"grid '{mpi_grid}' and were not found in input_file "
+                f"{input_file!r}."
             )
+
+        # Split requested outputs by OWNING grid (the process declaring the
+        # var as a state variable): distributed-grid vars stream via the
+        # mpixarray writer; serial-grid vars are collected by a rank-0 zarr
+        # Output (created at the end of _build).
+        serial_var_grid: Dict[str, str] = {}
+        for kk, vv in self._process_dict.items():
+            if self._proc_grid[kk] == mpi_grid:
+                continue
+            for name in vv["class"].get_var_names():
+                serial_var_grid[name] = self._proc_grid[kk]
+        ambiguous = [
+            nn
+            for nn in out_var_names
+            if nn in mpi_var_names and nn in serial_var_grid
+        ]
+        bad_out = [
+            nn
+            for nn in out_var_names
+            if nn not in mpi_var_names and nn not in serial_var_grid
+        ]
+        if ambiguous or bad_out:
+            raise ValueError(
+                f"output_var_names: {ambiguous} are owned on multiple grids "
+                f"and {bad_out} are owned on none -- each output var must "
+                "be a state variable of exactly one grid's processes."
+            )
+        stream_out_names = [nn for nn in out_var_names if nn in mpi_var_names]
+        serial_out_names = [
+            nn for nn in out_var_names if nn in serial_var_grid
+        ]
 
         # ---- Open writer ----
         ds_mpi_stream.mpi.open_writer(output_file, comm=comm)
@@ -587,21 +667,21 @@ class ModelMPI(Model):
 
         declared: set = set()
         # (a) state variables -- one buffer per name across processes
-        for cls in proc_classes.values():
+        for cls in mpi_classes.values():
             for name in cls.get_var_names():
                 if name not in declared:
-                    _declare(name, ("space",), np.nan, False)
+                    _declare(name, (mpi_grid,), np.nan, False)
                     declared.add(name)
         # (b) per-step input buffers (refilled from src)
         for name in file_input_names:
             if name not in declared:
-                _declare(name, ("space",), np.nan, False)
+                _declare(name, (mpi_grid,), np.nan, False)
                 declared.add(name)
         # (c) streaming output buffers (to_netcdf=True) -- declared LAST
         output_map: dict = {}  # state var name -> on-disk output buffer name
-        for name in out_var_names:
+        for name in stream_out_names:
             buf = f"{name}_out"
-            _declare(buf, ("time", "space"), 0.0, True)
+            _declare(buf, ("time", mpi_grid), 0.0, True)
             output_map[name] = buf
         self._output_map = output_map
 
@@ -609,7 +689,7 @@ class ModelMPI(Model):
 
         # ---- Load initial conditions into state buffers. ICs are the
         #      space-only vars that survived set_streaming (from the file). ----
-        for cls in proc_classes.values():
+        for cls in mpi_classes.values():
             for name, meta in cls.get_variables().items():
                 if (
                     meta.initial is not None
@@ -620,46 +700,147 @@ class ModelMPI(Model):
                     ].values
 
         self._ds_mpi_stream = ds_mpi_stream
+        self.discretizations[mpi_grid].dataset = ds_mpi_stream
 
-        # ---- Bind processes to the shared dataset (one dataset hosts
-        #      many processes; dispatch on the instances directly). ----
-        for proc_name, cls in proc_classes.items():
-            self.model_dict[proc_name] = cls(ds_mpi_stream)
+        # ---- Serial grids (Step B): replicated on every rank. Assembled
+        #      by the serial machinery, identically on each rank (from
+        #      deterministic/shared inputs) -- that IS the replication.
+        #      Their data never enter the mpixarray dataset. ----
+        serial_grid_procs: Dict[str, List[str]] = {}
+        for kk, grid in self._proc_grid.items():
+            if grid != mpi_grid:
+                serial_grid_procs.setdefault(grid, []).append(kk)
+        for grid in serial_grid_procs:
+            self.discretizations[grid] = Discretization([grid])
+        self._load_paths_to_data()
+        for grid, proc_names in serial_grid_procs.items():
+            grid_ds = xr.Dataset()
+            for kk in proc_names:
+                self._add_process_fields(kk, grid, grid_ds)
+            self.discretizations[grid].dataset = grid_ds
+
+        # ---- Bind in process_dict (author) order; distributed-grid
+        #      processes are rebound to each streaming step in run(). ----
+        for kk, vv in self._process_dict.items():
+            self.model_dict[kk] = vv["class"](
+                self.discretizations[self._proc_grid[kk]].dataset
+            )
+
+        self._validate_inputs_resolved()
+
+        # ---- Maps: configure the parallel boundary, then resolve. The
+        #      decomposed extent comes from an allgather of local sizes
+        #      (scheme "single" = contiguous rank-ordered blocks). ----
+        local_n = int(ds_mpi_stream.sizes[mpi_grid])
+        sizes = comm.allgather(local_n)
+        start = int(sum(sizes[: comm.rank]))
+        n_global = int(sum(sizes))
+        for map_name, mm in self.maps.items():
+            if mm.target_grid == mpi_grid:
+                raise ValueError(
+                    f"Map '{map_name}' targets the distributed grid "
+                    f"'{mpi_grid}': serial->distributed maps (scatter) "
+                    "are not implemented (Step B is distributed->serial)."
+                )
+            if mm.source_grid == mpi_grid:
+                if not hasattr(mm, "set_decomposition"):
+                    raise ValueError(
+                        f"Map '{map_name}' crosses the parallel boundary "
+                        f"from '{mpi_grid}': use MapMPI, not Map."
+                    )
+                mm.set_decomposition(comm, start, start + local_n)
+        self._resolve_maps(grid_sizes={mpi_grid: n_global})
+
+        # ---- Serial-grid output: rank 0 collects to a zarr Output --
+        #      replicated grids mean everyone computes, one writes. The
+        #      rank branch is safe by construction: Output holds NO
+        #      collectives (local buffering + disk IO only).
+        self.output = None
+        if serial_out_names:
+            if "output_store" not in control:
+                raise ValueError(
+                    f"output_var_names {serial_out_names} live on serial "
+                    "grids: control['output_store'] (a .zarr path) is "
+                    "required for the rank-0 zarr Output."
+                )
+            if comm.rank == 0:
+                self.output = Output(
+                    time_chunk_size=control.get("time_chunk_size", 365),
+                    variable_names=serial_out_names,
+                    output_store=pl.Path(control["output_store"]),
+                    time_values=ds_input["time"].values,
+                )
+                # Track serial-grid processes only: their _obj is
+                # persistent. (Distributed-grid procs are rebound to each
+                # step, so refs captured here would go stale.)
+                self.output.initialize_variable_tracking(
+                    {
+                        kk: proc
+                        for kk, proc in self.model_dict.items()
+                        if self._proc_grid[kk] != mpi_grid
+                    }
+                )
 
     # -- run ------------------------------------------------------------
 
     def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:
         """Stream the time loop via iter_time(); n_steps is ignored (the
-        streaming source defines the count)."""
+        streaming source defines the count). Serial-grid inputs advance in
+        lockstep with the stream; a Map is applied exactly once per step,
+        immediately before its first consumer (see Model._resolve_maps).
+        The loop is SPMD-uniform: every rank executes the same statements
+        every step (no rank branches -- serial grids are replicated)."""
         if self._finalized:
             raise RuntimeError("Cannot run a finalized Model.")
         ds_mpi_stream = self._ds_mpi_stream
-        procs = list(self.model_dict.values())
+        mpi_grid = self._mpi_grid
+        mpi_procs = [
+            proc
+            for kk, proc in self.model_dict.items()
+            if self._proc_grid[kk] == mpi_grid
+        ]
         for tt, step in enumerate(ds_mpi_stream.mpi.iter_time()):
             self.time.set_index(tt)
             src = step.mpi.src
             # Refill this step's input buffers from the source slab.
             for name in self._file_input_names:
                 step[name].values[:] = src[name].values[0, :]
-            # Bind processes to the current step (shares the persistent
-            # state buffers, so the Markov chain carries across steps).
-            for proc in procs:
+            # Serial-grid inputs advance in lockstep with the stream.
+            for inp in self.inputs_dict.values():
+                inp.advance()
+            # Rebind distributed-grid processes (and their disc's dataset)
+            # to the current step -- shares the persistent state buffers,
+            # so the Markov chain carries across steps. Serial-grid
+            # processes stay bound to their persistent grid dataset.
+            self.discretizations[mpi_grid].dataset = step
+            for proc in mpi_procs:
                 proc._obj = step
-            for proc in procs:
+            for proc in self.model_dict.values():
                 proc.advance()
-            for proc in procs:
+            for proc_name, proc in self.model_dict.items():
+                for mm in self._proc_maps[proc_name]:
+                    mm.apply(self.discretizations[mm.source_grid].dataset)
                 proc.calculate(dt, self.time)
             # Record state into the streaming output slab(s) and write.
             for src_name, buf in self._output_map.items():
                 step[buf].values[0, :] = step[src_name].values[:]
                 if step.mpi.is_output_step:
                     step[buf].mpi.write()
+            # Serial-grid output: rank 0 only (collective-free branch).
+            if self.output is not None:
+                self.output.collect_current_timestep(tt)
 
     # -- finalize -------------------------------------------------------
 
     def finalize(self) -> None:
         if self._finalized:
             return
+        for inp in self.inputs_dict.values():
+            inp.close()
+        for ff in self._opened_files:
+            ff.close()
+        if self.output is not None:
+            self.output.finalize()
         self._ds_mpi_stream.mpi.finalize()
         self._ds_input.mpi.finalize()
         self._finalized = True

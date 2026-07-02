@@ -20,8 +20,7 @@ from typing import Any, Dict, List, Union
 import numpy as np
 import xarray as xr
 
-# zarr is imported lazily inside Output (serial-only), keeping the module
-# import surface minimal; the MPI path streams via mpixarray and never uses it.
+# Output needs no zarr import of its own -- xarray's zarr backend does the IO.
 
 
 def open_xr(
@@ -85,20 +84,20 @@ class Input:
 
 
 class Output:
-    """Buffered, serial model time-chunked variables to a single zarr store.
+    """Buffered, time-chunked serial writer to a single zarr store.
 
     Buffers each tracked variable in memory for time_chunk_size steps, then
-    region-writes the full chunk into a pre-sized zarr store; a partial tail is
-    flushed at finalize. Adapted from pywatershed's chunked zarr writer.
+    APPENDS the chunk to the store along `time` (the first append creates
+    the store, with time chunks of time_chunk_size); a partial tail is
+    appended at finalize. Peak memory = the per-variable chunk buffers; the
+    store is never pre-sized or materialized in memory (see "Prime
+    directive: memory" in pws_phoenix/CLAUDE.md). Adapted from pywatershed's
+    chunked zarr writer.
 
     Serial only. The MPI path streams output through mpixarray
     (set_streaming + iter_time + .mpi.write) and does not use this class.
-
-    This class:
-    - Tracks references to specified variables from model processes
-    - Buffers data for time_chunk_size time steps
-    - Region-writes complete chunks into one zarr store (all vars together)
-    - Handles a partial chunk at simulation end
+    (Append-along-time is sufficient here BECAUSE the writer is serial;
+    concurrent writers would need a pre-sized store + region writes.)
     """
 
     def __init__(
@@ -106,19 +105,19 @@ class Output:
         time_chunk_size: int,
         variable_names: List[str],
         output_store: pl.Path,
-        n_times: int,
         time_values: np.ndarray,
     ) -> None:
         """Initialize Output manager for buffered, time-chunked zarr writing.
 
         Args:
-            time_chunk_size: Number of time steps to buffer in memory before a
-                chunk is region-written. Also the store's time chunk size.
+            time_chunk_size: Number of time steps to buffer in memory before
+                a chunk is appended. Also the store's time chunk size.
             variable_names: Variables to write -- one data_var each in the
                 single output store.
-            output_store: Path to the (single) zarr store directory.
-            n_times: Total number of time steps; sizes the store's time dim.
-            time_values: 1-D datetime coordinate of length n_times.
+            output_store: Path to the (single) zarr store directory; must
+                carry the ".zarr" suffix and is used verbatim.
+            time_values: 1-D datetime coordinate for the full run (sliced
+                per appended chunk).
 
         Note:
             Tailored to read Model.model_dict (key -> Process instance),
@@ -128,8 +127,12 @@ class Output:
         self.time_chunk_size = time_chunk_size
         self.variable_names = variable_names
         self.output_store = pl.Path(output_store)
+        if self.output_store.suffix != ".zarr":
+            raise ValueError(
+                f"output_store {str(self.output_store)!r} must carry the "
+                "'.zarr' suffix (a zarr store is a directory)."
+            )
         self.output_store.parent.mkdir(parents=True, exist_ok=True)
-        self.n_times = int(n_times)
         self.time_values = time_values
 
         # Track variable references and data
@@ -137,10 +140,7 @@ class Output:
         self.process_map: Dict[str, str] = {}  # var_name -> process_name
         self.data_buffers: Dict[str, np.ndarray] = {}
         self.current_time_step = 0
-
-        # zarr store, opened lazily on the first chunk write
-        self._zarr_store: Any = None  # zarr handle; Any (zarr is untyped here)
-        self._zarr_initialized = False
+        self._store_created = False
 
     def initialize_variable_tracking(self, model_dict: Dict[str, Any]) -> None:
         """Reference the requested variables on their processes and allocate
@@ -176,7 +176,8 @@ class Output:
             )
 
     def collect_current_timestep(self, time_index: int) -> None:
-        """Buffer this step's values; flush a full chunk when the buffer fills.
+        """Buffer this step's values; append a full chunk when the buffer
+        fills.
 
         Args:
             time_index: Global time index.
@@ -189,25 +190,22 @@ class Output:
         self.current_time_step += 1
 
         if self.current_time_step % self.time_chunk_size == 0:
-            self._write_buffer_chunk()
+            self._append_chunk(self.time_chunk_size)
 
-    def _initialize_zarr(self) -> None:
-        """Create the pre-sized zarr store (all vars, full time extent) and
-        reopen it for region writes. Done once, on the first flush."""
-        if self._zarr_initialized:
-            return
-        import zarr
-
+    def _append_chunk(self, n_valid: int) -> None:
+        """Append the first n_valid buffered steps to the store along `time`.
+        The first append creates the store (chunk encoding set there); no
+        data beyond the chunk itself is ever materialized."""
+        chunk_end = self.current_time_step
+        chunk_start = chunk_end - n_valid
         data_vars: dict = {}
-        coords: dict = {"time": self.time_values}
         encoding: dict = {}
+        coords: dict = {"time": self.time_values[chunk_start:chunk_end]}
         for var_name, var_ref in self.variable_refs.items():
-            spatial_shape = var_ref.shape
             spatial_dim = str(var_ref.dims[0])
-            # Placeholder zeros, filled incrementally by region writes.
             data_vars[var_name] = (
                 ["time", spatial_dim],
-                np.zeros((self.n_times,) + spatial_shape, dtype=var_ref.dtype),
+                self.data_buffers[var_name][:n_valid],
             )
             # Carry the spatial dim-coordinate (e.g. "space") if present.
             if spatial_dim in var_ref.coords and spatial_dim not in coords:
@@ -217,37 +215,27 @@ class Output:
                 )
             # One chunk spans the full spatial extent; time chunked by buffer.
             encoding[var_name] = {
-                "chunks": (self.time_chunk_size,) + spatial_shape
+                "chunks": (self.time_chunk_size,) + var_ref.shape
             }
 
         ds = xr.Dataset(data_vars, coords=coords)
-        ds.to_zarr(
-            self.output_store, mode="w", encoding=encoding, consolidated=False
-        )
-        self._zarr_store = zarr.open(str(self.output_store), mode="r+")
-        self._zarr_initialized = True
-
-    def _write_buffer_chunk(self) -> None:
-        """Region-write the full in-memory buffer to the zarr store."""
-        if not self._zarr_initialized:
-            self._initialize_zarr()
-        chunk_end = self.current_time_step
-        chunk_start = chunk_end - self.time_chunk_size
-        for var_name in self.variable_names:
-            self._zarr_store[var_name][chunk_start:chunk_end] = (
-                self.data_buffers[var_name]
+        if not self._store_created:
+            ds.to_zarr(
+                self.output_store,
+                mode="w",
+                encoding=encoding,
+                consolidated=False,
+            )
+            self._store_created = True
+        else:
+            ds.to_zarr(
+                self.output_store,
+                append_dim="time",
+                consolidated=False,
             )
 
     def finalize(self) -> None:
-        """Region-write any remaining partial buffer and release the store."""
-        if not self._zarr_initialized:
-            self._initialize_zarr()
+        """Append any remaining partial buffer."""
         remaining = self.current_time_step % self.time_chunk_size
         if remaining > 0:
-            chunk_end = self.current_time_step
-            chunk_start = chunk_end - remaining
-            for var_name in self.variable_names:
-                self._zarr_store[var_name][chunk_start:chunk_end] = (
-                    self.data_buffers[var_name][:remaining]
-                )
-        self._zarr_store = None
+            self._append_chunk(remaining)

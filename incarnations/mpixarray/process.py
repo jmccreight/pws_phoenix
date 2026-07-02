@@ -26,7 +26,10 @@ and are what the Model assembles from.
 
 Heavy computation is delegated to a @staticmethod _calculate(...) that
 takes raw numpy arrays -- no xarray overhead -- making it a natural
-target for @numba.jit(nopython=True).
+target for @numba.jit(nopython=True). Convention: the output buffer(s)
+come first and are written IN PLACE; _calculate returns nothing and
+allocates nothing per step (internal temporaries are numba's to
+eliminate).
 
 Run tests with: pytest tests/ -v
 """
@@ -129,17 +132,18 @@ class Process(ABC):
     Numba:
         Heavy inner computation should be delegated to a @staticmethod
         _calculate(...) receiving raw numpy arrays, decorated with
-        @numba.jit(nopython=True):
+        @numba.jit(nopython=True). The output buffer(s) come first and
+        are written in place (no return, no per-step allocation):
 
         class Upper(Process):
             @staticmethod
             @numba.jit(nopython=True)
-            def _calculate(flow_prev, forcing):
-                flow_prev[:] *= 0.95
-                flow_prev[:] += forcing
+            def _calculate(flow, flow_previous, forcing):
+                flow[:] = flow_previous * 0.95 + forcing
 
             def calculate(self, dt: np.float64, time: Time) -> None:
                 self._calculate(
+                    self._obj["flow"].values,
                     self._obj["flow_previous"].values,
                     self._obj["forcing_up"].values,
                 )

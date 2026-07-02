@@ -4,6 +4,7 @@
 - [Some general ground rules](#some-general-ground-rules)
 - [Project context](#project-context)
 - [python assumptions/conventions](#python-assumptionsconventions)
+- [Prime directive: memory](#prime-directive-memory)
 - [incarnations/mpixarray design notes](#incarnationsmpixarray-design-notes)
   - [Core decision: discretization = the unit of decomposition](#core-decision-discretization--the-unit-of-decomposition)
   - [Variable taxonomy: parameters vs inputs (by relationship to model time)](#variable-taxonomy-parameters-vs-inputs-by-relationship-to-model-time)
@@ -83,6 +84,22 @@ If additional context arises about this project which is useful to add, please l
 2. Please read the ruff.toml for line length setting.
 3. Avoid single-letter variable names. For throwaway loop variables, prefer doubled letters, e.g. `cc` instead of `c`, `kk` instead of `k`.
 
+# Prime directive: memory
+
+Keep the memory footprint lean and OBVIOUS. Concretely:
+
+1. Reference, don't copy: an array handed to the framework (process_dict,
+   Input, Map, Output) IS the working buffer. Never deepcopy anything
+   that can hold data -- copy structure only (e.g. a two-level dict copy).
+2. Every allocation must be one of: (a) model state, allocated once at
+   assembly; (b) a declared, reused per-step window buffer
+   (Input.current_values, Map.target_values, Output chunk buffers);
+   (c) a temporary inside a numba kernel. Anything else is a bug, or
+   carries a comment justifying it.
+3. Watch for hidden copies and call them out in review: deepcopy,
+   np.asarray/astype on existing arrays, fancy indexing, xarray ops that
+   materialize (selection on lazy datasets -- see test_ref_behaviors.py).
+
 # incarnations/mpixarray design notes
 
 `incarnations/mpixarray/` blends the serial xr Process framework (developed in
@@ -152,6 +169,11 @@ The process holds `time` and does the lookup; `_calculate` receives raw numpy
   `PWS` accessor are retired (July 2026; see git history); the
   `a.values is b.values` checks survive only as near-tautological test
   asserts.
+- The Model copies `process_dict` STRUCTURE only (a two-level dict copy; NO
+  deepcopy): the caller's in-memory arrays ARE the model's working buffers
+  (zero-copy, per the memory prime directive), and the model's read-only
+  flags (parameters, read-only inputs) therefore apply to them
+  (`test_zero_copy_inputs`).
 - The selective in-place `parameters[pp].load()` before wiring a parameter
   into the grid dataset is still load-bearing for file-backed parameters
   (see `tests/test_ref_behaviors.py`).
@@ -160,9 +182,14 @@ The process holds `time` and does the lookup; `_calculate` receives raw numpy
   assembly, restart/checkpoint rehydration); assess keep-vs-remove when the
   first of those lands.
 - Output: `data_io.Output` — a buffered, time-chunked **zarr** writer (adapted
-  from pywatershed `base/output.py`): one store at `output_dir/output.zarr`,
-  all output vars as data_vars, lazy-init sized to `n_times`, full-chunk region
-  writes + a partial tail at `finalize`. (netCDF4 was dropped.)
+  from pywatershed `base/output.py`): one store at `control["output_store"]`
+  (a `.zarr` path, used verbatim -- what you write in the control dict is
+  what appears on disk), all output vars as data_vars, full-chunk
+  **appends** along `time` (the
+  first append creates the store; it is never pre-sized/materialized -- peak
+  memory = the chunk buffers) + a partial tail at `finalize`. Appends
+  suffice BECAUSE this writer is serial; concurrent writers would need a
+  pre-sized store + region writes. (netCDF4 was dropped.)
 
 ## MPI path (`ModelMPI` in `model.py`) — single-decomposition streaming
 
@@ -184,10 +211,11 @@ open_writer → declare buffers → create → iter_time → write`.
   `disc.decompose(ds)` does the space split (MPI) or identity (serial,
   `comm=None`). `set_streaming` (time) stays in `ModelMPI`. The datasets:
   `ds_mpi` (decomposed) -> `ds_mpi_stream` (streaming). Model/ModelMPI hold
-  `self.discretizations` (a `dict[str, Discretization]` keyed by grid name;
-  one entry `"space"` in MPI for now, two in the serial two-grid toy) -- a 2nd
-  grid is just another key. Dataset-ownership is done; more MPI grids are
-  Step B.
+  `self.discretizations` (a `dict[str, Discretization]` keyed by grid name)
+  -- a 2nd grid is just another key. Step B (done): an MPI run hosts ONE
+  distributed grid (`control["mpi_grid"]`) plus any number of serial grids
+  replicated on every rank (their `Discretization` is the serial degenerate
+  one; their data never enter the mpixarray dataset).
 
 ## Known mpixarray limits (Phase 1)
 
@@ -205,7 +233,9 @@ open_writer → declare buffers → create → iter_time → write`.
 Serial → zarr; MPI → mpixarray's NetCDF stream. The best IO backend differs by
 context, so the two ends are deliberately divergent -- do **not** homogenize
 them via a shared writer. (Only matters when isolating compute-vs-IO time in a
-scaling study.)
+scaling study.) Under MPI, serial (replicated) grids also write **zarr** via
+a rank-0 `Output` -- the backend follows the grid's context, consistent with
+this decision.
 
 ## Global state: `Time` + `Options` (the "Global" split)
 
@@ -256,6 +286,10 @@ the `epiweeks` dep).
 - Multi-output-var streaming once the mpixarray deepcopy bug is fixed.
   (Cyclic-monthly time-varying parameters are implemented -- see "Variable
   taxonomy".) Coarse-linear (e.g. per-(year,month)) time-varying params remain.
+- Deferred review minors (July 2026): generalize `Output` beyond 1-D
+  spatial vars (only when a real multi-dim output var exists -- it fails
+  loudly today); rename `map.py`/`globals.py` (they shadow builtins) when
+  this becomes a package.
 
 ## Container-model unification (implemented)
 
@@ -505,21 +539,39 @@ smallest/riskiest piece (cross-rank comm) last.
   `Map(weights=..., grid={"hru": "segment"}, variable={"flow": "flow"})`.
   Execution order = the author's `process_dict` order (assembly groups by
   grid internally; binding and scheduling preserve author order).
-- **Step B -- mixed parallelization + comm (the real target).** Make grid1
-  distributed (MPI), grid2 serial. The Map now crosses the parallel boundary ->
-  a **distributed sparse mat-vec** (allgather the input, or allreduce the
-  output), plus the serial-grid choice: **replicated on all ranks** (simple;
-  redundant compute) vs **single-rank** (less compute; gather/scatter; mind the
-  allgather-not-bare-`assert` deadlock lesson from `ref_behaviors`). Gated on
-  mpixarray. Models a real pattern: distributed fine grid (HRUs) -> small serial
+- **(done, July 2026) Step B -- mixed parallelization + comm (the real
+  target).** Upper on a distributed "hru" grid (today's mpixarray pipeline;
+  `control["mpi_grid"]` names the distributed grid, default `"space"`),
+  Lower on a serial "segment" grid **replicated on every rank** (assembled
+  by the serial machinery from deterministic inputs -- chosen over
+  single-rank for the SPMD-uniform run loop: no rank branches, no divergent
+  collectives, and the reverse-map direction stays local; single-rank
+  remains a documented later optimization). The Map crosses the parallel
+  boundary as **`MapMPI`**: local partial product with the rank's weight
+  columns + `Allreduce(SUM)` -- communicates `(n_target,)` doubles and
+  lands the mapped input on every rank, which is what replication consumes.
+  Serial->distributed maps (scatter) are NOT implemented. Output under MPI
+  is routed by OWNING grid: distributed-grid vars stream via the mpixarray
+  writer (NetCDF, `output_file`); serial-grid vars are collected by a
+  rank-0 zarr `Output` at `control["output_store"]` (a `.zarr` path, used
+  verbatim; everyone computes, one writes -- the rank branch holds NO
+  collectives, so it cannot hang).
+  Test: `tests/test_two_grid_mpi.py`, validated over all timesteps on both
+  grids against the same conftest ground truth as the serial two-grid
+  test.
+  Models the real pattern: distributed fine grid (HRUs) -> small serial
   coarse grid (channel network).
 
-**Two questions for the mpixarray dev** (alongside the streaming-tree question):
-1. Can >= 2 parallelized + streamed datasets be co-iterated / merged into one
-   streaming view (the streaming-tree / multi-stream crux)?
-2. Can mpixarray host **heterogeneous** grids in one parallel run (one
-   decomposed, one serial/replicated) and move data **across** them
-   (gather / scatter / allreduce) for a Map?
+**The mpixarray-dev question (July 2026 clarification):** the two questions
+previously listed here (co-iterate >= 2 parallelized+streamed datasets;
+heterogeneous grids + cross-grid comm) are really ONE goal -- the mpixarray
+dev's target is a **streaming DataTree**: disparate child datasets with
+different spatial dims and parallelization schemes, streamed together, with
+cross-child mapping expected to be included. Step B therefore does NOT wait
+for it: the distributed grid uses today's mpixarray, serial grids are
+replicated outside it, and the collect (`MapMPI`) is hand-rolled -- the
+INTERIM implementation and a design probe for the datatree work, which is
+expected to absorb this role at the Discretization/Map seams.
 
 ## Input structuring: serial vs MPI, multi-file / datatree (June 2026)
 
@@ -563,7 +615,8 @@ the mpixarray-fork problems.
   support _and_ reintroduces cross-stream buffer sharing.
 
 **Crux question for the mpixarray dev:** can >= 2 parallelized + streamed
-datasets be co-iterated (or merged) into one streaming view?
+datasets be co-iterated (or merged) into one streaming view? (July 2026:
+this is the streaming-DataTree goal -- see the build plan clarification.)
 
 **Near-term, low-risk path:** accept structured / multi-file (or a DataTree)
 input, **merge/flatten the static parts into the one `ds_mpi` before

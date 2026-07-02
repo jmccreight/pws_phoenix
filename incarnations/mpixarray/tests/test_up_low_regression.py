@@ -84,7 +84,7 @@ class TestRegression:
     def control_config(self, tmp_path):
         return {
             "output_var_names": ["flow", "storage_previous"],
-            "output_dir": tmp_path / "output",
+            "output_store": tmp_path / "output" / "up_low.zarr",
             "time_chunk_size": 10,
         }
 
@@ -94,6 +94,35 @@ class TestRegression:
         """Upper/Lower auto-register in Process._registry on import."""
         assert Process._registry["Upper"] is Upper
         assert Process._registry["Lower"] is Lower
+
+    def test_zero_copy_inputs(self, toy_ds):
+        """In-memory inputs are wired by reference: the caller's arrays ARE
+        the model's working buffers (structure-only process_dict copy, no
+        deepcopy -- see "Prime directive: memory" in pws_phoenix/CLAUDE.md).
+        """
+        process_dict = {
+            "upper": {
+                "class": Upper,
+                "forcing_up": toy_ds["forcing_up"],
+                "flow_initial": toy_ds["flow_initial"],
+                "parameters": toy_ds[PARAM_NAMES],
+            },
+            "lower": {
+                "class": Lower,
+                "forcing_low": toy_ds["forcing_low"],
+                "storage_initial": toy_ds["storage_initial"],
+                "parameters": toy_ds[PARAM_NAMES],
+            },
+        }
+        with Model(process_dict, {}) as model:
+            for param in PARAM_NAMES:
+                assert (
+                    model.model_dict["upper"][param].values
+                    is toy_ds[param].values
+                ), f"parameter '{param}' was copied"
+            # ... and the model's read-only protection therefore applies to
+            # the caller's (now shared) parameter buffers.
+            assert not toy_ds["param_up_0"].values.flags.writeable
 
     def test_model_regression(
         self, dimensions, model_inputs, control_config, answers
@@ -153,7 +182,7 @@ class TestRegression:
 
         # -- streamed zarr output (full time series) --
         output_ds = xr.open_zarr(
-            control_config["output_dir"] / "output.zarr", consolidated=False
+            control_config["output_store"], consolidated=False
         )
         np.testing.assert_allclose(
             output_ds["flow"].values, answers["expected_flow"], rtol=1e-12

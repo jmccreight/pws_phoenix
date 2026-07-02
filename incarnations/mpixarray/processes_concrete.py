@@ -9,7 +9,9 @@ Upper and Lower: concrete Process subclasses for the toy Upper/Lower model.
   - advance(self) / calculate(self, dt, time) are instance methods using
     self._obj.
   - _calculate is a @staticmethod taking raw numpy arrays -- the natural
-    target for @numba.jit when performance work begins.
+    target for @numba.jit when performance work begins. Convention: the
+    output buffer(s) come first and are written IN PLACE; no return, no
+    per-step allocation (internal temporaries are numba's to eliminate).
 """
 
 import numpy as np
@@ -68,18 +70,21 @@ class Upper(Process):
 
     @staticmethod
     def _calculate(
+        flow: np.ndarray,
         flow_previous: np.ndarray,
         forcing_up: np.ndarray,
         param_up_1: np.ndarray,
         dt: np.float64,
-    ) -> np.ndarray:
-        # Pure numpy -- decorate with @numba.jit when ready
-        return flow_previous * np.float64(0.95) + forcing_up * param_up_1
+    ) -> None:
+        # Pure numpy, in place into flow -- decorate with @numba.jit when
+        # ready
+        flow[:] = flow_previous * np.float64(0.95) + forcing_up * param_up_1
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        # param_up_1 is cyclic-monthly; index by current month
+        # param_up_1 is cyclic-monthly; index by current month (a view)
         param_up_1_now = self._obj["param_up_1"].values[time.month - 1]
-        self._obj["flow"].values[:] = self._calculate(
+        self._calculate(
+            self._obj["flow"].values,
             self._obj["flow_previous"].values,
             self._obj["forcing_up"].values,
             param_up_1_now,
@@ -138,20 +143,23 @@ class Lower(Process):
 
     @staticmethod
     def _calculate(
+        storage: np.ndarray,
         storage_previous: np.ndarray,
         flow: np.ndarray,
         forcing_low: np.ndarray,
         dt: np.float64,
-    ) -> np.ndarray:
-        # Pure numpy -- decorate with @numba.jit when ready
-        return (
+    ) -> None:
+        # Pure numpy, in place into storage -- decorate with @numba.jit when
+        # ready
+        storage[:] = (
             storage_previous * np.float64(0.95)
             + flow * np.float64(0.12)
             + forcing_low * np.float64(0.10)
         )
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        self._obj["storage"].values[:] = self._calculate(
+        self._calculate(
+            self._obj["storage"].values,
             self._obj["storage_previous"].values,
             self._obj["flow"].values,
             self._obj["forcing_low"].values,
