@@ -2,9 +2,9 @@
 MREs for numpy buffer-sharing through xarray DataArrays and Datasets.
 
 Ported from incarnations/xr (retired; see git history). Documents the xarray
-behaviour that process.py's Process.new() relies on for zero-copy inter-process
-buffer sharing in the serial path, and is a candidate test set for the xarray
-test suite.
+behaviour that the serial Model's per-grid dataset assembly
+(Model._add_process_fields, model.py) relies on for zero-copy buffer sharing,
+and is a candidate test set for the xarray test suite.
 
 General finding (current xarray, numpy-backed DataArrays)
 ----------------------------------------------------------
@@ -20,18 +20,19 @@ variables are backed by NetCDF readers, not numpy arrays. In that case,
 variable selection produces a new lazy Dataset and each .values access reads
 from disk, producing a fresh numpy array -- buffer identity is NOT preserved.
 
-This is why Process.new() (process.py) loads the needed parameters in place on
-the shared parent Dataset *before* selecting them:
+This is why Model._add_process_fields (model.py) loads each needed parameter
+in place on the shared parent Dataset *before* wiring it into the grid's
+shared dataset:
 
-    for pp in param_names:
-        parameters[pp].load()           # selective in-place load -> buffers
-    ds = parameters[list(param_names)]  # selection now preserves identity
+    parameters[pp].load()          # selective in-place load -> buffers
+    grid_ds[pp] = parameters[pp]   # __setitem__ preserves identity
 
-Without the selective .load(), file-backed parameters would copy on selection
-and cross-process sharing (param_shared_name, etc.) would silently break.
-Inputs are then wired by reference via `ds[ii] = inp.current_values`, which
-__setitem__ keeps zero-copy (Section 1), so Input.advance()'s [:] updates
-propagate to every process sharing the buffer (Section 3).
+Without the selective .load(), file-backed parameters would copy on access
+and sharing with the parent (and, via the Model's shared-file dedup, across
+parameter Datasets naming the same file) would silently break. Inputs are
+wired by reference via `grid_ds[ii] = inp.current_values`, which __setitem__
+keeps zero-copy (Section 1), so Input.advance()'s [:] updates propagate to
+every holder of the buffer (Section 3).
 """
 
 import numpy as np
@@ -128,7 +129,8 @@ class TestSetitemPreservesBuffer:
         # Lazy file-backed Dataset: variable selection produces a new lazy
         # Dataset. Each .values access reads from disk -- fresh numpy array
         # each time, so buffer identity is NOT preserved across the selection.
-        # This is why the selective .load() in Process.new() is load-bearing.
+        # This is why the selective .load() in Model._add_process_fields is
+        # load-bearing.
         ds = xr.open_dataset(nc_params_file)
         subset = ds[["v1", "v2"]]
         assert subset["v1"].values is not ds["v1"].values
@@ -155,8 +157,9 @@ class TestSetitemPreservesBuffer:
         # in-place, leaving other variables (v3) still lazy.
         # Subsequent variable selection on the partially-loaded Dataset
         # preserves buffer identity for the loaded variables only.
-        # This is the Process.new() use case (more memory-efficient than
-        # ds.load() when only a subset of variables is needed).
+        # This is the Model._add_process_fields use case (more
+        # memory-efficient than ds.load() when only a subset of variables
+        # is needed).
         var_list = ["v1", "v2"]
         ds = xr.open_dataset(nc_params_file)
         for vv in var_list:

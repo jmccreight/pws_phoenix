@@ -118,8 +118,9 @@ class TestTwoGrid:
             )
         return dict(flow=flow, storage=storage)
 
-    def test_two_grid_map(self, toy, weights, dimensions, answers):
-        process_dict = {
+    @pytest.fixture
+    def process_dict(self, toy):
+        return {
             "upper": {
                 "class": Upper,
                 "discretization": "hru",
@@ -136,7 +137,15 @@ class TestTwoGrid:
                 # NOTE: "flow" is NOT provided -- the Map feeds it.
             },
         }
-        maps = {"hru_to_seg": Map("hru", "flow", "segment", "flow", weights)}
+
+    def test_two_grid_map(self, process_dict, weights, dimensions, answers):
+        maps = {
+            "hru_to_seg": Map(
+                weights=weights,
+                grid={"hru": "segment"},
+                variable={"flow": "flow"},
+            )
+        }
 
         dt = np.float64(1.0)
         with Model(process_dict, {}, maps=maps) as model:
@@ -163,3 +172,63 @@ class TestTwoGrid:
             weights @ answers["flow"][-1],
             rtol=1e-12,
         )
+
+    def test_unresolved_input_raises(self, process_dict):
+        """Without the Map, Lower's cross-grid `flow` input is unresolved:
+        Model construction fails fast (assembly-time validation) instead of
+        KeyError-ing mid-run."""
+        with pytest.raises(ValueError, match="unresolved input"):
+            Model(process_dict, {})
+
+    def test_consumer_before_producer_raises(self, process_dict, weights):
+        """Ordering the consumer (Lower) before the mapped variable's writer
+        (Upper) would silently carry last step's flow across the boundary:
+        assembly raises instead (one-pass order validation)."""
+        reversed_dict = {
+            "lower": process_dict["lower"],
+            "upper": process_dict["upper"],
+        }
+        maps = {
+            "hru_to_seg": Map(
+                weights=weights,
+                grid={"hru": "segment"},
+                variable={"flow": "flow"},
+            )
+        }
+        with pytest.raises(ValueError, match="writer"):
+            Model(reversed_dict, {}, maps=maps)
+
+    def test_map_applies_once_per_step(
+        self, process_dict, weights, dimensions
+    ):
+        """A second consumer of the mapped variable does not re-apply the
+        Map: it is applied exactly once per timestep, before its first
+        consumer; later consumers re-read the same target buffer."""
+
+        class CountingMap(Map):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.n_applies = 0
+
+            def apply(self, source_ds):
+                self.n_applies += 1
+                super().apply(source_ds)
+
+        # A 2nd process on "segment" consuming `flow` (same class: its state
+        # vars are structurally shared with "lower", which is fine here --
+        # only the apply count is under test).
+        process_dict["lower2"] = dict(process_dict["lower"])
+        counting_map = CountingMap(
+            weights=weights,
+            grid={"hru": "segment"},
+            variable={"flow": "flow"},
+        )
+        maps = {"hru_to_seg": counting_map}
+
+        n_time = dimensions["n_time"]
+        with Model(process_dict, {}, maps=maps) as model:
+            assert model._proc_maps["lower"] == [counting_map]
+            assert model._proc_maps["lower2"] == []
+            model.run(np.float64(1.0), np.int32(n_time))
+
+        assert counting_map.n_applies == n_time

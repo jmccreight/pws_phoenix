@@ -4,6 +4,21 @@
 - [Some general ground rules](#some-general-ground-rules)
 - [Project context](#project-context)
 - [python assumptions/conventions](#python-assumptionsconventions)
+- [incarnations/mpixarray design notes](#incarnationsmpixarray-design-notes)
+  - [Core decision: discretization = the unit of decomposition](#core-decision-discretization--the-unit-of-decomposition)
+  - [Variable taxonomy: parameters vs inputs (by relationship to model time)](#variable-taxonomy-parameters-vs-inputs-by-relationship-to-model-time)
+  - [Serial path (`Model` in `model.py`)](#serial-path-model-in-modelpy)
+  - [MPI path (`ModelMPI` in `model.py`) — single-decomposition streaming](#mpi-path-modelmpi-in-modelpy--single-decomposition-streaming)
+  - [Known mpixarray limits (Phase 1)](#known-mpixarray-limits-phase-1)
+  - [IO is intentionally NOT apples-to-apples](#io-is-intentionally-not-apples-to-apples)
+  - [Global state: `Time` + `Options` (the "Global" split)](#global-state-time--options-the-global-split)
+  - [Phase 2 backlog (separable, layered on top)](#phase-2-backlog-separable-layered-on-top)
+  - [Container-model unification (implemented)](#container-model-unification-implemented)
+  - [Object model & serial vs MPI](#object-model--serial-vs-mpi)
+  - [Forward design (June 2026 discussion): structure, schedule, open topics](#forward-design-june-2026-discussion-structure-schedule-open-topics)
+  - [Build plan: multi-grid, incremental (June 2026)](#build-plan-multi-grid-incremental-june-2026)
+  - [Input structuring: serial vs MPI, multi-file / datatree (June 2026)](#input-structuring-serial-vs-mpi-multi-file--datatree-june-2026)
+  - [Prior art: xarray-simlab & Landlab (from the retired xr design summary, Apr 2026)](#prior-art-xarray-simlab--landlab-from-the-retired-xr-design-summary-apr-2026)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -73,19 +88,25 @@ If additional context arises about this project which is useful to add, please l
 `incarnations/mpixarray/` blends the serial xr Process framework (developed in
 `incarnations/xr/`, since retired -- see git history; its design summary is
 distilled in "Prior art" below) with mpixarray's streaming MPI IO. The code is
-split into
-`data_io.py` (IO primitives), `process.py` (the Process framework + `PWS`
-accessor), `model.py` (`Model` serial + `ModelMPI` streaming), and
-`processes_concrete.py` (the toy Upper/Lower processes); the import stack is
-`data_io ← process ← model` and `process ← processes_concrete`. Phase 1 is
-implemented and tested (serial via pytest; MPI via pytest-mpi).
+split into `globals.py` (`Time`), `data_io.py` (serial IO primitives),
+`discretization.py` (`Discretization`), `map.py` (`Map`), `process.py`
+(`DataArrayMeta` + the `Process` ABC), `model.py` (`Model` serial + `ModelMPI`
+streaming), and `processes_concrete.py` (the toy Upper/Lower processes).
+`model.py` is the top of the import stack (it imports `data_io`,
+`discretization`, `globals`, `process`); `map.py` is foundational
+(numpy/xarray only; `Map` objects are passed into the Model); `process.py`
+imports only `globals.py`. `Process.new()` and the `PWS` accessor were
+retired (July 2026 -- see git history) when the Model took over per-grid
+dataset assembly. Phase 1 is implemented and tested (serial via pytest; MPI
+via pytest-mpi).
 
 ## Core decision: discretization = the unit of decomposition
 
 The unit of MPI decomposition (and of barriers / the shared dataset) is the
 **discretization** (the grid). "One shared decomposed dataset" really means
-"one dataset per discretization." The toy model has exactly one (`space`);
-multiple discretizations are Phase 2.
+"one dataset per discretization." The single-grid toy has exactly one
+(`space`); the serial two-grid toy (Step A, `tests/test_two_grid.py`) has
+two; mixed MPI/serial grids are Step B.
 
 ## Variable taxonomy: parameters vs inputs (by relationship to model time)
 
@@ -94,7 +115,8 @@ framework treats it. The discriminator is the variable's time coordinate vs
 **model time** (daily, fixed, known at init):
 
 - **Static parameter** (`kind="parameter"`, no time axis) -- a fixed property /
-  calibration. Loaded once, resident, read-only. (`param_up_0`, `param_common`)
+  calibration. Loaded once, resident, read-only. (`param_up_0`,
+  `param_shared_name`)
 - **Time-varying parameter** (`kind="parameter"`, a time axis whose coordinates
   are **not** model time) -- varies in time but is indexed by a _derived_
   coordinate. Common forms:
@@ -107,7 +129,7 @@ framework treats it. The discriminator is the variable's time coordinate vs
     cyclic-monthly `(month, space)`, indexed in `Upper.calculate` via `time.month`.
 - **Input / time-varying input** (`kind="input"` / `"mutable_input"`, time axis
   **==** model time) -- external forcing/boundary data, one model-time slice
-  served per step in lockstep. (`forcing_0`, `forcing_common`)
+  served per step in lockstep. (`forcing_up`, `forcing_low`)
 
 **Rule (enforced in `ModelMPI._build`):** a `parameter` declared on the model
 `time` axis is a misdeclaration -- a variable on model time is an _input_, so a
@@ -121,12 +143,22 @@ The process holds `time` and does the lookup; `_calculate` receives raw numpy
 
 ## Serial path (`Model` in `model.py`)
 
-- `Process.new()` builds a per-process `xr.Dataset`: parameters loaded in place
-  on the shared parent, inputs wired by reference. Cross-process buffer sharing
-  (`param_common`, `forcing_common`, `Upper.flow → Lower.flow`) is preserved by
-  reference and checked with `a.values is b.values`.
-- The `PWS` accessor dispatches `advance()`/`calculate()` via
-  `ds.attrs["process_name"]` → `Process._registry`.
+- The Model assembles ONE shared `xr.Dataset` per grid from its processes'
+  field declarations (`Model._add_process_fields`) and binds each process to
+  it directly (`cls(grid_ds)`). Same-named vars are added once, so
+  cross-process buffer sharing (`param_shared_name`,
+  `Upper.flow → Lower.flow`) is _structural_ -- the same named variable --
+  exactly as in MPI. The old `Process.new()` per-process datasets and the
+  `PWS` accessor are retired (July 2026; see git history); the
+  `a.values is b.values` checks survive only as near-tautological test
+  asserts.
+- The selective in-place `parameters[pp].load()` before wiring a parameter
+  into the grid dataset is still load-bearing for file-backed parameters
+  (see `tests/test_ref_behaviors.py`).
+- `Process._registry` (`__init_subclass__`) is currently unused but kept as a
+  deliberate hook for Phase 2+ string -> class resolution (config-file-driven
+  assembly, restart/checkpoint rehydration); assess keep-vs-remove when the
+  first of those lands.
 - Output: `data_io.Output` — a buffered, time-chunked **zarr** writer (adapted
   from pywatershed `base/output.py`): one store at `output_dir/output.zarr`,
   all output vars as data_vars, lazy-init sized to `n_times`, full-chunk region
@@ -143,8 +175,8 @@ open_writer → declare buffers → create → iter_time → write`.
   cross-process buffer sharing is **structural** (the same named variable) --
   not emulated by hand and asserted.
 - Processes bind directly (`cls(ds_mpi)`) and are rebound to each `step` in the
-  loop. There is **no** `Process.new()` MPI path (the old `comm` /
-  `local_space_idx` branch was deleted); serial `new()` is unchanged.
+  loop. (`Process.new()` is retired entirely; the serial path also binds
+  directly to its grid's shared dataset.)
 - Inputs: time-dimensioned file vars are dropped by `set_streaming` and refilled
   each step from `step.mpi.src`; static space-only params/ICs survive on
   `ds_mpi` (loaded into memory so their buffers are shared by reference).
@@ -152,9 +184,10 @@ open_writer → declare buffers → create → iter_time → write`.
   `disc.decompose(ds)` does the space split (MPI) or identity (serial,
   `comm=None`). `set_streaming` (time) stays in `ModelMPI`. The datasets:
   `ds_mpi` (decomposed) -> `ds_mpi_stream` (streaming). Model/ModelMPI hold
-  `self.discretizations` (a `dict[str, Discretization]` keyed by grid name; one
-  entry `"space"` for now) -- so a 2nd grid is just another key. More grids +
-  dataset-ownership next.
+  `self.discretizations` (a `dict[str, Discretization]` keyed by grid name;
+  one entry `"space"` in MPI for now, two in the serial two-grid toy) -- a 2nd
+  grid is just another key. Dataset-ownership is done; more MPI grids are
+  Step B.
 
 ## Known mpixarray limits (Phase 1)
 
@@ -224,50 +257,39 @@ the `epiweeks` dep).
   (Cyclic-monthly time-varying parameters are implemented -- see "Variable
   taxonomy".) Coarse-linear (e.g. per-(year,month)) time-varying params remain.
 
-## Next design topic: container-model unification
+## Container-model unification (implemented)
 
-The **Process-facing** interface is already uniform: a `Process` only touches
-`self._obj[name].values` and is agnostic to whether `_obj` is a standalone
-serial dataset or a view into the shared `ds_mpi`. The **container** layer is
-what diverges:
-
-- **Serial:** N per-process in-memory `xr.Dataset`s wired by shared buffers --
-  sharing is _manual_, hence the `a.values is b.values` asserts (which can break).
-- **MPI:** ONE decomposed `ds_mpi`; processes are views -- sharing is
-  _structural_, so the same `is` checks are nearly tautological.
-
-The `finalize` asymmetry is a symptom: serial `finalize()` only closes I/O
-handles (its in-memory process datasets survive -- _wanted_, for
-interactive/post-run inspection), while MPI `finalize()` closes `ds_mpi`. The
-consistent contract is "`finalize` **releases external resources**," NOT
-"deletes data" -- do not make serial delete its data (no upside; it kills the
-inspection serial exists for).
-
-**Candidate direction:** collapse both into ONE shared dataset _per
+Serial and MPI share ONE container model: one shared dataset _per
 discretization_, with serial as the _degenerate_ case (one rank, full extent,
-plain-xr backend instead of mpixarray). That makes the two genuinely comparable,
-makes buffer-sharing _structural in both_ (deleting the fragile serial wiring
-_and_ its `is` asserts), and makes "MPI optional" true with no structural fork
--- serial = "MPI with one rank, no MPI."
+plain-xr backend instead of mpixarray). A `Process` only touches
+`self._obj[name].values` and is agnostic to whether `_obj` is a serial grid
+dataset or a view into the decomposed `ds_mpi`. Buffer sharing is _structural
+in both_ (a same-named var is added to the grid dataset once), which deleted
+the fragile serial wiring and its `a.values is b.values` asserts (they
+survive only as near-tautological test checks) -- serial = "MPI with one
+rank, no MPI."
 
-**Key tension -- namespacing:** N datasets give each process a private namespace
-for free; one shared dataset flattens it. Fine where vars _should_ be identical
-(`param_common`, `Upper.flow → Lower.flow`), but two processes then can't each
-have a private `flow`. Per-discretization grouping narrows it (same-grid
-processes share; different grids are separate datasets), but within a grid you
-still need a naming discipline or sub-grouping.
+Still holds:
 
-Moot for _users_ (`ds_mpi` is never inspected interactively); this is a
-_developer_-facing concern -- reasoning plus the buffer-sharing correctness
-invariant.
+- The `finalize` contract is "**releases external resources**," NOT "deletes
+  data": serial `finalize()` only closes I/O handles (its in-memory grid
+  datasets survive -- _wanted_, for interactive/post-run inspection), while
+  MPI `finalize()` closes `ds_mpi`. Do not make serial delete its data.
+- **Namespacing:** one shared dataset per grid flattens process namespaces --
+  two same-grid processes cannot each have a private `flow`. Per the
+  flat-layout decision under "Forward design," collisions are to be detected
+  at assembly; NOTE that check is not yet implemented (same-named vars
+  silently share today).
 
 ## Object model & serial vs MPI
 
 **All five classes and their relationships.** Serial and MPI share **one object
 graph** -- the only differences live _inside_ the Discretization and the Model's
 run loop; everything a modeler writes (Processes) and the clock (Time) are
-identical across the two. The toy is the single-grid _degenerate_ case: one
-`Discretization "space"` hosting Upper/Lower, no Map.
+identical across the two. The single-grid toy is the _degenerate_ case: one
+`Discretization "space"` hosting Upper/Lower, no Map; the two-grid toy
+(`tests/test_two_grid.py`) exercises the general shape serially (hru +
+segment + a Map).
 
 ```mermaid
 graph TD
@@ -296,7 +318,8 @@ graph TD
   Model keeps the _schedule_ (cross-grid execution order) as a separate ordering.
 - **Processes compute directly** on the disc dataset (`self._obj[name].values`)
   -- no per-process variable views. (In MPI the per-step _streaming window_ is a
-  transparent time-slice, not a variable subset.) Shared vars (`param_common`,
+  transparent time-slice, not a variable subset.) Shared vars
+  (`param_shared_name`,
   `flow` Upper->Lower) are the same variable in the one dataset -> structural
   sharing, no `a.values is b.values`. The per-grid dataset is **flat** (named
   vars in one `Dataset`), not a DataTree -- see the "Data model" decision under
@@ -330,13 +353,17 @@ mpixarray requires `set_streaming` _before_ declaring buffers, so MPI assembly i
 plain dataset, no time-layer). So in MPI the disc and Model collaborate to build
 the dataset; in serial the disc builds it alone.
 
-**Status:** the object graph and the MPI path are in place; serial still builds N
-per-process datasets (container-unification pending) -- making serial's
-Discretization own one shared dataset is the work that realizes this picture.
+**Status:** implemented in both paths -- each grid's Discretization owns one
+shared dataset (serial: assembled in `Model._add_process_fields`; MPI: the
+decomposed input dataset), and processes bind to it directly.
 
 ## Forward design (June 2026 discussion): structure, schedule, open topics
 
-A working model from design discussion -- **not yet implemented**; it frames the
+A working model from design discussion -- **partially implemented** (Step A
+landed the two-grid structure: co-registration, per-grid datasets, a one-way
+Map; July 2026 added the implied-map schedule semantics -- apply once per
+step, before the first consumer -- and the one-pass order validation. Not
+yet built: the default known process order + subsetting). It frames the
 move from the single-discretization toy to multi-grid pws. Expands on the
 container-model topic above.
 
@@ -389,8 +416,11 @@ Model
 - **Maps are implied,** not scheduled -- inserted at each grid boundary in the
   order. The order says _when_ to cross; each process's declared I/O says _what_
   the map carries (the consumer's inputs last produced on another grid).
+  (Implemented July 2026 as apply-once-per-step before the map's first
+  consumer; see Step A in the build plan.)
 - **Validation:** error if any process input is not found (forcing / prior
-  output / mappable via a registered map).
+  output / mappable via a registered map). (Implemented, incl. the
+  writer-before-first-consumer and weights-shape checks.)
 - **Scope: explicit (one-pass) solutions only.** Iterative cross-grid coupling
   (fixed-point loops) is deliberately out of scope for now (it would need a loop,
   not a flat order).
@@ -449,19 +479,32 @@ Model expands to:
 The path from the single-grid toy to the multi-grid object model, with the
 smallest/riskiest piece (cross-rank comm) last.
 
-- **(deferred) Single-grid container-unification.** Give the dis its real job:
-  own the grid's one shared dataset; serial stops building N per-process
-  datasets and drops the `a.values is b.values` asserts; both paths bind
-  processes directly (`process._obj = dis.dataset`), no `.pws` dispatch.
-  Tree-agnostic. *Deferred* in favour of the multi-grid demo; revisit to retire
-  the asserts / once a grid hosts >1 process.
-- **Step A -- serial two-grid + Map + scheduler (no MPI).** Upper on grid1,
-  Lower on grid2 (different dims/sizes), a simple sparse-weight **Map**
-  (grid1 -> grid2), run order Upper -> map -> Lower. Proves the **Map** class,
-  the **scheduler**, the multi-grid object model, and **process->grid
+- **(done) Single-grid container-unification.** The dis owns the grid's one
+  shared dataset; serial no longer builds N per-process datasets; both paths
+  bind processes directly (`cls(grid_ds)`). `.pws` dispatch and
+  `Process.new()` retired (July 2026).
+- **(done) Step A -- serial two-grid + Map + scheduler (no MPI).** Upper on
+  grid1, Lower on grid2 (different dims/sizes), a simple **Map**
+  (grid1 -> grid2, dense weights for now), run order Upper -> map -> Lower.
+  Proves the **Map** class, the multi-grid object model, and **process->grid
   co-registration** -- all in serial, on the `discretizations` dict (no tree,
-  no mpixarray dependency). New two-grid toy + test; the single-grid toy is left
-  untouched.
+  no mpixarray dependency). Two-grid toy + test (`tests/test_two_grid.py`);
+  the single-grid toy is untouched. Unresolved process inputs raise at
+  assembly (`Model._validate_inputs_resolved`; the MPI path likewise
+  validates file-backed inputs against the input file in `_build`).
+  **Map scheduling (July 2026):** a Map is applied exactly ONCE per
+  timestep, immediately before its FIRST consumer in the order
+  (`Model._resolve_maps` assigns; `calculate` applies); later consumers
+  re-read the target buffer. A mapped value is a per-step constant after
+  its single apply -- guaranteed statically (one variable owner + all
+  declared source-grid writers, incl. `mutable_input` declarers, validated
+  to precede the first consumer), NOT by runtime dirty-tracking (only
+  iterative coupling would need that; out of scope). `_resolve_maps` also
+  validates weights shape vs grid sizes and rejects unused maps. `Map`
+  construction is keyword-only, `{source: target}` dicts:
+  `Map(weights=..., grid={"hru": "segment"}, variable={"flow": "flow"})`.
+  Execution order = the author's `process_dict` order (assembly groups by
+  grid internally; binding and scheduling preserve author order).
 - **Step B -- mixed parallelization + comm (the real target).** Make grid1
   distributed (MPI), grid2 serial. The Map now crosses the parallel boundary ->
   a **distributed sparse mat-vec** (allgather the input, or allreduce the

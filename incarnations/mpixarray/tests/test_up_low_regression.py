@@ -95,23 +95,6 @@ class TestRegression:
         assert Process._registry["Upper"] is Upper
         assert Process._registry["Lower"] is Lower
 
-    def test_process_name_in_attrs(self, toy_ds):
-        """ds.attrs['process_name'] is set and no callables are stored in attrs."""
-        upper = Upper.new(
-            parameters=toy_ds[
-                ["param_up_0", "param_up_1", "param_shared_name"]
-            ],
-            forcing_up=toy_ds["forcing_up"][0],
-            flow_initial=toy_ds["flow_initial"],
-        )
-        assert upper.attrs["process_name"] == "Upper"
-        # attrs must stay callable-free: process.py resolves behavior via
-        # Process._registry (keyed by the process_name string), not by stashing
-        # advance/calculate in attrs. Callables would also break NetCDF/zarr
-        # serialization and pickle/deepcopy of the dataset.
-        for val in upper.attrs.values():
-            assert not callable(val), f"callable found in attrs: {val}"
-
     def test_model_regression(
         self, dimensions, model_inputs, control_config, answers
     ):

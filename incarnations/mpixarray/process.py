@@ -2,70 +2,42 @@
 process.py
 ==========
 The Process framework for incarnations/mpixarray: the DataArrayMeta field
-descriptor, the Process ABC, and the PWS xarray accessor. Concrete processes
-(Upper, Lower, ...) subclass Process in processes_concrete.py; the orchestrators
-(Model, ModelMPI) live in model.py.
-
-The PWS accessor dispatches via self._process.advance()/calculate(); only the
-string ds.attrs["process_name"] is stored in attrs (no callables), and
-subclasses auto-register in Process._registry via __init_subclass__.
-
-Motivation: Polymorphism with the xarray accessor
---------------------------------------------------
-xr.Dataset is a general-purpose container. In pws_phoenix we have ~40
-process types (Upper, Lower, Snowpack, ...), each with its own variables,
-parameters, and computation. The challenge: how do we attach
-process-specific behaviour (advance, calculate) to a plain xr.Dataset
-without subclassing it (which xarray discourages)?
-
-The accessor pattern can solve this. The order of events is:
-
-  1. @xr.register_dataset_accessor("pws") registers PWS once at import
-     time -- before any datasets exist.
-  2. Process subclasses must be imported before any dataset's .pws is
-     accessed. Each import triggers __init_subclass__, which populates
-     Process._registry automatically.
-  3. Accessor instantiation is lazy: PWS(ds) is only called the first
-     time .pws is accessed on a specific dataset instance.
-  4. At that moment, ds.attrs["process_name"] identifies the exact
-     Process subclass in the registry. That subclass is instantiated
-     with ds and its advance() and calculate() methods are attached to
-     ds.pws. Every dataset self-configures its own accessor.
+descriptor and the Process ABC. Concrete processes (Upper, Lower, ...)
+subclass Process in processes_concrete.py; the orchestrators (Model,
+ModelMPI) live in model.py.
 
 What is a Process?
 ------------------
-A Process is a stateful accessor-style object -- it stores self._obj
-(the dataset) and exposes advance() and calculate(dt) as instance methods.
-This mirrors the xarray accessor pattern and keeps call signatures clean.
+A Process is a stateful, accessor-style view of its grid's ONE shared
+dataset: it stores self._obj (the dataset) and exposes advance() and
+calculate(dt, time) as instance methods. It does not own or build its
+dataset -- the Model assembles one shared dataset per grid
+(discretization) from its processes' field declarations and binds each
+process to it directly (serial: Model._add_process_fields; MPI:
+ModelMPI._build, where _obj is rebound to each streaming step).
+Same-named variables are added to the grid dataset once, so
+cross-process buffer sharing (param_shared_name, Upper.flow ->
+Lower.flow) is structural -- the same named variable in the one dataset.
 
-There is a contract between a Process and the dataset it operates on:
-the dataset is built by that same Process's new() classmethod, which
-guarantees the dataset has exactly the variables and parameters the
-methods expect. The accessor enforces the pairing at construction time
-via ds.attrs["process_name"].
+Fields are declared as class attributes with DataArrayMeta (kind:
+parameter / input / mutable_input / variable); the introspection
+classmethods (get_parameters, get_inputs, ...) read those declarations
+and are what the Model assembles from.
 
 Heavy computation is delegated to a @staticmethod _calculate(...) that
 takes raw numpy arrays -- no xarray overhead -- making it a natural
 target for @numba.jit(nopython=True).
 
-Key design notes:
-  - The PWS accessor is registered on xr.Dataset only. DataArray support
-    is deferred for a future revision.
-  - No Python callables are stored in ds.attrs. Only the string
-    ds.attrs["process_name"] is stored.
-
 Run tests with: pytest tests/ -v
 """
 
 import dataclasses
-import pathlib as pl
 from abc import ABC, abstractmethod
 from typing import Literal
 
 import numpy as np
 import xarray as xr
 
-from data_io import Input, open_xr
 from globals import Time
 
 # ---------------------------------------------------------------------------
@@ -144,20 +116,15 @@ def _dict_of_kind(cls: type, kind: str) -> dict[str, DataArrayMeta]:
 # ---------------------------------------------------------------------------
 
 _FILL_VALUE: dict[type, object] = {np.float64: np.nan}
-DataArrayMetaDict = dict[str, DataArrayMeta]
 
 
 class Process(ABC):
-    """Accessor-style ABC: stores self._obj and dispatches advance/calculate.
-    Subclasses auto-register in Process._registry via __init_subclass__.
+    """Accessor-style ABC: a view of its grid's shared dataset.
 
-    Construction:
-        Call the classmethod new() on the concrete subclass to build the
-        xr.Dataset, then access .pws to get the configured accessor:
-
-        ds = Upper.new(parameters=..., forcing_up=..., flow_initial=...)
-        ds.pws.advance()
-        ds.pws.calculate(dt, time)
+    Stores self._obj (the dataset, bound by the Model) and dispatches
+    advance()/calculate(). Subclasses declare fields as DataArrayMeta
+    class attributes and auto-register in Process._registry via
+    __init_subclass__.
 
     Numba:
         Heavy inner computation should be delegated to a @staticmethod
@@ -178,6 +145,14 @@ class Process(ABC):
                 )
     """
 
+    # Registry of concrete subclasses by class name, populated by
+    # __init_subclass__. Currently unused by the Model (process_dict
+    # carries classes directly) -- kept as a deliberate hook for the
+    # Phase 2+ features that need string -> class resolution:
+    # config-file-driven model assembly (processes named in a control
+    # file, as in pywatershed) and restart/checkpoint rehydration
+    # (serialized state can only record a process *name*). Assess
+    # keep-vs-remove when the first of those lands.
     _registry: dict[str, type] = {}
 
     # Home grid (co-registration). None = the model's single/default grid; a
@@ -195,89 +170,6 @@ class Process(ABC):
         """Subscript delegates to the bound dataset (a process is a view of its
         grid's shared dataset)."""
         return self._obj[key]
-
-    @classmethod
-    def new(
-        cls,
-        parameters: xr.Dataset | pl.Path,
-        **kwargs: xr.DataArray | Input | pl.Path,
-    ) -> xr.Dataset:
-        """Build the xr.Dataset for this process (serial path).
-
-        Parameters arrive as a shared Dataset (may be file-backed/lazy);
-        inputs and ICs arrive as individual DataArrays or Input objects.
-        Buffer sharing across processes is preserved by loading parameters
-        in-place on the shared parent and wiring inputs by reference.
-
-        The MPI path does NOT use new(): ModelMPI builds one space-decomposed
-        streaming dataset (ds_mpi_stream); processes bind to it directly,
-        so buffer sharing there is structural rather than emulated.
-
-        Args:
-            parameters: Shared parameter Dataset (may be file-backed/lazy).
-            **kwargs: Input objects, DataArrays, or IC DataArrays keyed by
-                      field name.
-
-        Returns:
-            xr.Dataset with all process fields and ds.attrs["process_name"].
-        """
-        if isinstance(parameters, pl.Path):
-            parameters = xr.open_dataset(parameters)
-        resolved: dict[str, xr.DataArray | xr.Dataset | Input] = {
-            kk: (open_xr(vv) if isinstance(vv, pl.Path) else vv)
-            for kk, vv in kwargs.items()
-        }
-
-        param_names = _keys_of_kind(cls, "parameter")
-        input_names = _keys_of_kind(cls, "input")
-        mutable_input_names = _keys_of_kind(cls, "mutable_input")
-        variable_meta_dict: DataArrayMetaDict = _dict_of_kind(cls, "variable")
-
-        # Load only needed parameters in-place on the shared parent Dataset.
-        # Preserves buffer identity when the Dataset is file-backed (lazy).
-        for pp in param_names:
-            parameters[pp].load()
-        ds = parameters[list(param_names)]
-        for pp in param_names:
-            parameters[pp].values.flags.writeable = False
-
-        # Wire inputs (by reference -- preserves cross-process buffer sharing).
-        for ii in input_names:
-            inp = resolved[ii]
-            if isinstance(inp, Input):
-                ds[ii] = inp.current_values
-                assert ds[ii].values is inp.current_values.values
-            else:
-                ds[ii] = inp
-        for oo in mutable_input_names:
-            inp_mut = resolved[oo]
-            if isinstance(inp_mut, Input):
-                ds[oo] = inp_mut.current_values
-
-        # Initialize state variables.
-        sizes = ds.sizes
-        for name, meta in variable_meta_dict.items():
-            shape = tuple(sizes[d] for d in meta.dims)
-            da = xr.DataArray(
-                data=np.full(shape, _FILL_VALUE[meta.dtype], dtype=meta.dtype),
-                dims=meta.dims,
-                attrs={"description": meta.description},
-            )
-            if meta.initial is not None and meta.initial in resolved:
-                da[:] = resolved[meta.initial]
-            ds[name] = da
-
-        # Store field-kind metadata as plain strings/tuples (no callables).
-        ds.attrs["process_name"] = cls.__name__
-        ds.attrs["get_parameters"] = param_names
-        ds.attrs["get_inputs"] = input_names
-        ds.attrs["get_mutable_inputs"] = mutable_input_names
-        ds.attrs["get_var_names"] = tuple(variable_meta_dict.keys())
-        # Note: get_variables (Dict[str, DataArrayMeta]) is not stored in
-        # attrs because dicts with non-scalar values don't survive NetCDF
-        # round-trips. Use ds.pws.get_variables() instead.
-
-        return ds
 
     @abstractmethod
     def advance(self) -> None:
@@ -310,74 +202,3 @@ class Process(ABC):
     @classmethod
     def get_var_names(cls) -> tuple[str, ...]:
         return _keys_of_kind(cls, "variable")
-
-
-# ---------------------------------------------------------------------------
-# PWS accessor
-# ---------------------------------------------------------------------------
-# NOTE: Registered on xr.Dataset only. xr.DataArray support is deferred --
-# the per-variable accessor use-case needs further design thought.
-
-
-@xr.register_dataset_accessor("pws")
-class PWS:
-    """Accessor providing process methods on a process xr.Dataset.
-
-    Dispatch is resolved at accessor-creation time by reading
-    ds.attrs["process_name"] and looking up the corresponding Process
-    subclass in Process._registry. No callables are stored in ds.attrs.
-
-    Process subclasses auto-register via __init_subclass__ when imported.
-    Class attributes on PWS (Upper, Lower, ...) are provided for
-    convenient construction syntax:
-
-        Upper.new(parameters=..., **kwargs)
-        xr.Dataset.pws.Upper.new(parameters=..., **kwargs)
-
-    Usage:
-        ds = Upper.new(parameters=..., **kwargs)
-        ds.pws.advance()
-        ds.pws.calculate(dt, time)
-        ds.pws.get_parameters()     # -> tuple[str, ...]
-        ds.pws.get_inputs()         # -> tuple[str, ...]
-        ds.pws.get_mutable_inputs() # -> tuple[str, ...]
-        ds.pws.get_variables()      # -> dict[str, DataArrayMeta]
-        ds.pws.get_var_names()      # -> tuple[str, ...]
-    """
-
-    def __init__(self, xarray_obj: xr.Dataset) -> None:
-        self._obj = xarray_obj
-        self._process = Process._registry[self._obj.attrs["process_name"]](
-            self._obj
-        )
-
-    # ------------------------------------------------------------------
-    # Computation
-    # ------------------------------------------------------------------
-
-    def advance(self) -> None:
-        """Advance process state to the next timestep."""
-        self._process.advance()
-
-    def calculate(self, dt: np.float64, time: Time) -> None:
-        """Perform calculations for the current timestep."""
-        self._process.calculate(dt, time)
-
-    # ------------------------------------------------------------------
-    # Introspection -- delegates to the Process subclass classmethods
-    # ------------------------------------------------------------------
-
-    def get_parameters(self) -> tuple[str, ...]:
-        return self._process.get_parameters()
-
-    def get_inputs(self) -> tuple[str, ...]:
-        return self._process.get_inputs()
-
-    def get_mutable_inputs(self) -> tuple[str, ...]:
-        return self._process.get_mutable_inputs()
-
-    def get_variables(self) -> dict[str, DataArrayMeta]:
-        return self._process.get_variables()
-
-    def get_var_names(self) -> tuple[str, ...]:
-        return self._process.get_var_names()

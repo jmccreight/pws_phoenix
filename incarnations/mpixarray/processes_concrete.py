@@ -5,17 +5,16 @@ Upper and Lower: concrete Process subclasses for the toy Upper/Lower model.
 
   - No decorator -- Upper/Lower subclass Process directly.
   - Auto-registered in Process._registry via __init_subclass__.
-  - Construction via Upper.new(...) -- classmethod on the ABC.
-  - advance(self) / calculate(self, dt) are instance methods using self._obj.
+  - Instantiated by the Model with the grid's shared dataset: cls(grid_ds).
+  - advance(self) / calculate(self, dt, time) are instance methods using
+    self._obj.
   - _calculate is a @staticmethod taking raw numpy arrays -- the natural
     target for @numba.jit when performance work begins.
-  - Upper/Lower added as class attrs on PWS for construction syntax:
-      Upper.new(...) or xr.Dataset.pws.Upper.new(...)
 """
 
 import numpy as np
 from globals import Time
-from process import PWS, DataArrayMeta, Process
+from process import DataArrayMeta, Process
 
 
 class Upper(Process):
@@ -158,13 +157,3 @@ class Lower(Process):
             self._obj["forcing_low"].values,
             dt,
         )
-
-
-# ---------------------------------------------------------------------------
-# Attach Process subclasses to PWS for convenient construction syntax:
-#     Upper.new(...)  or  xr.Dataset.pws.Upper.new(...)
-# Dispatch is handled automatically via Process._registry (__init_subclass__).
-# ---------------------------------------------------------------------------
-
-PWS.Upper = Upper  # type: ignore[attr-defined]
-PWS.Lower = Lower  # type: ignore[attr-defined]

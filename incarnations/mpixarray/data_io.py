@@ -7,7 +7,7 @@ IO primitives for incarnations/mpixarray:
   - Output:  serial buffered, time-chunked zarr writer (adapted from pywatershed)
 
 These are process-agnostic and sit at the base of the import stack
-(process.py and model.py build on them).
+(model.py builds on them; process.py no longer imports data_io).
 
 Output is the serial writer (one zarr store). The MPI path (ModelMPI in
 model.py) does NOT use Output -- it streams output through mpixarray
@@ -121,9 +121,9 @@ class Output:
             time_values: 1-D datetime coordinate of length n_times.
 
         Note:
-            Tailored to read Model.model_dict (key -> process), where each
-            process's variables are identified via get_var_names()/
-            get_variables() (Process) or the pws accessor (xr.Dataset).
+            Tailored to read Model.model_dict (key -> Process instance),
+            where each process's variables are identified via
+            get_var_names().
         """
         self.time_chunk_size = time_chunk_size
         self.variable_names = variable_names
@@ -153,12 +153,7 @@ class Output:
         for var_name in self.variable_names:
             found = False
             for process_name, process_obj in model_dict.items():
-                var_names = (
-                    process_obj.pws.get_var_names()  # type: ignore[attr-defined]
-                    if isinstance(process_obj, xr.Dataset)
-                    else process_obj.get_variables()
-                )
-                if var_name in var_names:
+                if var_name in process_obj.get_var_names():
                     self.variable_refs[var_name] = process_obj[var_name]
                     self.process_map[var_name] = process_name
                     found = True

@@ -29,7 +29,7 @@ import xarray as xr
 from data_io import Input, Output, open_xr
 from discretization import Discretization
 from globals import Time
-from process import _FILL_VALUE, _dict_of_kind  # import registers `pws`
+from process import _FILL_VALUE, _dict_of_kind
 
 # Optional MPI support -- present when mpixarray is installed. The serial Model
 # never needs it; ModelMPI does, and fails at construction if it is absent.
@@ -186,8 +186,35 @@ class Model:
             for kk in proc_names:
                 self._add_process_fields(kk, grid, grid_ds)
             self.discretizations[grid].dataset = grid_ds
-            for kk in proc_names:
-                self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
+
+        # Bind in process_dict order (assembly above groups by grid, but the
+        # author's order IS the execution schedule).
+        for kk in self._process_dict:
+            grid_ds = self.discretizations[self._proc_grid[kk]].dataset
+            self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
+
+        self._validate_inputs_resolved()
+        self._resolve_maps()
+
+    def _validate_inputs_resolved(self) -> None:
+        """Every declared process input must be present on its grid's shared
+        dataset after assembly -- supplied in the process_dict entry, produced
+        by a process on the same grid, or fed by a registered Map. Fail fast
+        here; a missing input would otherwise surface as a KeyError
+        mid-calculate (or silently read a stale variable)."""
+        for proc_name, proc in self.model_dict.items():
+            grid = self._proc_grid[proc_name]
+            grid_ds = self.discretizations[grid].dataset
+            needed = proc.get_inputs() + proc.get_mutable_inputs()
+            missing = [ii for ii in needed if ii not in grid_ds]
+            if missing:
+                raise ValueError(
+                    f"process '{proc_name}' on grid '{grid}' has "
+                    f"unresolved input(s) {missing}: each input must be "
+                    "supplied in the process_dict entry, produced by a "
+                    "process on the same grid, or fed by a registered Map "
+                    f"targeting grid '{grid}' and that variable name."
+                )
 
     def _add_process_fields(
         self, proc_name: str, grid: str, grid_ds: xr.Dataset
@@ -258,6 +285,95 @@ class Model:
                 da[:] = init_dict[meta.initial]
             grid_ds[name] = da
 
+    def _resolve_maps(self) -> None:
+        """Assign each Map to its FIRST consumer in the execution order and
+        validate the one-pass schedule. A mapped value is a per-step constant
+        after its single apply -- guaranteed statically here (one variable
+        owner; all declared source-grid writers precede the first consumer),
+        not by runtime tracking. Later consumers re-read the same target
+        buffer. Raises ValueError on: unknown grids, missing source variable,
+        weights shape vs grid sizes, an unused map, an ambiguous (multi-owner)
+        source variable, or a writer ordered at/after the first consumer."""
+        position = {kk: ii for ii, kk in enumerate(self.model_dict)}
+        self._proc_maps: Dict[str, List[Any]] = {
+            kk: [] for kk in self.model_dict
+        }
+        for map_name, mm in self.maps.items():
+            for gg in (mm.source_grid, mm.target_grid):
+                if gg not in self.discretizations:
+                    raise ValueError(
+                        f"Map '{map_name}': grid '{gg}' is not a grid of "
+                        f"any process (grids: {list(self.discretizations)})."
+                    )
+            source_ds = self.discretizations[mm.source_grid].dataset
+            target_ds = self.discretizations[mm.target_grid].dataset
+            if mm.source_var not in source_ds:
+                raise ValueError(
+                    f"Map '{map_name}': source variable '{mm.source_var}' "
+                    f"not found on grid '{mm.source_grid}'."
+                )
+            n_target = target_ds.sizes[mm.target_grid]
+            n_source = source_ds.sizes[mm.source_grid]
+            if mm.weights.shape != (n_target, n_source):
+                raise ValueError(
+                    f"Map '{map_name}': weights shape {mm.weights.shape} != "
+                    f"(n_target, n_source) = ({n_target}, {n_source}) for "
+                    f"'{mm.source_grid}' -> '{mm.target_grid}'."
+                )
+            if (
+                mm.target_var not in target_ds
+                or target_ds[mm.target_var].values
+                is not mm.target_values.values
+            ):
+                raise ValueError(
+                    f"Map '{map_name}' is unused: '{mm.target_var}' on grid "
+                    f"'{mm.target_grid}' is not fed by this map (it was "
+                    "supplied directly or produced on that grid)."
+                )
+
+            # The source variable's declared write set: its (single) owner
+            # plus any mutable_input declarers, all on the source grid.
+            owners = [
+                kk
+                for kk, proc in self.model_dict.items()
+                if self._proc_grid[kk] == mm.source_grid
+                and mm.source_var in proc.get_var_names()
+            ]
+            if len(owners) > 1:
+                raise ValueError(
+                    f"Map '{map_name}': source variable '{mm.source_var}' "
+                    f"has multiple owners on grid '{mm.source_grid}' "
+                    f"{owners}; the once-per-step apply needs one."
+                )
+            writers = owners + [
+                kk
+                for kk, proc in self.model_dict.items()
+                if self._proc_grid[kk] == mm.source_grid
+                and mm.source_var in proc.get_mutable_inputs()
+            ]
+            consumers = [
+                kk
+                for kk, proc in self.model_dict.items()
+                if self._proc_grid[kk] == mm.target_grid
+                and mm.target_var
+                in proc.get_inputs() + proc.get_mutable_inputs()
+            ]
+            first_consumer = min(consumers, key=lambda kk: position[kk])
+            late = [
+                ww
+                for ww in writers
+                if position[ww] >= position[first_consumer]
+            ]
+            if late:
+                raise ValueError(
+                    f"Map '{map_name}': source-grid writer(s) {late} of "
+                    f"'{mm.source_var}' run at or after the map's first "
+                    f"consumer '{first_consumer}' -- a one-pass order must "
+                    "finish computing (and mutating) a mapped variable "
+                    "before it crosses the grid boundary."
+                )
+            self._proc_maps[first_consumer].append(mm)
+
     def _set_time(self) -> None:
         """Set time dimensions from the first input's `time` dim-coordinate."""
         kk0 = list(self.inputs_dict.keys())[0]
@@ -275,12 +391,12 @@ class Model:
             pp.advance()
 
     def calculate(self, dt: np.float64) -> None:
-        """Calculate each process, first applying any Maps that feed its grid."""
+        """Calculate each process in order. A Map is applied exactly once per
+        step, immediately before its first consumer (see _resolve_maps);
+        later consumers re-read the same target buffer."""
         for proc_name, vv in self.model_dict.items():
-            grid = self._proc_grid[proc_name]
-            for mm in self.maps.values():
-                if mm.target_grid == grid:
-                    mm.apply(self.discretizations[mm.source_grid].dataset)
+            for mm in self._proc_maps[proc_name]:
+                mm.apply(self.discretizations[mm.source_grid].dataset)
             vv.calculate(dt, self.time)
 
     def run(self, dt: np.float64, n_steps: np.int32) -> None:
@@ -444,6 +560,17 @@ class ModelMPI(Model):
                     file_input_names.append(ii)
         self._file_input_names = file_input_names
 
+        # Fail fast if a file-backed input is absent from the input file --
+        # it would otherwise KeyError mid-run on the first src refill.
+        missing = [
+            name for name in file_input_names if name not in ds_input.data_vars
+        ]
+        if missing:
+            raise ValueError(
+                f"input(s) {missing} are not produced by any process and "
+                f"were not found in input_file {input_file!r}."
+            )
+
         # ---- Open writer ----
         ds_mpi_stream.mpi.open_writer(output_file, comm=comm)
 
@@ -494,8 +621,8 @@ class ModelMPI(Model):
 
         self._ds_mpi_stream = ds_mpi_stream
 
-        # ---- Bind processes to the shared dataset (no .pws: one dataset
-        #      hosts many processes, so dispatch on instances directly). ----
+        # ---- Bind processes to the shared dataset (one dataset hosts
+        #      many processes; dispatch on the instances directly). ----
         for proc_name, cls in proc_classes.items():
             self.model_dict[proc_name] = cls(ds_mpi_stream)
 
