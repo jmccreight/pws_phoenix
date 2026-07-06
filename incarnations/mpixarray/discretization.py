@@ -62,6 +62,7 @@ class Discretization:
         comm: Any = None,
         parameters: xr.Dataset | pl.Path | None = None,
         topo_order: dict[str, str] | None = None,
+        topo_one_based: bool = True,
     ) -> None:
         self.dims = list(dims)
         self.comm = comm
@@ -71,12 +72,13 @@ class Discretization:
         self.dataset: Any = (
             None  # the grid's shared dataset (set by the Model)
         )
-        self._topo_order_cache: dict[str, np.ndarray] = {}
+        self._topo_order_cache: dict[tuple[str, bool], np.ndarray] = {}
         # topo_order: {new_var: to_index_var} (the Map dict idiom) --
         # compute the ordering at construction and store it as a DIS
         # parameter, so a process receives it by DECLARATION (dis-first
         # sourcing) like any other dis variable; no dis-object access
-        # path is needed inside Process.
+        # path is needed inside Process. topo_one_based: see
+        # topological_order (applies to every topo_order entry).
         if topo_order is not None:
             for new_var, to_index in topo_order.items():
                 if self.parameters is None:
@@ -86,7 +88,7 @@ class Discretization:
                     )
                 self.parameters[new_var] = (
                     self.parameters[to_index].dims,
-                    self.topological_order(to_index),
+                    self.topological_order(to_index, one_based=topo_one_based),
                 )
 
     @property
@@ -106,13 +108,18 @@ class Discretization:
         )
         return ds_mpi
 
-    def topological_order(self, to_index: str = "tosegment") -> np.ndarray:
+    def topological_order(
+        self, to_index: str = "tosegment", one_based: bool = True
+    ) -> np.ndarray:
         """Upstream-to-downstream ordering from a to-index variable.
 
-        ``to_index`` names a 1-BASED connectivity variable on this dis's
-        ``parameters`` (PRMS convention: ``tosegment``; 0 = outlet, flows
-        out of the domain). Returns 0-based indices ordered so every
-        element precedes the element it flows to. Cached per variable.
+        ``to_index`` names a connectivity variable on this dis's
+        ``parameters``. ``one_based=True`` (default) is the PRMS-legacy
+        convention (``tosegment`` from legacy files: 1-based, 0 =
+        outlet); ``one_based=False`` is the native FlowGraph convention
+        (``to_graph_index``: 0-based, -1 = outlet). Returns 0-based
+        indices ordered so every element precedes the element it flows
+        to. Cached per (variable, convention).
 
         Replicates pywatershed PRMSChannel._initialize_channel_data
         EXACTLY (networkx DiGraph + topological_sort, isolated outlets
@@ -120,8 +127,9 @@ class Discretization:
         (`+=` over upstream neighbors) is float-order-sensitive, so
         matching pywatershed answers at 1e-13 requires the SAME order.
         """
-        if to_index in self._topo_order_cache:
-            return self._topo_order_cache[to_index]
+        cache_key = (to_index, one_based)
+        if cache_key in self._topo_order_cache:
+            return self._topo_order_cache[cache_key]
         if self.parameters is None or to_index not in self.parameters:
             raise ValueError(
                 f"topological_order: '{to_index}' is not a variable of "
@@ -129,8 +137,11 @@ class Discretization:
             )
         import networkx as nx  # lazy: only topology users need it
 
-        # 1-based PRMS connectivity -> 0-based; negative = outlet
-        to_seg = (self.parameters[to_index].values - 1).astype("int64")
+        # normalize to 0-based; negative = outlet
+        if one_based:
+            to_seg = (self.parameters[to_index].values - 1).astype("int64")
+        else:
+            to_seg = self.parameters[to_index].values.astype("int64")
         n_seg = to_seg.shape[0]
         outflow_mask = np.full((n_seg,), False)
         connectivity = []
@@ -156,5 +167,5 @@ class Discretization:
             order = mask_not_in_order + order
 
         order_arr = np.array(order, dtype="int64")
-        self._topo_order_cache[to_index] = order_arr
+        self._topo_order_cache[cache_key] = order_arr
         return order_arr

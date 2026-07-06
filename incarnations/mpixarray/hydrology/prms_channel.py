@@ -56,6 +56,96 @@ from process import DataArrayMeta, Process
 _SEGMENT_TYPE_LAKE = 2
 
 
+def muskingum_mann_coefficients(
+    ts: np.ndarray,
+    tsi: np.ndarray,
+    c0: np.ndarray,
+    c1: np.ndarray,
+    c2: np.ndarray,
+    mann_n: np.ndarray,
+    seg_slope: np.ndarray,
+    seg_depth: np.ndarray,
+    seg_length: np.ndarray,
+    segment_type: np.ndarray,
+    x_coef: np.ndarray,
+) -> None:
+    """Muskingum-Mann routing coefficients, written IN PLACE (out
+    buffers first), replicating pywatershed
+    PRMSChannel._initialize_channel_data numerics exactly.
+
+    Shared by PRMSChannel.initialize() and the FlowGraph channel node
+    type -- ONE derivation, two consumers. Init-time temporaries only
+    (velocity, Kcoef, masks), never per-step.
+    """
+    n_seg = ts.shape[0]
+
+    velocity = (
+        ((1.0 / mann_n) * np.sqrt(seg_slope) * seg_depth ** (2.0 / 3.0))
+        * 60.0
+        * 60.0
+    )
+    # pywatershed clamps too-flat seg_slope IN PLACE here -- AFTER
+    # velocity, so the edit affects nothing downstream in channel
+    # init. We deliberately do NOT edit the read-only dis variable
+    # (init-time parameter editing gets its own design pass).
+
+    # Kcoef = 24 default; Manning travel time where velocity > 0;
+    # lakes forced to 24; clamped to [0.01, 24]
+    kcoef = np.full(n_seg, 24.0, dtype=np.float64)
+    wh_moving = velocity > 0.0
+    kcoef[wh_moving] = seg_length[wh_moving] / velocity[wh_moving]
+    kcoef = np.where(segment_type == _SEGMENT_TYPE_LAKE, 24.0, kcoef)
+    kcoef = np.where(kcoef < 0.01, 0.01, kcoef)
+    kcoef = np.where(kcoef > 24.0, 24.0, kcoef)
+
+    ts[:] = 1.0
+    tsi[:] = 1
+    # sub-timestep ladder (even divisors of 24 h) -- verbatim
+    for iseg in range(n_seg):
+        kk = kcoef[iseg]
+        if kk < 1.0:
+            tsi[iseg] = -1
+        elif kk < 2.0:
+            ts[iseg] = 1.0
+            tsi[iseg] = 1
+        elif kk < 3.0:
+            ts[iseg] = 2.0
+            tsi[iseg] = 2
+        elif kk < 4.0:
+            ts[iseg] = 3.0
+            tsi[iseg] = 3
+        elif kk < 6.0:
+            ts[iseg] = 4.0
+            tsi[iseg] = 4
+        elif kk < 8.0:
+            ts[iseg] = 6.0
+            tsi[iseg] = 6
+        elif kk < 12.0:
+            ts[iseg] = 8.0
+            tsi[iseg] = 8
+        elif kk < 24.0:
+            ts[iseg] = 12.0
+            tsi[iseg] = 12
+        else:
+            ts[iseg] = 24.0
+            tsi[iseg] = 24
+
+    dd = kcoef - (kcoef * x_coef) + (0.5 * ts)
+    dd = np.where(np.abs(dd) < 1e-6, 0.0001, dd)
+    c0[:] = (-(kcoef * x_coef) + (0.5 * ts)) / dd
+    c1[:] = ((kcoef * x_coef) + (0.5 * ts)) / dd
+    c2[:] = (kcoef - (kcoef * x_coef) - (0.5 * ts)) / dd
+
+    # short travel time
+    wh_short = c2 < 0.0
+    c1[wh_short] += c2[wh_short]
+    c2[wh_short] = 0.0
+    # long travel time
+    wh_long = c0 < 0.0
+    c1[wh_long] += c0[wh_long]
+    c0[wh_long] = 0.0
+
+
 class PRMSChannel(Process):
     """Muskingum-Mann channel routing on the segment grid.
 
@@ -289,85 +379,21 @@ class PRMSChannel(Process):
                 continue
             seg_inflow[jseg] = seg_outflow[iseg]
 
-        # -- Muskingum coefficients --
-        n_seg = tosegment0.shape[0]
-        mann_n = obj["mann_n"].values
-        seg_slope = obj["seg_slope"].values
-        seg_depth = obj["seg_depth"].values
-        seg_length = obj["seg_length"].values
-        segment_type = obj["segment_type"].values
-        x_coef = obj["x_coef"].values
-
-        velocity = (
-            ((1.0 / mann_n) * np.sqrt(seg_slope) * seg_depth ** (2.0 / 3.0))
-            * 60.0
-            * 60.0
+        # -- Muskingum coefficients (module function above; shared with
+        # the FlowGraph channel node type) --
+        muskingum_mann_coefficients(
+            obj["ts"].values,
+            obj["tsi"].values,
+            obj["c0"].values,
+            obj["c1"].values,
+            obj["c2"].values,
+            obj["mann_n"].values,
+            obj["seg_slope"].values,
+            obj["seg_depth"].values,
+            obj["seg_length"].values,
+            obj["segment_type"].values,
+            obj["x_coef"].values,
         )
-        # pywatershed clamps too-flat seg_slope IN PLACE here -- AFTER
-        # velocity, so the edit affects nothing downstream in channel
-        # init. We deliberately do NOT edit the read-only dis variable
-        # (init-time parameter editing gets its own design pass).
-
-        # Kcoef = 24 default; Manning travel time where velocity > 0;
-        # lakes forced to 24; clamped to [0.01, 24]
-        kcoef = np.full(n_seg, 24.0, dtype=np.float64)
-        wh_moving = velocity > 0.0
-        kcoef[wh_moving] = seg_length[wh_moving] / velocity[wh_moving]
-        kcoef = np.where(segment_type == _SEGMENT_TYPE_LAKE, 24.0, kcoef)
-        kcoef = np.where(kcoef < 0.01, 0.01, kcoef)
-        kcoef = np.where(kcoef > 24.0, 24.0, kcoef)
-
-        ts = obj["ts"].values
-        tsi = obj["tsi"].values
-        ts[:] = 1.0
-        tsi[:] = 1
-        # sub-timestep ladder (even divisors of 24 h) -- verbatim
-        for iseg in range(n_seg):
-            kk = kcoef[iseg]
-            if kk < 1.0:
-                tsi[iseg] = -1
-            elif kk < 2.0:
-                ts[iseg] = 1.0
-                tsi[iseg] = 1
-            elif kk < 3.0:
-                ts[iseg] = 2.0
-                tsi[iseg] = 2
-            elif kk < 4.0:
-                ts[iseg] = 3.0
-                tsi[iseg] = 3
-            elif kk < 6.0:
-                ts[iseg] = 4.0
-                tsi[iseg] = 4
-            elif kk < 8.0:
-                ts[iseg] = 6.0
-                tsi[iseg] = 6
-            elif kk < 12.0:
-                ts[iseg] = 8.0
-                tsi[iseg] = 8
-            elif kk < 24.0:
-                ts[iseg] = 12.0
-                tsi[iseg] = 12
-            else:
-                ts[iseg] = 24.0
-                tsi[iseg] = 24
-
-        dd = kcoef - (kcoef * x_coef) + (0.5 * ts)
-        dd = np.where(np.abs(dd) < 1e-6, 0.0001, dd)
-        c0 = obj["c0"].values
-        c1 = obj["c1"].values
-        c2 = obj["c2"].values
-        c0[:] = (-(kcoef * x_coef) + (0.5 * ts)) / dd
-        c1[:] = ((kcoef * x_coef) + (0.5 * ts)) / dd
-        c2[:] = (kcoef - (kcoef * x_coef) - (0.5 * ts)) / dd
-
-        # short travel time
-        wh_short = c2 < 0.0
-        c1[wh_short] += c2[wh_short]
-        c2[wh_short] = 0.0
-        # long travel time
-        wh_long = c0 < 0.0
-        c1[wh_long] += c0[wh_long]
-        c0[wh_long] = 0.0
 
     # ------------------------------------------------------------------
     # Computation

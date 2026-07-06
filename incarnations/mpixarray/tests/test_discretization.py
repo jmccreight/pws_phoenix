@@ -178,6 +178,24 @@ class TestTopologicalOrder:
     def test_cached(self, dis_seg):
         assert dis_seg.topological_order() is dis_seg.topological_order()
 
+    def test_zero_based_convention(self, dis_seg):
+        """The same graph in native-FlowGraph convention (0-based,
+        -1 = outlet) yields the identical order via one_based=False."""
+        to_graph_index = np.array([2, 2, 4, 4, -1, -1], dtype=np.int64)
+        dis_graph = Discretization(
+            ["nnodes"],
+            parameters=xr.Dataset(
+                {"to_graph_index": ("nnodes", to_graph_index)}
+            ),
+            topo_order={"node_order": "to_graph_index"},
+            topo_one_based=False,
+        )
+        assert dis_graph.parameters is not None  # narrows Dataset | None
+        np.testing.assert_array_equal(
+            dis_graph.parameters["node_order"].values,
+            dis_seg.topological_order(),
+        )
+
     def test_missing_variable_raises(self):
         dis = Discretization(["nsegment"], parameters=xr.Dataset())
         with pytest.raises(ValueError, match="not a variable"):

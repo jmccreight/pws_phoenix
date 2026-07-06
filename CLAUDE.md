@@ -15,6 +15,7 @@
   - [Global state: `Time` + `Options` (the "Global" split)](#global-state-time--options-the-global-split)
   - [Phase 2 backlog (separable, layered on top)](#phase-2-backlog-separable-layered-on-top)
   - [Porting pywatershed processes (goal 4; started July 2026)](#porting-pywatershed-processes-goal-4-started-july-2026)
+  - [FlowGraph port: agreed design (July 2026; not yet built)](#flowgraph-port-agreed-design-july-2026-not-yet-built)
   - [Container-model unification (implemented)](#container-model-unification-implemented)
   - [Object model & serial vs MPI](#object-model--serial-vs-mpi)
   - [Forward design (June 2026 discussion): structure, schedule, open topics](#forward-design-june-2026-discussion-structure-schedule-open-topics)
@@ -409,6 +410,86 @@ Port conventions (established by the groundwater port):
   efficiency extension, one batched matmul+Allreduce). Mapped-flux
   names on the segment grid (e.g. `seg_sroff_vol`) are NEW names --
   the first deliberate departure from names-verbatim.
+
+## FlowGraph port: agreed design (July 2026; not yet built)
+
+Stage 3 direction (JLM's call): port pywatershed FlowGraph
+(`base/flow_graph.py`) -- heterogeneous flow-node types composed on one
+DAG (e.g. insert a reservoir into a muskingum network). SERIAL-only
+target, which costs nothing: the graph grid sits exactly where the
+segment grid sits (serial in serial, REPLICATED + MapMPI-fed under MPI
+-- the Step B pattern; no FlowGraph MPI code ever).
+
+Core redesign (a design project, NOT a names-verbatim port): pywatershed
+uses one Python object per node (scalar properties, polymorphic
+dispatch) -- structurally incompatible with numba and our memory
+directive. The phoenix version keeps the CONCEPT, re-expressed as data:
+
+- **FlowGraph = a Process on its own `nnodes` discretization.** The dis
+  owns `to_graph_index` (+ `node_order` via `topo_order=`;
+  `topological_order` gains `one_based=` -- PRMS-legacy connectivity
+  [tosegment, legacy files] is 1-based/0=outlet, native FlowGraph
+  [to_graph_index] is 0-based/-1=outlet; default stays legacy).
+- **Node types dissolve into data**: union-of-fields (all types'
+  params/state as (nnodes,) declarations, nan where not applicable --
+  the flat-pool decision at node granularity; pywatershed's ragged
+  `_addtl_output_vars` dissolves into ordinary variables); `node_type`
+  int codes INTERNAL ONLY -- builders speak names via the composed
+  class (`kind_code(name)` + `{code: name}` map, mapping also stamped
+  into `node_type.attrs` for self-describing datasets). Makers
+  dissolve: data-prep -> initialize() (SHARING the muskingum
+  coefficient derivation refactored out of PRMSChannel.initialize into
+  a module function); instantiation -> nothing (no per-node objects).
+- **`make_flow_graph(kinds=(...))` class FACTORY** -- the class's
+  declarations are the union of its node types' fields, so the class
+  is composed per model; kind codes = position in `kinds`.
+  Model.__init__ itself is UNCHANGED (a FlowGraph is just another
+  process_dict entry; see the mockup in session notes / git history).
+- **Compute = switch-kernel**: per-type scalar `@njit` substep
+  functions (port pywatershed's own `_calculate_subtimestep_numba`
+  numerics) called from ONE njit graph kernel walking `node_order`
+  x 24 substeps; order-exact, zero per-step allocation. Stage 1
+  HARD-CODES the two-branch switch; the registry-dispatch evolution
+  (when the first real new type arrives -- STARFIT) is either
+  `numba.literal_unroll` over a registered function tuple
+  (compiler-generated switch, inlined, recompile per composition) or
+  first-class function types (dynamic, indirect call). The uniform
+  per-type signature is the design crux: preferred = CLOSURE BINDING
+  (each type's factory closes over the .values refs of ITS fields --
+  structural sharing as the binding; numba's rules on WRITING to
+  closure-captured arrays need a spike) vs pass-the-union (clunky
+  fallback). The numba spike is a Stage-1 deliverable.
+- **Inflows**: three Map-fed volume inputs on nnodes + in-kernel sum
+  (the channel map-then-sum decision carried over); inserted nodes =
+  zero ROWS in the weights.
+- **Terminology**: keep names `FlowGraph` / `PRMSChannelFlowNode` /
+  `PassThroughFlowNode` (continuity with pywatershed); say "node
+  TYPE" internally, never "kind" (collides with DataArrayMeta.kind).
+- **Module homes**: `flow_graph.py` at incarnations/mpixarray root
+  (framework infra, beside map.py); node types in `hydrology/`
+  (prms_channel_flow_node.py, pass_through_flow_node.py).
+- **Stage-1 scope + validation**: channel + pass-through types only.
+  Test 1 = pure-channel graph (456 nodes) vs drb seg_outflow answers;
+  test 2 = pywatershed's doctest scenario (insert one pass-through
+  above nhm_seg 1829, 457 nodes) vs same answers on non-inserted
+  nodes. Tolerance **1e-10 = pywatershed's OWN standard** for
+  scalar-node-vs-array muskingum. Graph-building arithmetic
+  (splice/pad) stays test-side; helper (a la
+  prms_channel_flow_graph_to_model_dict) when it stabilizes.
+- **NOT ported** (recorded): Budget + `sink_source` (the motivating
+  case for the deferred Budget design -- reservoirs source/sink mass),
+  plot()/pyvis, initialize_netcdf, InflowExchange factory (revisit
+  with composition), type_check_nodes, allow_disconnected_nodes knob
+  (our topological_order does the permissive prepend; strict/warn =
+  Options item). STARFIT = FlowGraph Stage 2 (the payoff + the
+  registry-dispatch forcing function).
+- **Feeds back to the composition open topic**: heterogeneous
+  sub-units compose as DATA (type codes + union fields + per-type
+  kernel functions), not contained objects.
+
+Build order (agreed): round 1 = framework touches (`one_based=`,
+coefficient-derivation refactor; suite green before proceeding);
+round 2 = flow_graph.py + node types + the two tests + numba spike.
 
 ## Container-model unification (implemented)
 
