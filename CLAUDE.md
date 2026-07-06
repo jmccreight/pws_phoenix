@@ -14,6 +14,7 @@
   - [IO is intentionally NOT apples-to-apples](#io-is-intentionally-not-apples-to-apples)
   - [Global state: `Time` + `Options` (the "Global" split)](#global-state-time--options-the-global-split)
   - [Phase 2 backlog (separable, layered on top)](#phase-2-backlog-separable-layered-on-top)
+  - [Porting pywatershed processes (goal 4; started July 2026)](#porting-pywatershed-processes-goal-4-started-july-2026)
   - [Container-model unification (implemented)](#container-model-unification-implemented)
   - [Object model & serial vs MPI](#object-model--serial-vs-mpi)
   - [Forward design (June 2026 discussion): structure, schedule, open topics](#forward-design-june-2026-discussion-structure-schedule-open-topics)
@@ -109,8 +110,11 @@ split into `globals.py` (`Time`), `data_io.py` (serial IO primitives),
 `discretization.py` (`Discretization`), `map.py` (`Map` + `MapMPI`),
 `process.py` (`DataArrayMeta` + the `Process` ABC), `model.py` (`Model`
 serial + `ModelMPI` streaming), `config.py` (minimal yaml ->
-`(process_dict, control, maps)`; a probe for the `Options` design), and
-`processes_concrete.py` (the toy Upper/Lower processes).
+`(process_dict, control, maps)`; a probe for the `Options` design),
+`processes_concrete.py` (the toy Upper/Lower processes), and
+`hydrology/` (REAL pywatershed process ports, mirroring pywatershed's
+`hydrology/` module structure -- one process per module; see "Porting
+pywatershed processes" below).
 `model.py` is the top of the import stack (it imports `data_io`,
 `discretization`, `globals`, `process`); `config.py` sits beside it (atop
 `map` + `process`); `map.py` is foundational (numpy/xarray only; `Map`
@@ -297,6 +301,61 @@ the `epiweeks` dep).
   spatial vars (only when a real multi-dim output var exists -- it fails
   loudly today); rename `map.py`/`globals.py` (they shadow builtins) when
   this becomes a package.
+- **Budget / ConservativeProcess** (flagged during the PRMSGroundwater
+  port, July 2026): not ported yet; when it comes, SCRUTINIZE its design
+  first (e.g. the separation/combination of mass and energy budgets).
+- **Dis-owned parameters** (same port): pywatershed's
+  `utils/separate_nhm_params.py` splits parameters into per-process
+  files and DIS files (`dis_hru_vars`: hru_area, hru_in_to_cf, ...;
+  `dis_seg_vars`: seg_length, tosegment, ...). Today a port declares
+  dis variables as plain `parameter` fields (structurally shared on the
+  grid dataset); the design item is a Discretization-owned home for
+  them (fits "a discretization holds grid-shared data inherited by its
+  processes" under Forward design).
+
+## Porting pywatershed processes (goal 4; started July 2026)
+
+The staged plan (agreed with JLM): (1) `hydrology/prms_groundwater.py`
+-- PRMSGroundwater on a distributed hru grid, validated against
+pywatershed's drb_2yr answers (`tests/test_prms_groundwater.py`);
+(2) PRMSChannel on the serial segment grid + the hru->segment
+aggregation as an explicit `Map` (pywatershed does it internally via
+`hru_segment` in `_calculate`) -> a REAL two-grid submodel
+(groundwater -> channel, `sroff_vol`/`ssres_flow_vol` from disk);
+(3) optionally PRMSRunoff replacing the disk-fed `sroff_vol`.
+
+Port conventions (established by the groundwater port):
+
+- Names verbatim (params/inputs/variables) -- the pathway back to
+  pywatershed domains and answer files.
+- What is NOT ported: Budget/ConservativeProcess (backlogged, above),
+  adapters, restart, `calc_method` switch (numba is THE path),
+  `verbose`, unused declared params (e.g. `gwstor_min`).
+- Kernels: rewrite pywatershed's allocate-and-return-tuple
+  `_calculate_numpy` to the in-place out-first convention as an
+  EXPLICIT element loop with scalar temporaries -- numba's expression
+  fusion does NOT eliminate NAMED intermediate arrays, so pywatershed's
+  staged array style would allocate every step. Keep the per-element
+  operation order identical to pywatershed's.
+- Validation: pywatershed's own autotest tolerance (rtol=atol=1e-13)
+  against its generated answer files (`test_data/<domain>/output/`,
+  produced by the autotest data-generation workflow -- not checked in).
+  Tests skip cleanly when the data are absent. The pywatershed repo
+  lives at the mpix meta-repo root.
+- **Dim-name gotcha:** pywatershed's generated output files put
+  variables on the `nhm_id` dim; its parameter files use `nhru`.
+  Rename to the grid dim when assembling model inputs (`.rename()`).
+  The framework now REJECTS mismatched input dims at build (serial
+  assembly + `ModelMPI._build`) -- without the check, serial silently
+  "worked" by size coincidence and MPI broadcast-errored
+  mid-collective (July 2026).
+- mpixarray handles UNEVEN decomposition (drb_2yr's 765 HRUs over 4
+  ranks -> 192/191/191/191) -- the toy tests' even sizes were never
+  load-bearing.
+- Known Stage-2 framework needs: a per-process INIT hook for derived
+  quantities (channel's `segment_order` toposort, Kcoef, c0/c1/c2),
+  and a decision on summing the three lateral-inflow fluxes before the
+  hru->segment Map (Map is single-source, apply-once).
 
 ## Container-model unification (implemented)
 

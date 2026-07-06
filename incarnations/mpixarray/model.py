@@ -248,6 +248,7 @@ class Model:
             grid_ds[pp].values.flags.writeable = False
 
         # -- inputs (read-only + mutable) --
+        real_dim = self.discretizations[grid].dims[0]
         inputs_req = cls.get_inputs()
         for ii in inputs_req + cls.get_mutable_inputs():
             if ii in grid_ds:
@@ -259,7 +260,19 @@ class Model:
                         read_only=(ii in inputs_req),
                         load=self._load_all,
                     )
-                grid_ds[ii] = self.inputs_dict[ii].current_values
+                current = self.inputs_dict[ii].current_values
+                if current.dims != (real_dim,):
+                    # A wrong-named spatial dim would silently ride along
+                    # as a SECOND dim on the grid dataset and only "work"
+                    # by size coincidence (e.g. pywatershed forcings on
+                    # "nhm_id" vs params on "nhru").
+                    raise ValueError(
+                        f"process '{proc_name}': input '{ii}' arrives on "
+                        f"dims {current.dims} but grid '{grid}' expects "
+                        f"('{real_dim}',) -- rename the input's spatial "
+                        "dim to the grid dim (xr .rename)."
+                    )
+                grid_ds[ii] = current
             else:
                 # cross-grid input -> the feeding Map's target buffer
                 for mm in self.maps.values():
@@ -269,9 +282,9 @@ class Model:
 
         # -- state variables: initialised (fill + optional initial), once.
         # A process declares its spatial dim as the placeholder "space"; bind
-        # it to this grid's real dim (the grid key). Params/inputs already
-        # arrive on the real dim, so only state vars need resolving. --
-        real_dim = self.discretizations[grid].dims[0]
+        # it to this grid's real dim (the grid key; `real_dim` above).
+        # Params/inputs already arrive on the real dim (inputs validated
+        # above), so only state vars need resolving. --
         for name, meta in cls.get_variables().items():
             if name in grid_ds:
                 continue
@@ -621,6 +634,22 @@ class ModelMPI(Model):
                 f"input(s) {missing} are not produced by any process on "
                 f"grid '{mpi_grid}' and were not found in input_file "
                 f"{input_file!r}."
+            )
+        # ... and fail fast on wrong dims: decompose() splits mpi_grid
+        # only, so an input on another spatial dim (e.g. pywatershed's
+        # "nhm_id" vs "nhru") stays FULL extent and broadcast-errors on
+        # the first src refill, mid-collective.
+        bad_dims = {
+            name: ds_input[name].dims
+            for name in file_input_names
+            if ds_input[name].dims != ("time", mpi_grid)
+        }
+        if bad_dims:
+            raise ValueError(
+                f"input_file streamed input(s) must have dims "
+                f"('time', '{mpi_grid}'); got {bad_dims}. Rename the "
+                "offending dim(s) to the distributed grid dim when "
+                "assembling the input file."
             )
 
         # Split requested outputs by OWNING grid (the process declaring the
