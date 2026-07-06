@@ -12,6 +12,7 @@ import sys
 import numpy as np
 import pytest
 import xarray as xr
+from numba.core.dispatcher import Dispatcher
 
 sys.path.append(str(pl.Path(__file__).parent.parent))
 from model import Model
@@ -94,6 +95,18 @@ class TestRegression:
         """Upper/Lower auto-register in Process._registry on import."""
         assert Process._registry["Upper"] is Upper
         assert Process._registry["Lower"] is Lower
+
+    def test_kernels_jitted(self):
+        """The _calculate kernels are numba Dispatchers and compile in
+        nopython mode (njit: an uncompilable kernel raises here rather
+        than silently falling back to object mode)."""
+        ones = np.ones(3)
+        dt = np.float64(1.0)
+        Upper._calculate(ones.copy(), ones, ones, ones, dt)
+        Lower._calculate(ones.copy(), ones, ones, ones, dt)
+        for kernel in (Upper._calculate, Lower._calculate):
+            assert isinstance(kernel, Dispatcher)
+            assert kernel.signatures  # non-empty <=> actually compiled
 
     def test_zero_copy_inputs(self, toy_ds):
         """In-memory inputs are wired by reference: the caller's arrays ARE

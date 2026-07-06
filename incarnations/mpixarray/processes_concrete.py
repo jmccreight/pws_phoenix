@@ -8,12 +8,14 @@ Upper and Lower: concrete Process subclasses for the toy Upper/Lower model.
   - Instantiated by the Model with the grid's shared dataset: cls(grid_ds).
   - advance(self) / calculate(self, dt, time) are instance methods using
     self._obj.
-  - _calculate is a @staticmethod taking raw numpy arrays -- the natural
-    target for @numba.jit when performance work begins. Convention: the
-    output buffer(s) come first and are written IN PLACE; no return, no
-    per-step allocation (internal temporaries are numba's to eliminate).
+  - _calculate is a @staticmethod taking raw numpy arrays, compiled with
+    @numba.njit (nopython -- uncompilable code raises, no silent
+    object-mode fallback). Convention: the output buffer(s) come first
+    and are written IN PLACE; no return, no per-step allocation (numba
+    fuses the array expressions, eliminating the temporaries).
 """
 
+import numba
 import numpy as np
 from globals import Time
 from process import DataArrayMeta, Process
@@ -69,6 +71,7 @@ class Upper(Process):
         self._obj["flow_previous"].values[:] = self._obj["flow"].values
 
     @staticmethod
+    @numba.njit
     def _calculate(
         flow: np.ndarray,
         flow_previous: np.ndarray,
@@ -76,8 +79,6 @@ class Upper(Process):
         param_up_1: np.ndarray,
         dt: np.float64,
     ) -> None:
-        # Pure numpy, in place into flow -- decorate with @numba.jit when
-        # ready
         flow[:] = flow_previous * np.float64(0.95) + forcing_up * param_up_1
 
     def calculate(self, dt: np.float64, time: Time) -> None:
@@ -142,6 +143,7 @@ class Lower(Process):
         self._obj["storage_previous"].values[:] = self._obj["storage"].values
 
     @staticmethod
+    @numba.njit
     def _calculate(
         storage: np.ndarray,
         storage_previous: np.ndarray,
@@ -149,8 +151,6 @@ class Lower(Process):
         forcing_low: np.ndarray,
         dt: np.float64,
     ) -> None:
-        # Pure numpy, in place into storage -- decorate with @numba.jit when
-        # ready
         storage[:] = (
             storage_previous * np.float64(0.95)
             + flow * np.float64(0.12)

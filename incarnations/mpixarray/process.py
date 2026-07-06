@@ -25,11 +25,11 @@ classmethods (get_parameters, get_inputs, ...) read those declarations
 and are what the Model assembles from.
 
 Heavy computation is delegated to a @staticmethod _calculate(...) that
-takes raw numpy arrays -- no xarray overhead -- making it a natural
-target for @numba.jit(nopython=True). Convention: the output buffer(s)
-come first and are written IN PLACE; _calculate returns nothing and
-allocates nothing per step (internal temporaries are numba's to
-eliminate).
+takes raw numpy arrays -- no xarray overhead -- compiled with
+@numba.njit (nopython: uncompilable code raises, no silent object-mode
+fallback). Convention: the output buffer(s) come first and are written
+IN PLACE; _calculate returns nothing and allocates nothing per step
+(numba fuses the array expressions, eliminating the temporaries).
 
 Run tests with: pytest tests/ -v
 """
@@ -132,12 +132,12 @@ class Process(ABC):
     Numba:
         Heavy inner computation should be delegated to a @staticmethod
         _calculate(...) receiving raw numpy arrays, decorated with
-        @numba.jit(nopython=True). The output buffer(s) come first and
-        are written in place (no return, no per-step allocation):
+        @numba.njit. The output buffer(s) come first and are written in
+        place (no return, no per-step allocation):
 
         class Upper(Process):
             @staticmethod
-            @numba.jit(nopython=True)
+            @numba.njit
             def _calculate(flow, flow_previous, forcing):
                 flow[:] = flow_previous * 0.95 + forcing
 
