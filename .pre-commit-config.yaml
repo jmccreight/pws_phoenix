@@ -1,14 +1,25 @@
 # https://pre-commit.com/
 repos:
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.0
+    rev: v2.1.0
     hooks:
       - id: mypy
         name: mypy (incarnations/mpixarray)
         args: [--check-untyped-defs, --ignore-missing-imports, incarnations/mpixarray/]
         pass_filenames: false
         always_run: true
-        additional_dependencies: [numpy, xarray, netCDF4, pytest]
+        # numpy pinned to the mpix conda env's version: the hook env is
+        # rebuilt from scratch whenever this config changes, and an
+        # unpinned numpy then drifts to latest (whose stubs can outrun
+        # the pinned mypy -- bit us July 2026: numpy-latest stubs vs
+        # mypy v1.11.0 gave 27 spurious errors).
+        # MAINTENANCE (do together, occasionally or when the conda env's
+        # numpy moves):
+        #   1. pre-commit autoupdate --repo <the mirrors-mypy url above>
+        #   2. bump this numpy pin to `conda list numpy`'s version
+        #   3. pre-commit run mypy --all-files
+        additional_dependencies:
+          [numpy==2.4.6, xarray, netCDF4, pytest, types-PyYAML]
   - repo: https://github.com/kynan/nbstripout
     rev: 0.6.1
     hooks:

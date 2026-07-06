@@ -106,13 +106,16 @@ Keep the memory footprint lean and OBVIOUS. Concretely:
 `incarnations/xr/`, since retired -- see git history; its design summary is
 distilled in "Prior art" below) with mpixarray's streaming MPI IO. The code is
 split into `globals.py` (`Time`), `data_io.py` (serial IO primitives),
-`discretization.py` (`Discretization`), `map.py` (`Map`), `process.py`
-(`DataArrayMeta` + the `Process` ABC), `model.py` (`Model` serial + `ModelMPI`
-streaming), and `processes_concrete.py` (the toy Upper/Lower processes).
+`discretization.py` (`Discretization`), `map.py` (`Map` + `MapMPI`),
+`process.py` (`DataArrayMeta` + the `Process` ABC), `model.py` (`Model`
+serial + `ModelMPI` streaming), `config.py` (minimal yaml ->
+`(process_dict, control, maps)`; a probe for the `Options` design), and
+`processes_concrete.py` (the toy Upper/Lower processes).
 `model.py` is the top of the import stack (it imports `data_io`,
-`discretization`, `globals`, `process`); `map.py` is foundational
-(numpy/xarray only; `Map` objects are passed into the Model); `process.py`
-imports only `globals.py`. `Process.new()` and the `PWS` accessor were
+`discretization`, `globals`, `process`); `config.py` sits beside it (atop
+`map` + `process`); `map.py` is foundational (numpy/xarray only; `Map`
+objects are passed into the Model); `process.py` imports only
+`globals.py`. `Process.new()` and the `PWS` accessor were
 retired (July 2026 -- see git history) when the Model took over per-grid
 dataset assembly. Phase 1 is implemented and tested (serial via pytest; MPI
 via pytest-mpi).
@@ -177,14 +180,15 @@ The process holds `time` and does the lookup; `_calculate` receives raw numpy
 - The selective in-place `parameters[pp].load()` before wiring a parameter
   into the grid dataset is still load-bearing for file-backed parameters
   (see `tests/test_ref_behaviors.py`).
-- `Process._registry` (`__init_subclass__`) is currently unused but kept as a
-  deliberate hook for Phase 2+ string -> class resolution (config-file-driven
-  assembly, restart/checkpoint rehydration); assess keep-vs-remove when the
-  first of those lands.
+- `Process._registry` (`__init_subclass__`) is used by
+  `config.load_model_yaml` to resolve process classes named as strings in a
+  yaml configuration (import the defining module first). The other
+  anticipated consumer is restart/checkpoint rehydration.
 - Output: `data_io.Output` — a buffered, time-chunked **zarr** writer (adapted
-  from pywatershed `base/output.py`): one store at `control["output_store"]`
-  (a `.zarr` path, used verbatim -- what you write in the control dict is
-  what appears on disk), all output vars as data_vars, full-chunk
+  from pywatershed `base/output.py`): one store at
+  `control["output_serial_zarr"]` (a `.zarr` path, used verbatim -- what
+  you write in the control dict is what appears on disk), all output vars
+  as data_vars, full-chunk
   **appends** along `time` (the
   first append creates the store; it is never pre-sized/materialized -- peak
   memory = the chunk buffers) + a partial tail at `finalize`. Appends
@@ -252,7 +256,10 @@ The "Global" item is split into two objects with different lifetimes and reach
     either way -- this keeps the serial/MPI fork from deepening.
 - **`Options`** (not yet a class) -- construction-time run config, consumed at
   _build_ and baked into processes; a Process never needs it at runtime. The
-  Model `control` dict plays this role today.
+  Model `control` dict plays this role today. (`config.load_model_yaml` --
+  a minimal yaml -> `(process_dict, control, maps)` loader, July 2026 -- is
+  a first serialization probe for this design; classes resolve by name via
+  `Process._registry`, paths resolve relative to the yaml.)
 
 Mechanism notes:
 
@@ -552,10 +559,10 @@ smallest/riskiest piece (cross-rank comm) last.
   lands the mapped input on every rank, which is what replication consumes.
   Serial->distributed maps (scatter) are NOT implemented. Output under MPI
   is routed by OWNING grid: distributed-grid vars stream via the mpixarray
-  writer (NetCDF, `output_file`); serial-grid vars are collected by a
-  rank-0 zarr `Output` at `control["output_store"]` (a `.zarr` path, used
-  verbatim; everyone computes, one writes -- the rank branch holds NO
-  collectives, so it cannot hang).
+  writer (`control["output_parallel_netcdf"]`); serial-grid vars are
+  collected by a rank-0 zarr `Output` at `control["output_serial_zarr"]`
+  (a `.zarr` path, used verbatim; everyone computes, one writes -- the
+  rank branch holds NO collectives, so it cannot hang).
   Test: `tests/test_two_grid_mpi.py`, validated over all timesteps on both
   grids against the same conftest ground truth as the serial two-grid
   test.

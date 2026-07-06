@@ -84,7 +84,7 @@ class TestRegression:
     def control_config(self, tmp_path):
         return {
             "output_var_names": ["flow", "storage_previous"],
-            "output_store": tmp_path / "output" / "up_low.zarr",
+            "output_serial_zarr": tmp_path / "output" / "up_low.zarr",
             "time_chunk_size": 10,
         }
 
@@ -182,7 +182,7 @@ class TestRegression:
 
         # -- streamed zarr output (full time series) --
         output_ds = xr.open_zarr(
-            control_config["output_store"], consolidated=False
+            control_config["output_serial_zarr"], consolidated=False
         )
         np.testing.assert_allclose(
             output_ds["flow"].values, answers["expected_flow"], rtol=1e-12

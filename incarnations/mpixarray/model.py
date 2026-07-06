@@ -107,13 +107,13 @@ class Model:
         # dict requests output. The MPI path streams output via mpixarray and
         # overrides __init__, so it never reaches this block.
         self.output = None
-        if "output_var_names" in control or "output_store" in control:
+        if "output_var_names" in control or "output_serial_zarr" in control:
             if (
                 "output_var_names" not in control
-                or "output_store" not in control
+                or "output_serial_zarr" not in control
             ):
                 raise ValueError(
-                    "output_var_names and output_store must both be "
+                    "output_var_names and output_serial_zarr must both be "
                     "specified in the control dict."
                 )
             if "time_chunk_size" in control:
@@ -128,7 +128,7 @@ class Model:
             self.output = Output(
                 time_chunk_size=time_chunk_size,
                 variable_names=control["output_var_names"],
-                output_store=pl.Path(control["output_store"]),
+                output_store=pl.Path(control["output_serial_zarr"]),
                 time_values=self.times.values,
             )
             self.output.initialize_variable_tracking(self.model_dict)
@@ -482,15 +482,18 @@ class ModelMPI(Model):
                           grid (forcings + time-varying params as
                           (time, mpi_grid); static params + ICs as
                           (mpi_grid,))
-        output_file       streamed output file (distributed grid, NetCDF)
+        output_parallel_netcdf
+                          the parallel-NetCDF file streamed by the
+                          mpixarray writer (distributed grid)
         output_var_names  state vars to write, routed by OWNING grid:
-                          distributed-grid vars stream to output_file (see
-                          note below); serial-grid vars are collected by a
-                          rank-0 zarr Output at output_store (everyone
-                          computes, one writes)
-        output_store      the zarr store path itself (".zarr" suffix, used
-                          verbatim); required iff serial-grid output vars
-                          are requested
+                          distributed-grid vars stream to
+                          output_parallel_netcdf (see note below);
+                          serial-grid vars are collected by a rank-0 zarr
+                          Output (everyone computes, one writes)
+        output_serial_zarr
+                          the serial zarr store path itself (".zarr"
+                          suffix, used verbatim); required iff serial-grid
+                          output vars are requested
         time_chunk_size   serial-grid Output time chunking (default 365)
         mpi_grid          name of the distributed grid/dim (default "space")
 
@@ -539,7 +542,7 @@ class ModelMPI(Model):
         f64 = np.float64
         control = self._control
         input_file = str(control["input_file"])
-        output_file = str(control["output_file"])
+        output_parallel_netcdf = str(control["output_parallel_netcdf"])
         out_var_names = list(control["output_var_names"])
         mpi_grid = control.get("mpi_grid", "space")
         self._mpi_grid = mpi_grid
@@ -652,7 +655,7 @@ class ModelMPI(Model):
         ]
 
         # ---- Open writer ----
-        ds_mpi_stream.mpi.open_writer(output_file, comm=comm)
+        ds_mpi_stream.mpi.open_writer(output_parallel_netcdf, comm=comm)
 
         # ---- Declare buffers: to_netcdf=False FIRST, to_netcdf=True LAST,
         #      then create() (mpixarray declaration-ordering gotcha). ----
@@ -757,17 +760,17 @@ class ModelMPI(Model):
         #      collectives (local buffering + disk IO only).
         self.output = None
         if serial_out_names:
-            if "output_store" not in control:
+            if "output_serial_zarr" not in control:
                 raise ValueError(
                     f"output_var_names {serial_out_names} live on serial "
-                    "grids: control['output_store'] (a .zarr path) is "
-                    "required for the rank-0 zarr Output."
+                    "grids: control['output_serial_zarr'] (a .zarr path) "
+                    "is required for the rank-0 zarr Output."
                 )
             if comm.rank == 0:
                 self.output = Output(
                     time_chunk_size=control.get("time_chunk_size", 365),
                     variable_names=serial_out_names,
-                    output_store=pl.Path(control["output_store"]),
+                    output_store=pl.Path(control["output_serial_zarr"]),
                     time_values=ds_input["time"].values,
                 )
                 # Track serial-grid processes only: their _obj is

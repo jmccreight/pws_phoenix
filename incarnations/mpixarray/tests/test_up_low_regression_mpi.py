@@ -96,7 +96,7 @@ def mpi_run(mpi_paths):
     process_dict = {"upper": {"class": Upper}, "lower": {"class": Lower}}
     control = {
         "input_file": mpi_paths["input_file"],
-        "output_file": mpi_paths["output_file"],
+        "output_parallel_netcdf": mpi_paths["output_file"],
         "output_var_names": [
             "flow"
         ],  # one streamed output (see ModelMPI note)

@@ -150,13 +150,11 @@ class Process(ABC):
     """
 
     # Registry of concrete subclasses by class name, populated by
-    # __init_subclass__. Currently unused by the Model (process_dict
-    # carries classes directly) -- kept as a deliberate hook for the
-    # Phase 2+ features that need string -> class resolution:
-    # config-file-driven model assembly (processes named in a control
-    # file, as in pywatershed) and restart/checkpoint rehydration
-    # (serialized state can only record a process *name*). Assess
-    # keep-vs-remove when the first of those lands.
+    # __init_subclass__. Used by config.load_model_yaml to resolve
+    # process classes named as strings in a yaml configuration (import
+    # the defining module first -- importing registers). The other
+    # anticipated consumer is restart/checkpoint rehydration
+    # (serialized state can only record a process *name*).
     _registry: dict[str, type] = {}
 
     # Home grid (co-registration). None = the model's single/default grid; a
