@@ -304,25 +304,61 @@ the `epiweeks` dep).
 - **Budget / ConservativeProcess** (flagged during the PRMSGroundwater
   port, July 2026): not ported yet; when it comes, SCRUTINIZE its design
   first (e.g. the separation/combination of mass and energy budgets).
-- **Dis-owned parameters** (same port): pywatershed's
+- **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
   `utils/separate_nhm_params.py` splits parameters into per-process
   files and DIS files (`dis_hru_vars`: hru_area, hru_in_to_cf, ...;
-  `dis_seg_vars`: seg_length, tosegment, ...). Today a port declares
-  dis variables as plain `parameter` fields (structurally shared on the
-  grid dataset); the design item is a Discretization-owned home for
-  them (fits "a discretization holds grid-shared data inherited by its
-  processes" under Forward design).
+  `dis_seg_vars`: seg_length, tosegment, ...). Now:
+  `Discretization(dims, parameters=<dis dataset or Path>)`;
+  `Model`/`ModelMPI` take an optional `discretizations=` dict (MPI:
+  serial grids only -- the distributed grid's dis vars ride in
+  input_file); assembly sources declared parameters **dis-first**, then
+  the process `parameters` dataset. A process still DECLARES the dis
+  vars it reads (`kind="parameter"` -- the declaration states the
+  need). `Discretization.topological_order(to_index)` = generic derived
+  topology (networkx, replicating pywatershed's construction EXACTLY --
+  a different valid order changes float accumulation downstream; a
+  dependency-free ordering is a later step with a tolerance decision).
+  A future `Model.from_yaml()` classmethod (evolution of
+  `config.load_model_yaml`) will construct Discretizations from a yaml
+  section.
+- **Per-process init hook (IMPLEMENTED July 2026)**:
+  `Process.initialize()` (default no-op), called once by the Model
+  after binding/ICs/input-validation, before the run loop; contract =
+  LOCAL (no collectives), no `Time`. Computes
+  **`kind="parameter_derived"`** fields (parameters COMPUTED at init
+  rather than supplied -- e.g. Muskingum c0/c1/c2 from mann_n + dis
+  vars; kept in-model over offline precompute for single-source-of-
+  truth with the calibration params). Allocated like variables
+  (placeholder-dim resolution; int64 fill = iinfo.min), frozen
+  read-only after ALL hooks run. `tests/test_discretization.py`.
+  DELIBERATE later step: pywatershed channel-init *edits* `seg_slope`
+  in place (its own "bad idea" comment) -- must be addressed
+  explicitly, not silently replicated (dis vars are read-only here;
+  note velocity is computed BEFORE the clamp upstream, so the edit is
+  inconsequential within channel init itself).
 
 ## Porting pywatershed processes (goal 4; started July 2026)
 
-The staged plan (agreed with JLM): (1) `hydrology/prms_groundwater.py`
--- PRMSGroundwater on a distributed hru grid, validated against
-pywatershed's drb_2yr answers (`tests/test_prms_groundwater.py`);
-(2) PRMSChannel on the serial segment grid + the hru->segment
-aggregation as an explicit `Map` (pywatershed does it internally via
-`hru_segment` in `_calculate`) -> a REAL two-grid submodel
-(groundwater -> channel, `sroff_vol`/`ssres_flow_vol` from disk);
-(3) optionally PRMSRunoff replacing the disk-fed `sroff_vol`.
+The staged plan (agreed with JLM): (1, DONE) `hydrology/
+prms_groundwater.py` -- PRMSGroundwater on a distributed hru grid,
+validated against pywatershed's drb_2yr answers
+(`tests/test_prms_groundwater{,_mpi}.py`); (2, DONE)
+`hydrology/prms_channel.py` -- PRMSChannel on the serial segment grid
++ the hru->segment aggregation as three explicit Maps (pywatershed
+does it internally via `hru_segment` in `_calculate`) -> a REAL
+two-grid submodel (groundwater live -> channel;
+`sroff_vol`/`ssres_flow_vol` from disk via a carrier process --
+`tests/test_prms_channel{,_mpi}.py`, serial + distributed w/ MapMPI
+x3); (3, next) optionally PRMSRunoff replacing the disk-fed
+`sroff_vol`.
+
+Stage-2 findings: the map-then-sum float-order deviation proved BENIGN
+(all flow vars match at 1e-13); the one tolerance carve-out is
+`seg_stor_change` = (seg_inflow - seg_outflow)*s_per_time -- a
+difference of near-equal numbers, cancellation amplifies the residue
+(1e-7/1e-4; both operands validated at 1e-13). dt is SECONDS
+(86400.0) for real models -- s_per_time = dt in the channel;
+groundwater never reads dt.
 
 Port conventions (established by the groundwater port):
 
@@ -352,10 +388,27 @@ Port conventions (established by the groundwater port):
 - mpixarray handles UNEVEN decomposition (drb_2yr's 765 HRUs over 4
   ranks -> 192/191/191/191) -- the toy tests' even sizes were never
   load-bearing.
-- Known Stage-2 framework needs: a per-process INIT hook for derived
-  quantities (channel's `segment_order` toposort, Kcoef, c0/c1/c2),
-  and a decision on summing the three lateral-inflow fluxes before the
-  hru->segment Map (Map is single-source, apply-once).
+- **Upstream issue to report (ncxarray, July 2026):**
+  `ncxarray/nc_DataArray.py:331` stamps a default `nan` fill value on
+  EVERY written variable, including a `datetime64` `time` coordinate ->
+  "invalid value encountered in cast" RuntimeWarning at write + xarray
+  SerializationWarning ("non-conforming '_FillValue' ... dropping") at
+  read-back. Benign for results; surfaced by the first real
+  datetime64-time output (gw MPI test; the toy never triggered it).
+  Fix belongs in ncxarray: skip/type the fill value for coordinate and
+  non-float variables.
+- Stage-2 framework part (a) is DONE (dis-owned params + init hook +
+  `parameter_derived`; see the Phase-2 backlog entries above).
+  Decisions taken with JLM: `segment_order` is DIS-owned (topology);
+  Kcoef/c0/c1/c2/ts/tsi are PROCESS-owned (`parameter_derived`,
+  computed in `initialize()` from mann_n/x_coef + dis vars); the three
+  lateral-inflow fluxes are mapped to segments SEPARATELY (three Maps,
+  same weights by reference) and summed in the channel kernel
+  (`seg_lateral_inflow` IS channel physics; a 2nd segment process can
+  consume any subset; a multi-variable single-weights Map = flagged
+  efficiency extension, one batched matmul+Allreduce). Mapped-flux
+  names on the segment grid (e.g. `seg_sroff_vol`) are NEW names --
+  the first deliberate departure from names-verbatim.
 
 ## Container-model unification (implemented)
 

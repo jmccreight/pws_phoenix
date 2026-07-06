@@ -29,10 +29,13 @@ Deliberately NOT ported:
 Parameter provenance (pywatershed utils/separate_nhm_params.py):
 hru_area and hru_in_to_cf are DIS_HRU variables -- they belong to the
 hru discretization (parameters_dis_hru.nc), not to this process
-(parameters_PRMSGroundwater.nc). Here both are declared as plain
-"parameter" fields and land on the grid's shared dataset (structurally
-shared with any other process that declares them); a Discretization-
-owned home for dis variables is a flagged design item.
+(parameters_PRMSGroundwater.nc). Both are declared as plain "parameter"
+fields (the declaration states the NEED); the Model sources declared
+parameters DIS-FIRST, so they arrive via
+``Discretization(..., parameters=parameters_dis_hru.nc)`` and land on
+the grid's shared dataset (structurally shared with any other process
+that declares them). Under MPI the distributed grid's dis variables
+ride in the combined input file instead.
 """
 
 import numba

@@ -20,6 +20,7 @@ import pytest
 import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent.parent))
+from discretization import Discretization
 from hydrology.prms_groundwater import PRMSGroundwater
 from model import Model
 
@@ -54,12 +55,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def parameters():
-    """Process parameters + dis_hru variables, merged into one dataset
-    (hru_area / hru_in_to_cf are discretization-owned; see the port's
-    module docstring)."""
-    proc_params = xr.open_dataset(DOMAIN_DIR / "parameters_PRMSGroundwater.nc")
-    dis_hru = xr.open_dataset(DOMAIN_DIR / "parameters_dis_hru.nc")
-    return xr.merge([proc_params, dis_hru], compat="no_conflicts")
+    """PROCESS parameters only -- the dis_hru variables (hru_area,
+    hru_in_to_cf) arrive via the Discretization (dis-first sourcing)."""
+    return xr.open_dataset(DOMAIN_DIR / "parameters_PRMSGroundwater.nc")
 
 
 @pytest.fixture(scope="module")
@@ -92,7 +90,14 @@ def model_run(parameters, tmp_path_factory):
         "output_serial_zarr": out_dir / "prms_groundwater.zarr",
         "time_chunk_size": 61,
     }
-    with Model(process_dict, control) as model:
+    discretizations = {
+        "nhru": Discretization(
+            ["nhru"], parameters=DOMAIN_DIR / "parameters_dis_hru.nc"
+        ),
+    }
+    with Model(
+        process_dict, control, discretizations=discretizations
+    ) as model:
         model.run(np.float64(1.0), np.int32(model.ntime))
     return {"model": model, "control": control}
 

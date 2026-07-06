@@ -10,6 +10,7 @@ dependencies:
   - make
   - ipython
   - netCDF4
+  - networkx  # Discretization.topological_order (pywatershed-identical)
   - numpy>=2.0.0
   - numba
   - pandas>=1.4.0

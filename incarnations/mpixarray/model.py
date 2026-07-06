@@ -60,6 +60,7 @@ class Model:
         control: Dict[str, Any],
         load_all: Union[bool, None] = None,
         maps: Union[Dict[str, Any], None] = None,
+        discretizations: Union[Dict[str, Discretization], None] = None,
     ) -> None:
         # Structure-only copy (NO deepcopy): the model may replace values
         # (Path -> opened object) without mutating the caller's dict, but the
@@ -77,9 +78,19 @@ class Model:
         # one Discretization per distinct home grid; the grid's dict key IS its
         # real spatial dim name (1-D grids: grid identity == dim). The dis owns
         # the grid's shared dataset, assembled + attached during _initialize.
+        # Caller-supplied Discretizations carry dis-owned parameters
+        # (dis_hru/dis_seg style); grids not supplied get the degenerate
+        # default.
         grids = dict.fromkeys(self._proc_grid.values())
+        provided = discretizations or {}
+        unknown_grids = [gg for gg in provided if gg not in grids]
+        if unknown_grids:
+            raise ValueError(
+                f"discretizations {unknown_grids} match no process's home "
+                f"grid (grids in use: {list(grids)})."
+            )
         self.discretizations: Dict[str, Discretization] = {
-            g: Discretization([g]) for g in grids
+            gg: provided.get(gg) or Discretization([gg]) for gg in grids
         }
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._finalized = False
@@ -195,7 +206,19 @@ class Model:
             self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
 
         self._validate_inputs_resolved()
+        self._run_initialize_hooks()
         self._resolve_maps()
+
+    def _run_initialize_hooks(self) -> None:
+        """Call each process's initialize() (author order), then freeze
+        derived parameters -- read-only once ALL hooks have run (a shared
+        derived name is written by its owner before the freeze)."""
+        for kk in self.model_dict:
+            self.model_dict[kk].initialize()
+        for kk, proc in self.model_dict.items():
+            grid_ds = self.discretizations[self._proc_grid[kk]].dataset
+            for name in proc.get_parameters_derived():
+                grid_ds[name].values.flags.writeable = False
 
     def _validate_inputs_resolved(self) -> None:
         """Every declared process input must be present on its grid's shared
@@ -230,21 +253,31 @@ class Model:
             if kkk not in ("class", "discretization")
         }
 
-        # -- parameters: a Dataset (or a Path opened here), loaded once.
-        # Required when the process declares any parameter. --
+        # -- parameters: sourced DIS-FIRST (grid-owned variables live on
+        # the Discretization's own dataset -- dis_hru/dis_seg style), then
+        # the process 'parameters' Dataset (or a Path opened here).
+        # Loaded once, read-only. A process still DECLARES the dis vars
+        # it reads; the declaration states the need, the dis is just the
+        # first-priority source. --
         parameters: xr.Dataset | pl.Path | None = init_dict.get("parameters")
         if isinstance(parameters, pl.Path):
             parameters = xr.open_dataset(parameters)
+        dis_params = self.discretizations[grid].parameters
         for pp in cls.get_parameters():
             if pp in grid_ds:
                 continue
-            if parameters is None:
+            if dis_params is not None and pp in dis_params:
+                source = dis_params
+            elif parameters is not None and pp in parameters:
+                source = parameters
+            else:
                 raise ValueError(
                     f"process '{proc_name}' declares parameter '{pp}' but "
-                    "no 'parameters' were supplied"
+                    f"it is in neither grid '{grid}'s discretization "
+                    "parameters nor the supplied 'parameters'"
                 )
-            parameters[pp].load()
-            grid_ds[pp] = parameters[pp]
+            source[pp].load()
+            grid_ds[pp] = source[pp]
             grid_ds[pp].values.flags.writeable = False
 
         # -- inputs (read-only + mutable) --
@@ -280,12 +313,15 @@ class Model:
                         grid_ds[ii] = mm.target_values
                         break
 
-        # -- state variables: initialised (fill + optional initial), once.
+        # -- state variables + derived parameters: allocated (fill +
+        # optional initial), once. Derived parameters are computed by the
+        # process's initialize() hook and frozen after all hooks run.
         # A process declares its spatial dim as the placeholder "space"; bind
         # it to this grid's real dim (the grid key; `real_dim` above).
         # Params/inputs already arrive on the real dim (inputs validated
-        # above), so only state vars need resolving. --
-        for name, meta in cls.get_variables().items():
+        # above), so only these need resolving. --
+        allocated = cls.get_variables() | cls.get_parameters_derived()
+        for name, meta in allocated.items():
             if name in grid_ds:
                 continue
             dims = tuple(real_dim if dd == "space" else dd for dd in meta.dims)
@@ -531,10 +567,14 @@ class ModelMPI(Model):
         process_dict: dict,
         control: dict,
         maps: Union[Dict[str, Any], None] = None,
+        discretizations: Union[Dict[str, Discretization], None] = None,
     ) -> None:
         # Structure-only copy, as in Model (serial-grid Path values are
         # replaced in place by _load_paths_to_data).
         self._process_dict = {kk: dict(vv) for kk, vv in process_dict.items()}
+        # Caller-supplied Discretizations (dis-owned parameters): SERIAL
+        # grids only -- the distributed grid's data ride in input_file.
+        self._provided_discs: Dict[str, Discretization] = discretizations or {}
         self._control = control
         self.maps: Dict[str, Any] = maps or {}
         self._proc_grid: Dict[str, str] = {
@@ -559,6 +599,20 @@ class ModelMPI(Model):
         out_var_names = list(control["output_var_names"])
         mpi_grid = control.get("mpi_grid", "space")
         self._mpi_grid = mpi_grid
+
+        serial_grids = {
+            gg for gg in self._proc_grid.values() if gg != mpi_grid
+        }
+        bad_discs = [
+            gg for gg in self._provided_discs if gg not in serial_grids
+        ]
+        if bad_discs:
+            raise ValueError(
+                f"discretizations {bad_discs}: pass Discretizations for "
+                f"SERIAL grids only ({sorted(serial_grids)}); the "
+                f"distributed grid '{mpi_grid}' takes its data from "
+                "input_file."
+            )
 
         mpi_classes = {
             kk: vv["class"]
@@ -704,6 +758,21 @@ class ModelMPI(Model):
                 if name not in declared:
                     _declare(name, (mpi_grid,), np.nan, False)
                     declared.add(name)
+        # (a2) derived parameters -- computed by initialize() pre-loop.
+        # NOTE: non-f64 dtypes (e.g. int64) are untested against the
+        # mpixarray buffer declaration until a distributed process
+        # declares one.
+        for cls in mpi_classes.values():
+            for name, meta in cls.get_parameters_derived().items():
+                if name not in declared:
+                    ds_mpi_stream.mpi[name] = {
+                        "dims": (mpi_grid,),
+                        "dtype": meta.dtype,
+                        "fill_value": meta.dtype(_FILL_VALUE[meta.dtype]),
+                        "to_netcdf": False,
+                        "comm": comm,
+                    }
+                    declared.add(name)
         # (b) per-step input buffers (refilled from src)
         for name in file_input_names:
             if name not in declared:
@@ -743,7 +812,9 @@ class ModelMPI(Model):
             if grid != mpi_grid:
                 serial_grid_procs.setdefault(grid, []).append(kk)
         for grid in serial_grid_procs:
-            self.discretizations[grid] = Discretization([grid])
+            self.discretizations[grid] = self._provided_discs.get(
+                grid
+            ) or Discretization([grid])
         self._load_paths_to_data()
         for grid, proc_names in serial_grid_procs.items():
             grid_ds = xr.Dataset()
@@ -759,6 +830,9 @@ class ModelMPI(Model):
             )
 
         self._validate_inputs_resolved()
+        # Per-process init hooks are LOCAL (collective-free) by contract,
+        # so running them inside SPMD assembly is safe.
+        self._run_initialize_hooks()
 
         # ---- Maps: configure the parallel boundary, then resolve. The
         #      decomposed extent comes from an allgather of local sizes

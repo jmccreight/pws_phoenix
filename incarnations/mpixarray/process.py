@@ -62,7 +62,13 @@ class DataArrayMeta:
                                        dtype=np.float64, initial="flow_initial")
     """
 
-    kind: Literal["parameter", "input", "mutable_input", "variable"]
+    kind: Literal[
+        "parameter",
+        "parameter_derived",
+        "input",
+        "mutable_input",
+        "variable",
+    ]
     dims: tuple[str, ...]
     dtype: type
     description: str = ""
@@ -118,7 +124,11 @@ def _dict_of_kind(cls: type, kind: str) -> dict[str, DataArrayMeta]:
 # Process ABC
 # ---------------------------------------------------------------------------
 
-_FILL_VALUE: dict[type, object] = {np.float64: np.nan}
+_FILL_VALUE: dict[type, object] = {
+    np.float64: np.nan,
+    # ints have no nan; use a glaringly-invalid sentinel
+    np.int64: np.iinfo(np.int64).min,
+}
 
 
 class Process(ABC):
@@ -173,6 +183,15 @@ class Process(ABC):
         grid's shared dataset)."""
         return self._obj[key]
 
+    def initialize(self) -> None:
+        """Per-process init hook (default: no-op). Called ONCE by the Model
+        after binding, IC loading, and input validation, before the run
+        loop. Compute `kind="parameter_derived"` fields in place here
+        (e.g. Muskingum coefficients from mann_n + dis variables); the
+        Model freezes them (read-only) after all hooks run. Contract:
+        LOCAL (no collectives), reads params/dis vars off self._obj, no
+        Time (construction, not runtime)."""
+
     @abstractmethod
     def advance(self) -> None:
         """Copy current state to *_previous variables for the next timestep."""
@@ -188,6 +207,12 @@ class Process(ABC):
     @classmethod
     def get_parameters(cls) -> tuple[str, ...]:
         return _keys_of_kind(cls, "parameter")
+
+    @classmethod
+    def get_parameters_derived(cls) -> dict[str, DataArrayMeta]:
+        """Parameters COMPUTED by initialize() rather than supplied
+        (read-only after; metas returned for allocation)."""
+        return _dict_of_kind(cls, "parameter_derived")
 
     @classmethod
     def get_inputs(cls) -> tuple[str, ...]:
