@@ -15,7 +15,7 @@
   - [Global state: `Time` + `Options` (the "Global" split)](#global-state-time--options-the-global-split)
   - [Phase 2 backlog (separable, layered on top)](#phase-2-backlog-separable-layered-on-top)
   - [Porting pywatershed processes (goal 4; started July 2026)](#porting-pywatershed-processes-goal-4-started-july-2026)
-  - [FlowGraph port: agreed design (July 2026; not yet built)](#flowgraph-port-agreed-design-july-2026-not-yet-built)
+  - [FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)](#flowgraph-port-agreed-design-july-2026-stage-1-built--green)
   - [Container-model unification (implemented)](#container-model-unification-implemented)
   - [Object model & serial vs MPI](#object-model--serial-vs-mpi)
   - [Forward design (June 2026 discussion): structure, schedule, open topics](#forward-design-june-2026-discussion-structure-schedule-open-topics)
@@ -411,7 +411,17 @@ Port conventions (established by the groundwater port):
   names on the segment grid (e.g. `seg_sroff_vol`) are NEW names --
   the first deliberate departure from names-verbatim.
 
-## FlowGraph port: agreed design (July 2026; not yet built)
+## FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)
+
+**Status:** Stage 1 implemented and validated (July 2026, first try):
+`flow_graph.py` (make_flow_graph factory + njit switch-kernel),
+`hydrology/prms_channel_flow_node.py` + `pass_through_flow_node.py`,
+`tests/test_flow_graph.py` -- pure-channel graph AND the
+pass-through-insertion (above nhm_seg 1829) scenario both match the
+drb seg_outflow answers at 1e-10 (pywatershed's own scalar-node
+standard). The numba dispatch spike (literal_unroll / closure-array
+writes) is still owed; STARFIT is FlowGraph Stage 2. The design notes
+below remain the record of intent.
 
 Stage 3 direction (JLM's call): port pywatershed FlowGraph
 (`base/flow_graph.py`) -- heterogeneous flow-node types composed on one
