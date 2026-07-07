@@ -124,38 +124,39 @@ _GRAPH_FIELDS = {
         kind="input",
         dims=("space",),
         dtype=np.float64,
-        description="Surface runoff volume at nodes [cf]",
+        description="Surface runoff volume at nodes [io flow units x s]",
     ),
     "node_ssres_flow_vol": DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
-        description="Interflow volume at nodes [cf]",
+        description="Interflow volume at nodes [io flow units x s]",
     ),
     "node_gwres_flow_vol": DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
-        description="Groundwater discharge volume at nodes [cf]",
+        description="Groundwater discharge volume at nodes "
+        "[io flow units x s]",
     ),
     # -- graph variables (pywatershed FlowGraph names) --
     "node_lateral_inflow": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
-        description="Lateral inflow to each node [cfs]",
+        description="Lateral inflow to each node [io flow units]",
     ),
     "node_upstream_inflows": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
-        description="Upstream inflow, daily mean [cfs]",
+        description="Upstream inflow, daily mean [io flow units]",
     ),
     "node_outflows": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
-        description="Node outflow, daily mean [cfs]",
+        description="Node outflow, daily mean [io flow units]",
     ),
     "node_storages": DataArrayMeta(
         kind="variable",
@@ -167,7 +168,7 @@ _GRAPH_FIELDS = {
         kind="variable",
         dims=("space",),
         dtype=np.float64,
-        description="Node storage change [cfs] (node semantics: "
+        description="Node storage change [io flow units] (node semantics: "
         "flow-rate units)",
     ),
     "node_sink_source": DataArrayMeta(

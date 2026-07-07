@@ -5,7 +5,7 @@ SourceSinkFlowNode: a node TYPE for the FlowGraph that adds or removes
 a requested flow, honoring a minimum-flow parameter for sinks. Ported
 from pywatershed hydrology/source_sink_flow_node.py, re-expressed as
 DATA (see flow_graph.py). Sign convention (from the node's
-perspective): sources positive, sinks negative [cfs]. The APPLIED
+perspective): sources positive, sinks negative [io flow units]. The APPLIED
 source/sink is tracked in `node_sink_source` (a sink may be reduced or
 zeroed by the min-flow rule) -- with obsin, a motivating consumer for
 the deferred Budget design.
@@ -93,20 +93,20 @@ class SourceSinkFlowNode:
             dims=("space",),
             dtype=np.float64,
             description="Minimum flow below which sinks are not "
-            "applied (and outflow is not drawn below) [cfs]",
+            "applied (and outflow is not drawn below) [io flow units]",
         ),
         "node_source_sink": DataArrayMeta(
             kind="input",
             dims=("space",),
             dtype=np.float64,
             description="Requested source (+) / sink (-) flow at "
-            "nodes [cfs] (node-perspective sign convention)",
+            "nodes [io flow units] (node-perspective sign convention)",
         ),
         "source_sink_sum": DataArrayMeta(
             kind="variable",
             dims=("space",),
             dtype=np.float64,
-            description="Applied source/sink substep accumulator [cfs]",
+            description="Applied source/sink substep accumulator [io flow units]",
         ),
     }
 

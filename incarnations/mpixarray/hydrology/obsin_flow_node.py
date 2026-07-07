@@ -82,14 +82,14 @@ class ObsInFlowNode:
             kind="input",
             dims=("space",),
             dtype=np.float64,
-            description="Observed/specified flow at nodes [cfs]; "
+            description="Observed/specified flow at nodes [io flow units]; "
             "negative -> pass inflows through",
         ),
         "obsin_sink_source_sum": DataArrayMeta(
             kind="variable",
             dims=("space",),
             dtype=np.float64,
-            description="Obsin sink/source substep accumulator [cfs]",
+            description="Obsin sink/source substep accumulator [io flow units]",
         ),
     }
 

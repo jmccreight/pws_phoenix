@@ -3,6 +3,7 @@
 
 - [Some general ground rules](#some-general-ground-rules)
 - [Project context](#project-context)
+- [Environment (tests and tooling)](#environment-tests-and-tooling)
 - [python assumptions/conventions](#python-assumptionsconventions)
 - [Prime directive: memory](#prime-directive-memory)
 - [incarnations/mpixarray design notes](#incarnationsmpixarray-design-notes)
@@ -79,6 +80,19 @@ please read that.
 Explicitly solved hydrologic models like `pws_phoenix` advances one timestep at a time (Markov dependency via `var_previous`). The spatial dimension is typically an unstructured vector (HRUs), occasionally 2D (x,y). Time × space is therefore the natural chunking shape for scaling studies.
 
 If additional context arises about this project which is useful to add, please let me know
+
+# Environment (tests and tooling)
+
+The env of record is **`pwpx`**, built from `pws_phoenix/environment.yaml`
+(July 2026; previously the meta-repo `mpix` env was used by habit). ONE
+parallel env: the MPI + parallel-IO stack rides in the yaml's marked
+`BEGIN/END parallel-io` block (delete the block = the serial derivation;
+CI's Windows job does this). The mpixarray ecosystem is pip-installed
+into it in dependency order (see README Installation). `pwpx` has
+everything: pytest (+-mpi), mypy, ruff, and the pywatershed import-chain
+deps for the parity tests (pywatershed itself is used from the mpix-root
+clone via sys.path). Run tests from `incarnations/mpixarray/`:
+`./tests/run_tests.sh` (serial + MPI) or `pytest tests/ -q` (serial).
 
 # python assumptions/conventions
 

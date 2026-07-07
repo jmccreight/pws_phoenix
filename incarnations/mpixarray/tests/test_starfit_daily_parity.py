@@ -32,12 +32,13 @@ import pytest
 import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent.parent))
+from conftest import MPIX_ROOT
+from conftest import STARFIT_INDS_TEST as FULL_INDS
 from discretization import Discretization
 from flow_graph import make_flow_graph
 from hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[4]
 STARFIT_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "starfit"
 PARAM_FILE = STARFIT_DIR / "starfit_original_parameters.nc"
 INFLOW_FILE = STARFIT_DIR / "lake_inflow.nc"
@@ -51,13 +52,8 @@ COMPARE_VARS = ["lake_storage", "lake_release", "lake_spill"]
 RTOL = ATOL = 1.0e-10
 S_PER_TIME = np.float64(60.0 * 60.0 * 24.0)
 
-# first N of the standard autotest subset (see test_starfit_flow_node)
-# fmt: off
-STARFIT_INDS_TEST = [
-    0,   1,   2,   3,   4,   5,   6,   8,   9,   10,  11,  12,  13,
-    15,  16,
-][:N_RESERVOIRS]
-# fmt: on
+# a leading slice of the standard autotest subset (conftest)
+STARFIT_INDS_TEST = FULL_INDS[:N_RESERVOIRS]
 
 _missing = [str(ff) for ff in (PARAM_FILE, INFLOW_FILE) if not ff.exists()]
 try:

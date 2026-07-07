@@ -15,7 +15,11 @@ dependencies:
   - git
   - make
   - ipython
-  - netCDF4
+  # != pin matches pyPRMS's requirement so its pip install does NOT
+  # replace the conda build with a PyPI wheel (ABI mismatch with
+  # conda numpy -> "numpy.ndarray size changed" RuntimeWarning);
+  # revisit when pyPRMS lands on conda-forge
+  - netCDF4!=1.7.4
   - networkx  # Discretization.topological_order (pywatershed-identical)
   - numpy>=2.0.0
   - numba
