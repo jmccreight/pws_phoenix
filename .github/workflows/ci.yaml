@@ -18,9 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Build the pwpx serial dev env from environment.yaml (prefer .yaml). The
-      # MPI/mpixarray stack is intentionally absent -- CI runs serial tests only;
-      # the MPI streaming test runs locally / on HPC. See pws_phoenix/CLAUDE.md.
+      # Build the pwpx env from environment.yaml (now includes the
+      # parallel-io block). This fast job runs lint + serial tests only;
+      # the full ecosystem + MPI + platform matrix is ci_ecosystem.yaml.
       - name: Set up environment (pwpx)
         uses: mamba-org/setup-micromamba@v2
         with:
@@ -39,8 +39,12 @@ jobs:
       - name: Run serial tests
         run: |
           cd incarnations/mpixarray
+          # *_mpi.py files import mpi4py at module level -- without it
+          # (this serial env) collection itself errors, so ignore-glob
+          # them all (a bare --ignore of one file rotted as more were
+          # added)
           python -m pytest tests/ -vv -n=4 \
-            --ignore=tests/test_up_low_regression_mpi.py \
+            --ignore-glob='tests/*_mpi.py' \
             --cov=. --cov-report=xml --cov-report=term-missing \
             --junitxml=junit.xml -o junit_family=legacy
 

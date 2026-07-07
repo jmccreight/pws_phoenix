@@ -40,6 +40,23 @@ dependencies:
   - tqdm
   - xarray>=2024.06.0
   - zarr
+  # ---- BEGIN parallel-io ----------------------------------------
+  # The MPI + parallel-HDF5/NetCDF stack (mirrors the mpix meta-repo
+  # environment_parallel_io.yaml) hosting the mpixarray ecosystem
+  # (installed separately, in dependency order -- see the meta-repo
+  # setup_environment.sh or the CI workflow). This block is the ONLY
+  # parallel/serial difference: a serial env (or a platform conda
+  # cannot solve, e.g. Windows has no conda-forge mpich/parallel
+  # hdf5) is derived by DELETING this block -- CI does exactly that
+  # for its Windows cell. Serial pws_phoenix runs never need it
+  # (the mpixarray import is optional).
+  - mpich
+  - mpi4py
+  - hdf5=*=mpi*
+  - h5py=*=mpi*
+  - h5netcdf
+  - pytest-mpi
+  # ---- END parallel-io ------------------------------------------
   - pip:
       - pytest-error-for-skips
       # pywatershed import-chain dep for the A/B parity tests

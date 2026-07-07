@@ -150,15 +150,18 @@ class TestObsInFlowNode:
         ]
     )
 
+    # classmethod: instance-method class-scoped fixtures are
+    # deprecated (PytestRemovedIn10Warning)
     @pytest.fixture(scope="class")
-    def run(self, tmp_path_factory):
+    @classmethod
+    def run(cls, tmp_path_factory):
         out_dir = tmp_path_factory.mktemp("obsin_nodes")
         return run_graph(
             ObsInFlowNode,
             2,
             out_dir,
-            node_obs_flow=time_nnodes_da("node_obs_flow", self.obs),
-            **lateral_vol_inputs(self.inflow),
+            node_obs_flow=time_nnodes_da("node_obs_flow", cls.obs),
+            **lateral_vol_inputs(cls.inflow),
         )
 
     def test_outflows(self, run):
@@ -192,18 +195,21 @@ class TestSourceSinkFlowNode:
     expect_outflows = np.tile([13.0, 10.0, 5.0, 7.0], (N_TIME, 1))
     expect_sink_source = np.tile([3.0, 0.0, -5.0, -3.0], (N_TIME, 1))
 
+    # classmethod: instance-method class-scoped fixtures are
+    # deprecated (PytestRemovedIn10Warning)
     @pytest.fixture(scope="class")
-    def run(self, tmp_path_factory):
+    @classmethod
+    def run(cls, tmp_path_factory):
         out_dir = tmp_path_factory.mktemp("source_sink_nodes")
         return run_graph(
             SourceSinkFlowNode,
             4,
             out_dir,
-            parameters=xr.Dataset({"flow_min": ("nnodes", self.flow_min)}),
+            parameters=xr.Dataset({"flow_min": ("nnodes", cls.flow_min)}),
             node_source_sink=time_nnodes_da(
-                "node_source_sink", self.source_sink
+                "node_source_sink", cls.source_sink
             ),
-            **lateral_vol_inputs(self.inflow),
+            **lateral_vol_inputs(cls.inflow),
         )
 
     def test_outflows(self, run):

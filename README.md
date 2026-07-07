@@ -2,6 +2,11 @@
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 
 - [pws phoenix](#pws-phoenix)
+  - [Installation](#installation)
+    - [Environment (local)](#environment-local)
+    - [The mpixarray ecosystem](#the-mpixarray-ecosystem)
+    - [CI setup (one-time, repo admin)](#ci-setup-one-time-repo-admin)
+    - [Running tests](#running-tests)
   - [Internal design considerations](#internal-design-considerations)
   - [External design considerations](#external-design-considerations)
     - [mpixarray](#mpixarray)
@@ -14,6 +19,71 @@
 
 [![CI](https://github.com/jmccreight/pws_phoenix/actions/workflows/ci.yaml/badge.svg)](https://github.com/jmccreight/pws_phoenix/actions/workflows/ci.yaml)
 [![codecov](https://codecov.io/gh/jmccreight/pws_phoenix/graph/badge.svg?token=4DPR5CDRBS)](https://codecov.io/gh/jmccreight/pws_phoenix)
+
+## Installation
+
+### Environment (local)
+
+`environment.yaml` defines the ONE `pwpx` environment (parallel; a
+serial env is not maintained separately):
+
+```
+conda env create -f environment.yaml   # or: conda env update -n pwpx
+conda activate pwpx
+```
+
+The MPI + parallel-HDF5/NetCDF stack lives in the marked
+`BEGIN/END parallel-io` block of `environment.yaml`. A serial
+environment (e.g. on a platform conda cannot solve the parallel stack
+for -- Windows has no conda-forge mpich/parallel hdf5) is derived by
+deleting that block; CI's Windows job does exactly this. Serial runs
+of `incarnations/mpixarray` never need the block (the `mpixarray`
+import is optional).
+
+### The mpixarray ecosystem
+
+The MPI path needs the local packages installed in dependency order
+(the mpix meta-repo's `setup_environment.sh` does this against
+side-by-side clones):
+
+```
+pip install -e numba_stdlib
+pip install -e mpi4mpi4py
+pip install -e ncxarray
+pip install -e mpixarray
+```
+
+The originals live on code.usgs.gov (`arc/py-hpc`); their
+`requirements.txt` `git+` cross-references must be commented out when
+installing from local clones (`comment_remote_deps.sh` in the
+meta-repo, or the sed in `ci_ecosystem.yaml`).
+
+### CI setup (one-time, repo admin)
+
+`.github/workflows/ci_ecosystem.yaml` runs the full environment +
+ecosystem + MPI suite on ubuntu/macos (and the serial derivation on
+windows). It needs:
+
+1. Private GitHub mirrors of `numba_stdlib`, `mpi4mpi4py`,
+   `ncxarray`, and `mpixarray` under one org/user (e.g.
+   `jmccreight`).
+2. `ECOSYSTEM_ORG` at the top of `ci_ecosystem.yaml` edited to that
+   org/user.
+3. A fine-grained personal access token (Contents: read-only, scoped
+   to just those four repos) stored as the `ECOSYSTEM_READ_PAT`
+   repository secret.
+
+Fork PRs do not receive secrets, so the ecosystem jobs run on
+push/internal PRs only. Test data for the pywatershed-validation
+tests are not available in CI; those tests skip cleanly.
+
+### Running tests
+
+```
+cd incarnations/mpixarray
+./tests/run_tests.sh          # serial suite + each MPI file under mpirun
+pytest tests/ -q              # serial only
+```
 
 ## Internal design considerations
 
