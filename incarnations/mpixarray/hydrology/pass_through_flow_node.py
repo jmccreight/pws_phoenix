@@ -74,7 +74,8 @@ class PassThroughFlowNode:
     finalize = _finalize
 
     @staticmethod
-    def initialize_type(dataset) -> None:
+    def initialize_type(dataset, n_substeps) -> None:
+        # n_substeps unused: pass-through has no substep-length physics
         dataset["accum_inflow"].values[:] = 0.0
 
     @staticmethod

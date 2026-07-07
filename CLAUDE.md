@@ -413,13 +413,15 @@ Port conventions (established by the groundwater port):
 
 ## FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)
 
-**Status:** Stage 1 + Stage 2 Round A implemented and validated (July
-2026). `flow_graph.py` (make_flow_graph factory + njit kernel),
-`hydrology/prms_channel_flow_node.py` + `pass_through_flow_node.py`,
+**Status:** Stage 1 + Stage 2 Rounds A and B implemented and
+validated (July 2026). `flow_graph.py` (make_flow_graph factory +
+njit kernel), `hydrology/prms_channel_flow_node.py` +
+`pass_through_flow_node.py` + `starfit_flow_node.py`,
 `tests/test_flow_graph.py` -- pure-channel graph AND the
 pass-through-insertion (above nhm_seg 1829) scenario both match the
 drb seg_outflow answers at 1e-10 (pywatershed's own scalar-node
-standard).
+standard); `tests/test_starfit_flow_node.py` matches the STARFIT
+reference means at 1e-7 (see Round B below).
 
 **Stage 2 Round A DONE (registry dispatch):** the Stage-1 hand-coded
 2-branch switch is GONE. Each node type now supplies the njit contract
@@ -437,6 +439,42 @@ byte-identical green at 1e-10. Rides `NumbaExperimentalFeatureWarning`
 (literal_unroll, ~21/run). STARFIT = FlowGraph Stage 2 Round B (first
 real new type through the registry). The spike finding below is the
 record of WHY this shape.
+
+**Stage 2 Round B DONE (STARFIT, July 2026):**
+`hydrology/starfit_flow_node.py` -- StarfitFlowNode, the first real
+new type through the registry: NO kernel edit was needed, the contract
+held. Scope (agreed): the HOURLY path only, cms-NATIVE units.
+Framework half (B-1): graph-level `n_substeps` on `make_flow_graph`
+(ALL nodes share it; substep length = 24/n_substeps hours; 24 =
+channel muskingum, 1 = STARFIT-only -- channel/pass-through take and
+ignore the new `initialize_type(dataset, n_substeps)` param); per-step
+`tctx` time-context namedtuple threaded to every `substep` (union of
+the types' optional `time_context` decls; only NEEDED fields computed);
+`Time.current_epiweek` (CDC epiweek 1-53, lazy `epiweeks` import;
+conda-forge package = `epiweeks4cf`, added to environment.yaml).
+Node half (B-2): numerics verbatim from pywatershed
+`_calc_istarf_release` + hourly pre/post-release, scalars at [inode] --
+incl. the ORDER-SENSITIVE `7.0*flow*24.0*60.0*60.0` weekly volumes
+(pywatershed's own warning); `m3ps_to_MCM` =
+(24/n_substeps)*3600/1e6 is a `parameter_derived` per-node broadcast
+so the njit substep reads it from `state`; epiweek 53 folds to 52 in
+`substep`. Parameters FREEZE at assembly => pywatershed's in-node
+data-prep moved OUT of the node: nan `Obs_MEANFLOW_CUMECS` <-
+`inflow_mean` is caller data-prep, nan `initial_storage`
+(NOR-midpoint + start/end active-window gating) is NOT ported --
+`initialize_type` RAISES on both, scoped to its OWN rows via
+`node_type_names` attrs now stamped BEFORE the type hooks (small
+`flow_graph.initialize` reorder). Also NOT ported: `io_in_cfs` (THE
+next STARFIT step -- required to compose STARFIT into a cfs channel
+graph), `compute_daily` (pywatershed flags it for deletion), Budget.
+Validation `tests/test_starfit_flow_node.py` = the pywatershed
+autotest recipe (cms case): 115 reservoirs as isolated outlet nodes
+(`to_graph_index=-1`), n_substeps=1, `lake_inflow.nc` fed as a volume
+input (x 86400; kernel divides by s_per_time), TIME-MEANS of
+lake_storage/lake_release/lake_spill vs
+`starfit_mean_output_1995-2001.nc` at 1e-7 (pywatershed's own
+tolerance) -- green on the first run; full serial + 4-rank MPI sweep
+green.
 
 **Numba dispatch spike DONE (July 2026, numba 0.65.1) -- registry
 mechanism now DECIDED (supersedes the "closure-binding" hope in the

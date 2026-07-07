@@ -389,10 +389,13 @@ def make_flow_graph(
     kernel = _build_graph_kernel(prepare_fns, substep_fns, finalize_fns)
 
     def initialize(self) -> None:
-        for tt_class in node_types:
-            tt_class.initialize_type(self._obj)
-        # self-describing dataset: names by code ride on the variable
+        # self-describing dataset: names by code ride on the variable.
+        # Stamped BEFORE the type hooks so an initialize_type can find
+        # its own code and scope data checks to its OWN rows (other
+        # types' rows hold nan pad).
         self._obj["node_type"].attrs["node_type_names"] = list(type_names)
+        for tt_class in node_types:
+            tt_class.initialize_type(self._obj, n_substeps)
         # cache the graph-state namedtuple ONCE -- references, NOT
         # copies (per the memory prime directive); the serial-grid
         # dataset buffers are stable, and Input buffers update in place.

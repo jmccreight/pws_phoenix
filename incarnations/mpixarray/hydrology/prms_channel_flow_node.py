@@ -195,7 +195,8 @@ class PRMSChannelFlowNode:
     finalize = _finalize
 
     @staticmethod
-    def initialize_type(dataset) -> None:
+    def initialize_type(dataset, n_substeps) -> None:
+        # n_substeps unused: the muskingum ts/tsi ladder assumes 24
         for name in (
             "seg_inflow",
             "seg_outflow",
