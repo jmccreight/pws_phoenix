@@ -5,6 +5,9 @@ channels:
 dependencies:
   - asv
   - click != 8.1.0
+  # contextily + tqdm: pywatershed import-chain deps (parity tests;
+  # contextily feeds only its plotting) -- pyPRMS stays pip-only
+  - contextily
   # epiweeks4cf is the conda-forge name for the `epiweeks` module
   # (Time.current_epiweek -- STARFIT seasonal release)
   - epiweeks4cf
@@ -34,7 +37,12 @@ dependencies:
   - sphinx-autodoc-typehints>=2.2.1
   - sphinx-autosummary-accessors
   - sphinx-copybutton
+  - tqdm
   - xarray>=2024.06.0
   - zarr
   - pip:
       - pytest-error-for-skips
+      # pywatershed import-chain dep for the A/B parity tests
+      # (pywatershed itself is used from the mpix-root repo clone via
+      # sys.path); contextily + tqdm ride in the conda section above
+      - pyPRMS

@@ -38,7 +38,7 @@ def _prepare(inode, state):
 
 
 @numba.njit
-def _substep(istep, inode, state, tctx):
+def _substep(istep, inode, state, tctx, n_sub):
     # tctx (time context) unused: muskingum has no seasonal physics.
     # pywatershed _calculate_subtimestep_numpy, verbatim, scalars at
     # [inode]; inflows read live from the graph state

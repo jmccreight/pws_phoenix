@@ -25,13 +25,15 @@ memory prime directive. Here node types dissolve into DATA:
 **Registry dispatch (Stage 2 Round A).** Compute is ONE in-place njit
 kernel walking ``node_order`` x n_substeps. Each node type contributes
 three njit functions with UNIFORM signatures -- ``prepare(inode,
-state)``, ``substep(istep, inode, state, tctx)``, ``finalize(inode,
-n_sub, state)`` -- where ``state`` is the composition's graph-state
-NAMEDTUPLE (all union arrays) and ``tctx`` is a per-step time-context
-namedtuple (scalars a node needs from model time, e.g. ``epiweek`` for
-STARFIT seasonal release; a type declares what it reads via an optional
-``time_context`` tuple, and only those are computed -- so a graph
-without a seasonal type never touches ``Time.current_epiweek``). The
+state)``, ``substep(istep, inode, state, tctx, n_sub)``,
+``finalize(inode, n_sub, state)`` -- where ``state`` is the
+composition's graph-state NAMEDTUPLE (all union arrays) and ``tctx``
+is a per-step time-context namedtuple (scalars a node needs from model
+time, e.g. ``epiweek`` for STARFIT seasonal release, ``itime_step``
+for the daily node's first-day case; a type declares what it reads via
+an optional ``time_context`` tuple, and only the expensive ones are
+computed on demand -- a graph without a seasonal type never touches
+``Time.current_epiweek``). The
 kernel dispatches each by node-type code via ``numba.literal_unroll``
 over the registered function tuples: a COMPILER-generated switch, one
 branch per type, so ADDING A TYPE NEEDS NO KERNEL EDIT. Writable state
@@ -253,7 +255,7 @@ def _build_graph_kernel(prepare_fns, substep_fns, finalize_fns):
                 ii = 0
                 for fn in literal_unroll(substep_fns):
                     if ii == code:
-                        fn(istep, inode, state, tctx)
+                        fn(istep, inode, state, tctx, n_substeps)
                     ii += 1
                 # route this node's substep outflow downstream
                 to_node = to_graph_index[inode]
@@ -388,7 +390,9 @@ def make_flow_graph(
         nm for tt in node_types for nm in getattr(tt, "time_context", ())
     }
     needs_epiweek = "epiweek" in time_context_needed
-    TimeContext = namedtuple("TimeContext", ["epiweek"])
+    # itime_step (the model timestep index; e.g. the STARFIT daily
+    # node's first-day special case) is free -- always served
+    TimeContext = namedtuple("TimeContext", ["epiweek", "itime_step"])
 
     # per-type njit contract, ordered by type code (= node_types order)
     prepare_fns = tuple(tt.prepare for tt in node_types)
@@ -418,7 +422,7 @@ def make_flow_graph(
     def calculate(self, dt: np.float64, time: Time) -> None:
         # dt is SECONDS (s_per_time); 86400.0 for daily PRMS
         epiweek = np.int64(time.current_epiweek if needs_epiweek else -1)
-        tctx = TimeContext(epiweek)
+        tctx = TimeContext(epiweek, np.int64(time.current_index))
         kernel(self._graph_state, dt, np.int64(n_substeps), tctx)
 
     class_attrs["_node_types"] = tuple(node_types)

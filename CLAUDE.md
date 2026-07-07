@@ -566,6 +566,42 @@ autotest does). Next natural step: a real mixed channel+STARFIT drb
 graph (n_substeps conflict: channel wants 24, STARFIT reference is
 1 substep/day -- needs a decision).
 
+**STARFIT daily mode DONE (July 2026; parity green first run):**
+`hydrology/starfit_daily_flow_node.py` = pywatershed
+compute_daily=True, verbatim -- daily physics inside a sub-daily
+graph: constant outflow through each day's substeps, computed at the
+PREVIOUS day's end from that day's mean inflow (ONE-DAY LAG, a
+forecast structure; first day seeded from the first substep's
+inflow); spill computed WITHOUT capping storage (verbatim).
+**The "fake daily" trick, now documented in 3 places** (daily module
+= the full story; hourly module + test point there): the daily
+reference is CONCURRENT (release from the same day's inflow +
+current storage); the hourly node with n_substeps=1 (one 24-h
+substep) reproduces exactly that, hence the 1e-7 reference matches.
+Daily mode can NEVER match that reference tightly (the lag) -- do
+not "fix" it to. JLM's old can't-match-answers memory = this
+structural lag, most likely. **pywatershed has NO value-level
+validation of daily mode** (node autotest = hourly only; mixed-graph
+autotest pastes actuals as answers for new nodes) -- so validation
+here = A/B PARITY vs pywatershed's own compute_daily node driven
+identically (tests/test_starfit_daily_parity.py; 15 reservoirs x 365
+d x 24 substeps, cms, 1e-10) -- validates the PORT, not the physics.
+Parity needs pywatershed IMPORTABLE: mpix-root clone via sys.path +
+deps pyPRMS (pip) / tqdm / contextily (conda) in environment.yaml;
+skips cleanly otherwise. Framework: substep contract grew to
+`substep(istep, inode, state, tctx, n_sub)` (symmetric w/ finalize;
+daily needs the last-substep test); `tctx` gained `itime_step`
+(free, always served); `initialize_starfit_type` now writes OWN-ROWS
+so family types hold DIFFERENT m3ps_to_MCM in one graph (daily =
+full-day basis regardless of graph n_substeps) + `compute_daily=`
+kwarg; `istarf_release` takes lake_inflow as an ARG (hourly:
+_sub; daily: day mean). Daily requires n_substeps >= 2
+(initialize_type raises; 1-substep first day never reaches the
+last-substep bookkeeping -- latent pywatershed edge, it hardcodes
+24). pywatershed's unused-for-daily `*_sub_next` allocations (except
+lake_outflow_sub_next) NOT ported; no daily source/sink variant
+(pywatershed hardcodes compute_daily=False there).
+
 **Numba dispatch spike DONE (July 2026, numba 0.65.1) -- registry
 mechanism now DECIDED (supersedes the "closure-binding" hope in the
 design notes below):**
