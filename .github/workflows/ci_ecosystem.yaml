@@ -1,0 +1,136 @@
+# CI over the FULL parallel environment + the mpixarray ecosystem,
+# across platforms. Complements ci.yaml (fast ubuntu serial lint +
+# tests, no ecosystem):
+#
+# - ubuntu/macos: build the parallel env from environment.yaml, check
+#   out the four ecosystem repos (PRIVATE GITHUB MIRRORS of the
+#   code.usgs.gov originals) with a read-only PAT, install them in
+#   dependency order, then run the full suite -- serial + every MPI
+#   test file under mpirun (tests/run_tests.sh). Data-dependent
+#   suites (drb/starfit) skip cleanly: no domain data in CI.
+# - windows: DEMONSTRATE the serial derivation -- environment.yaml
+#   with the "parallel-io" block stripped (conda-forge has no mpich /
+#   parallel hdf5 on Windows), no ecosystem, serial tests only
+#   (mpixarray is an optional import; see model.py).
+#
+# Setup required once (see the session notes / CLAUDE.md):
+# 1. Mirror numba_stdlib, mpi4mpi4py, ncxarray, mpixarray to private
+#    GitHub repos under ECOSYSTEM_ORG (edit below).
+# 2. Create a fine-grained PAT, Contents: read-only, scoped to those
+#    four repos; store it as the ECOSYSTEM_READ_PAT repo secret.
+# Note: fork PRs do not receive secrets -- the ecosystem checkout
+# fails there by design; run this workflow on push/internal PRs.
+
+name: CI ecosystem
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  # EDIT ME: the GitHub org/user hosting the private mirrors
+  ECOSYSTEM_ORG: EDIT-ME-org
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      FORCE_COLOR: 1
+    defaults:
+      run:
+        shell: bash -el {0}  # login shell so the micromamba env is active
+
+    steps:
+      # pws_phoenix beside the ecosystem repos = the meta-repo layout
+      - uses: actions/checkout@v4
+        with:
+          path: pws_phoenix
+
+      - name: Derive environment file
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            # the serial derivation the block markers promise
+            sed '/BEGIN parallel-io/,/END parallel-io/d' \
+              pws_phoenix/environment.yaml > environment_ci.yaml
+          else
+            cp pws_phoenix/environment.yaml environment_ci.yaml
+          fi
+
+      - name: Set up environment (pwpx)
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: environment_ci.yaml
+          cache-environment: true
+
+      - name: Check out numba_stdlib
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ECOSYSTEM_ORG }}/numba_stdlib
+          token: ${{ secrets.ECOSYSTEM_READ_PAT }}
+          path: numba_stdlib
+
+      - name: Check out mpi4mpi4py
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ECOSYSTEM_ORG }}/mpi4mpi4py
+          token: ${{ secrets.ECOSYSTEM_READ_PAT }}
+          path: mpi4mpi4py
+
+      - name: Check out ncxarray
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ECOSYSTEM_ORG }}/ncxarray
+          token: ${{ secrets.ECOSYSTEM_READ_PAT }}
+          path: ncxarray
+
+      - name: Check out mpixarray
+        if: runner.os != 'Windows'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ECOSYSTEM_ORG }}/mpixarray
+          token: ${{ secrets.ECOSYSTEM_READ_PAT }}
+          path: mpixarray
+
+      - name: Install ecosystem (dependency order)
+        if: runner.os != 'Windows'
+        run: |
+          # comment_remote_deps.sh equivalent: fresh clones carry
+          # git+ lines pointing at code.usgs.gov (unreachable here);
+          # the side-by-side local clones supply those packages
+          sed -i.bak -E 's|^([^#].*git\+.*)$|# \1|' \
+            numba_stdlib/requirements.txt \
+            mpi4mpi4py/requirements.txt \
+            ncxarray/requirements.txt \
+            mpixarray/requirements.txt
+          pip install -e numba_stdlib
+          pip install -e mpi4mpi4py
+          pip install -e ncxarray
+          pip install -e mpixarray
+
+      # unix: the full sweep (serial suite + each MPI test file under
+      # mpirun; exit code = number of failed suites)
+      - name: Full test sweep (serial + MPI)
+        if: runner.os != 'Windows'
+        run: |
+          cd pws_phoenix/incarnations/mpixarray
+          MPI_CMD="mpirun -n 4" bash tests/run_tests.sh
+
+      # windows: serial only (no ecosystem; *_mpi.py files import
+      # mpi4py at module level -> must be ignore-globbed, collection
+      # itself errors without it)
+      - name: Serial tests
+        if: runner.os == 'Windows'
+        run: |
+          cd pws_phoenix/incarnations/mpixarray
+          python -m pytest tests/ -vv --ignore-glob='tests/*_mpi.py'
