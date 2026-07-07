@@ -50,6 +50,7 @@ no budget consumes it yet), plot()/pyvis, initialize_netcdf,
 InflowExchange, type_check_nodes, allow_disconnected_nodes knob.
 """
 
+import warnings
 from abc import ABCMeta
 from collections import namedtuple
 from typing import cast
@@ -57,9 +58,20 @@ from typing import cast
 import numba
 import numpy as np
 from numba import literal_unroll
+from numba.core.errors import NumbaExperimentalFeatureWarning
 
 from globals import Time
 from process import DataArrayMeta, Process
+
+# The registry dispatch (literal_unroll over per-type function tuples)
+# is built on numba's first-class-function / literal_unroll features,
+# which warn as "experimental" on every graph compile (~21/run). This
+# is a DELIBERATE, verified design choice (dispatch-spike finding, see
+# CLAUDE.md) -- silence the known warning rather than let it drown real
+# output. Revisit if numba ever destabilizes or de-experimentalizes it.
+# (This covers NON-pytest runs; pytest resets warning filters per test,
+# so the pytest config carries the same ignore for the test runner.)
+warnings.filterwarnings("ignore", category=NumbaExperimentalFeatureWarning)
 
 
 class FlowGraphBase(Process):
