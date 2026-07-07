@@ -34,7 +34,8 @@ def _prepare(inode, state):
 
 
 @numba.njit
-def _substep(istep, inode, state):
+def _substep(istep, inode, state, tctx):
+    # tctx (time context) unused: pass-through has no seasonal physics
     flow = (
         state.node_upstream_inflow_sub[inode]
         + state.node_lateral_inflow[inode]

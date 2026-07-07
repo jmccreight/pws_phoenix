@@ -76,6 +76,19 @@ class Time:
         delta = (self.current - wy_start).astype("timedelta64[D]")
         return int(delta.astype(int) + 1)
 
+    @property
+    def current_epiweek(self) -> int:
+        """CDC epiweek (1-53) of the current model time (matches
+        pywatershed utils/time_utils.datetime_epiweek). Lazy-imports
+        `epiweeks` -- only seasonal params (STARFIT) need it, so a run
+        without them never requires the package."""
+        import datetime as _datetime
+
+        import epiweeks
+
+        val = self.current.astype("datetime64[s]").astype(_datetime.datetime)
+        return int(epiweeks.Week.fromdate(val).week)
+
     def set_index(self, index: int) -> None:
         """Point the clock at a specific timestep index."""
         self.current_index = index

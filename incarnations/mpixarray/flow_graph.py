@@ -25,17 +25,23 @@ memory prime directive. Here node types dissolve into DATA:
 **Registry dispatch (Stage 2 Round A).** Compute is ONE in-place njit
 kernel walking ``node_order`` x n_substeps. Each node type contributes
 three njit functions with UNIFORM signatures -- ``prepare(inode,
-state)``, ``substep(istep, inode, state)``, ``finalize(inode, n_sub,
-state)`` -- where ``state`` is the composition's graph-state NAMEDTUPLE
-(all union arrays). The kernel dispatches each by node-type code via
-``numba.literal_unroll`` over the registered function tuples: a
-COMPILER-generated switch, one branch per type, so ADDING A TYPE NEEDS
-NO KERNEL EDIT. Writable state is passed as an ARGUMENT (the namedtuple)
--- captured arrays are readonly under njit; the closure-binding
-alternative is dead (dispatch-spike finding, CLAUDE.md). The three njit
-methods mirror pywatershed's FlowNode contract (prepare_timestep /
+state)``, ``substep(istep, inode, state, tctx)``, ``finalize(inode,
+n_sub, state)`` -- where ``state`` is the composition's graph-state
+NAMEDTUPLE (all union arrays) and ``tctx`` is a per-step time-context
+namedtuple (scalars a node needs from model time, e.g. ``epiweek`` for
+STARFIT seasonal release; a type declares what it reads via an optional
+``time_context`` tuple, and only those are computed -- so a graph
+without a seasonal type never touches ``Time.current_epiweek``). The
+kernel dispatches each by node-type code via ``numba.literal_unroll``
+over the registered function tuples: a COMPILER-generated switch, one
+branch per type, so ADDING A TYPE NEEDS NO KERNEL EDIT. Writable state
+is passed as an ARGUMENT (the namedtuple) -- captured arrays are
+readonly under njit; the closure-binding alternative is dead
+(dispatch-spike finding, CLAUDE.md). The three njit methods mirror
+pywatershed's FlowNode contract (prepare_timestep /
 calculate_subtimestep / finalize_timestep + property harvest folded
-into finalize).
+into finalize). ``n_substeps`` is GRAPH-level (all nodes share it): 24
+for the channel's sub-hourly muskingum, 1 for a STARFIT-only graph.
 
 The graph is a Process on its own ``nnodes`` grid: serial in serial
 runs, REPLICATED + Map-fed under MPI (the Step B pattern) -- no
@@ -205,13 +211,15 @@ def _build_graph_kernel(prepare_fns, substep_fns, finalize_fns):
     a COMPILER-generated switch, one branch per registered type, so
     adding a type needs no kernel edit. ``state`` is the composition's
     graph-state namedtuple (all union arrays); node-type functions read
-    their own inflows and write their own outputs through it. The
-    graph-level work (lateral map-then-sum, downstream routing, outlet
-    collection) stays in the kernel; only per-type physics is dispatched.
+    their own inflows and write their own outputs through it. ``tctx``
+    is the per-step time-context namedtuple (threaded to each substep).
+    The graph-level work (lateral map-then-sum, downstream routing,
+    outlet collection) stays in the kernel; only per-type physics is
+    dispatched.
     """
 
     @numba.njit
-    def kernel(state, s_per_time, n_substeps):
+    def kernel(state, s_per_time, n_substeps, tctx):
         node_order = state.node_order
         node_type = state.node_type
         to_graph_index = state.to_graph_index
@@ -245,7 +253,7 @@ def _build_graph_kernel(prepare_fns, substep_fns, finalize_fns):
                 ii = 0
                 for fn in literal_unroll(substep_fns):
                     if ii == code:
-                        fn(istep, inode, state)
+                        fn(istep, inode, state, tctx)
                     ii += 1
                 # route this node's substep outflow downstream
                 to_node = to_graph_index[inode]
@@ -279,7 +287,9 @@ def _build_graph_kernel(prepare_fns, substep_fns, finalize_fns):
 
 
 def make_flow_graph(
-    node_types: tuple, class_name: str = "FlowGraph"
+    node_types: tuple,
+    class_name: str = "FlowGraph",
+    n_substeps: int = 24,
 ) -> type[FlowGraphBase]:
     """Compose a FlowGraph Process CLASS from node types.
 
@@ -289,15 +299,25 @@ def make_flow_graph(
             position in this tuple. Each must provide: ``type_name``,
             ``fields``, ``initialize_type``/``advance_type`` (numpy),
             and the njit contract ``prepare``/``substep``/``finalize``.
+            A type may optionally declare ``time_context`` (a tuple of
+            time-scalar names it reads, e.g. ``("epiweek",)``); the
+            graph computes only the union and serves them per step in
+            the ``tctx`` namedtuple passed to ``substep``.
         class_name: name of the composed class. Pass a DISTINCT name
             per composition if resolving classes by name
             (Process._registry) -- same-named compositions overwrite.
+        n_substeps: sub-timesteps per model step (GRAPH-level: ALL
+            nodes share it). 24 = the channel's sub-hourly muskingum;
+            a STARFIT-only graph uses 1 (its reference data is one
+            substep/day). Substep length is 24/n_substeps hours.
 
     The composed class declares the UNION of _GRAPH_FIELDS and each
     type's fields; a same-named field shared by two types must be THE
     SAME DataArrayMeta declaration. Any node type with the contract
     composes -- no kernel edit (registry dispatch, see module docstring).
     """
+    if n_substeps < 1:
+        raise ValueError(f"n_substeps must be >= 1, got {n_substeps}")
     # every node type must supply the full contract (fields + the numpy
     # build/advance hooks + the njit prepare/substep/finalize trio)
     required = (
@@ -349,6 +369,19 @@ def make_flow_graph(
     code_of = {nn: ii for ii, nn in enumerate(type_names)}
     node_type_names = {ii: nn for ii, nn in enumerate(type_names)}
 
+    # Time context: per-step scalars a node substep reads (union over
+    # the composed types' optional `time_context` decl). tctx is a
+    # FIXED namedtuple (numba-friendly); a field a type declares is
+    # computed each step, others hold a sentinel (never read). Only the
+    # NEEDED time fields are computed -- so a graph without a seasonal
+    # type (epiweek) never touches Time.current_epiweek (no epiweeks
+    # dependency). Supported fields grow here as node types need them.
+    time_context_needed = {
+        nm for tt in node_types for nm in getattr(tt, "time_context", ())
+    }
+    needs_epiweek = "epiweek" in time_context_needed
+    TimeContext = namedtuple("TimeContext", ["epiweek"])
+
     # per-type njit contract, ordered by type code (= node_types order)
     prepare_fns = tuple(tt.prepare for tt in node_types)
     substep_fns = tuple(tt.substep for tt in node_types)
@@ -373,12 +406,15 @@ def make_flow_graph(
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         # dt is SECONDS (s_per_time); 86400.0 for daily PRMS
-        kernel(self._graph_state, dt, np.int64(24))
+        epiweek = np.int64(time.current_epiweek if needs_epiweek else -1)
+        tctx = TimeContext(epiweek)
+        kernel(self._graph_state, dt, np.int64(n_substeps), tctx)
 
     class_attrs["_node_types"] = tuple(node_types)
     class_attrs["_node_type_codes"] = code_of
     class_attrs["node_type_names"] = node_type_names
     class_attrs["_field_names"] = field_names
+    class_attrs["_n_substeps"] = n_substeps
     class_attrs["initialize"] = initialize
     class_attrs["advance"] = advance
     class_attrs["calculate"] = calculate

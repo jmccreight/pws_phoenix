@@ -5,6 +5,9 @@ channels:
 dependencies:
   - asv
   - click != 8.1.0
+  # epiweeks4cf is the conda-forge name for the `epiweeks` module
+  # (Time.current_epiweek -- STARFIT seasonal release)
+  - epiweeks4cf
   - geopandas
   - git
   - make
