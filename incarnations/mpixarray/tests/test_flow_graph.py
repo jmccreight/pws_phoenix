@@ -1,14 +1,25 @@
 """FlowGraph regression vs pywatershed answers (drb_2yr, serial).
 
-Two scenarios (module-scoped, parametrized):
+Four scenarios (module-scoped, parametrized):
 - pure_channel: a channel-only graph (456 nodes = the drb segments),
-  composed WITHOUT the pass-through type (also exercises the
-  missing-type stand-in path).
+  composed WITHOUT any second type.
 - pass_through_insert: pywatershed's own FlowGraph doctest scenario --
   one pass-through node inserted above nhm_seg 1829 (457 nodes);
   non-inserted nodes must still match.
+- source_sink_insert: the same splice with a NEUTRAL source_sink
+  node (all requests zero -> outflow = inflow) -- reproduces the
+  pass-through behavior exactly, so the same answers apply.
+- obsin_insert: a NEUTRAL obsin as a zero-inflow HEADWATER feeding
+  nhm_seg 1829's node (not intercepting): with negative obs it emits
+  exactly zero, so the answers hold. An INTERCEPTING obsin cannot be
+  neutral: pywatershed's node (ported verbatim) latches the FIRST
+  substep's inflow as its outflow for the whole day when obs < 0,
+  which differs from pass-through under sub-hourly-varying muskingum
+  inflows (found when this test's first version asserted otherwise).
+Branch coverage for the two new types lives in
+test_obsin_source_sink_nodes.py (synthetic, hand-computed).
 
-Both validate node_outflows against the seg_outflow answers at
+All validate node_outflows against the seg_outflow answers at
 rtol = atol = 1e-10 -- pywatershed's OWN standard for its scalar-node
 muskingum vs its array muskingum (its doctest asserts abs < 1e-10).
 
@@ -23,6 +34,7 @@ absent.
 
 import pathlib as pl
 import sys
+from typing import Any
 
 import numpy as np
 import pytest
@@ -31,8 +43,10 @@ import xarray as xr
 sys.path.append(str(pl.Path(__file__).parent.parent))
 from discretization import Discretization
 from flow_graph import make_flow_graph
+from hydrology.obsin_flow_node import ObsInFlowNode
 from hydrology.pass_through_flow_node import PassThroughFlowNode
 from hydrology.prms_channel_flow_node import PRMSChannelFlowNode
+from hydrology.source_sink_flow_node import SourceSinkFlowNode
 from model import Model
 
 MPIX_ROOT = pl.Path(__file__).parents[4]
@@ -89,7 +103,21 @@ def answers():
     return xr.open_dataarray(GEN_DIR / "seg_outflow.nc")
 
 
-@pytest.fixture(scope="module", params=["pure_channel", "pass_through_insert"])
+# the insertion scenarios: type to splice in + its NEUTRAL (=
+# pass-through-equivalent) extra data, built once times are known
+# values are duck-typed node-type classes (see the make_flow_graph
+# contract), hence Any
+INSERT_TYPES: dict[str, Any] = {
+    "pass_through_insert": PassThroughFlowNode,
+    "obsin_insert": ObsInFlowNode,
+    "source_sink_insert": SourceSinkFlowNode,
+}
+
+
+@pytest.fixture(
+    scope="module",
+    params=["pure_channel", *INSERT_TYPES.keys()],
+)
 def graph_run(
     request,
     dis_seg_ds,
@@ -97,7 +125,8 @@ def graph_run(
     weights,
     tmp_path_factory,
 ):
-    insert = request.param == "pass_through_insert"
+    insert_class = INSERT_TYPES.get(request.param)
+    insert = insert_class is not None
     out_dir = tmp_path_factory.mktemp(f"flow_graph_{request.param}")
     n_seg = dis_seg_ds.sizes["nsegment"]
     n_nodes = n_seg + 1 if insert else n_seg
@@ -113,28 +142,35 @@ def graph_run(
     to_graph_index[:n_seg] = (
         dis_seg_ds["tosegment"].values.astype(np.int64) - 1
     )
-    if insert:
+    if insert_class is not None:
         graph_class = make_flow_graph(
-            (PRMSChannelFlowNode, PassThroughFlowNode),
-            class_name="DrbInsertFlowGraph",
+            (PRMSChannelFlowNode, insert_class),
+            class_name=f"Drb{insert_class.__name__}Graph",
         )
         node_type = np.full(
             n_nodes,
             graph_class.node_type_code("prms_channel"),
             dtype=np.int64,
         )
-        node_type[-1] = graph_class.node_type_code("pass_through")
-        # pywatershed doctest splice: the new node goes ABOVE
-        # nhm_seg 1829 -- its upstream nodes now flow into the new
-        # node, the new node flows into it
+        node_type[-1] = graph_class.node_type_code(insert_class.type_name)
         wh_above = int(
             np.where(dis_seg_ds["nhm_seg"].values == NHM_SEG_INSERT_ABOVE)[0][
                 0
             ]
         )
-        wh_below = np.where(to_graph_index[:n_seg] == wh_above)[0]
-        to_graph_index[-1] = wh_above
-        to_graph_index[wh_below] = n_seg
+        if insert_class is ObsInFlowNode:
+            # headwater insertion: the new node feeds nhm_seg 1829's
+            # node but intercepts nothing (zero inflow) -- with
+            # negative obs it emits exactly zero (see module
+            # docstring: an INTERCEPTING obsin cannot be neutral)
+            to_graph_index[-1] = wh_above
+        else:
+            # pywatershed doctest splice: the new node goes ABOVE
+            # nhm_seg 1829 -- its upstream nodes now flow into the
+            # new node, the new node flows into it
+            wh_below = np.where(to_graph_index[:n_seg] == wh_above)[0]
+            to_graph_index[-1] = wh_above
+            to_graph_index[wh_below] = n_seg
     else:
         graph_class = make_flow_graph(
             (PRMSChannelFlowNode,), class_name="DrbChannelFlowGraph"
@@ -172,6 +208,10 @@ def graph_run(
             for vv in ("mann_n", "x_coef")
         }
     )
+    if insert_class is SourceSinkFlowNode:
+        # flow_min = 0: with zero requests, the source branch always
+        # applies (outflow = inflow + 0); channel rows never read it
+        graph_params["flow_min"] = ("nnodes", np.zeros(n_nodes))
 
     # -- inputs: hru volumes PRE-AGGREGATED to nodes (see docstring);
     # inserted node = zero column (no lateral inflow) --
@@ -188,12 +228,35 @@ def graph_run(
             name=NODE_INPUT_NAMES[name],
         )
 
+    node_inputs = {
+        NODE_INPUT_NAMES[nn]: node_input(nn) for nn in INPUT_VOL_NAMES
+    }
+
+    # neutral per-step data for the inserted type (all nodes, all
+    # times; non-member rows are never read)
+    def flat_input(name, fill):
+        times = node_inputs["node_sroff_vol"]["time"].values
+        return xr.DataArray(
+            np.full((times.shape[0], n_nodes), fill),
+            dims=("time", "nnodes"),
+            coords={"time": times},
+            name=name,
+        )
+
+    extra_inputs = {}
+    if insert_class is ObsInFlowNode:
+        # negative observation -> the inserted node passes through
+        extra_inputs["node_obs_flow"] = flat_input("node_obs_flow", -1.0)
+    if insert_class is SourceSinkFlowNode:
+        extra_inputs["node_source_sink"] = flat_input("node_source_sink", 0.0)
+
     process_dict = {
         "flow_graph": {
             "class": graph_class,
             "discretization": "nnodes",
             "parameters": graph_params,
-            **{NODE_INPUT_NAMES[nn]: node_input(nn) for nn in INPUT_VOL_NAMES},
+            **node_inputs,
+            **extra_inputs,
         },
     }
     control = {
@@ -211,6 +274,7 @@ def graph_run(
         "class": graph_class,
         "n_seg": n_seg,
         "insert": insert,
+        "insert_class": insert_class,
     }
 
 
@@ -229,14 +293,23 @@ class TestFlowGraph:
             atol=ATOL,
         )
 
-    def test_pass_through_is_transparent(self, graph_run):
-        """The inserted node's outflow equals the (unchanged) outflow
-        of the node it was inserted above's upstream sum -- cheap
-        structural check: it received flow at all."""
+    def test_inserted_node_is_transparent(self, graph_run):
+        """Cheap structural checks on the inserted node: intercepting
+        types received flow, the obsin headwater emitted exactly zero,
+        and the sink/source-tracking types applied no source or sink
+        (their data are NEUTRAL by construction)."""
         if not graph_run["insert"]:
             pytest.skip("pure-channel scenario has no inserted node")
         proc = graph_run["model"].model_dict["flow_graph"]
-        assert proc["node_outflows"].values[-1] > 0.0
+        if graph_run["insert_class"] is ObsInFlowNode:
+            assert proc["node_outflows"].values[-1] == 0.0
+        else:
+            assert proc["node_outflows"].values[-1] > 0.0
+        if graph_run["insert_class"] in (
+            ObsInFlowNode,
+            SourceSinkFlowNode,
+        ):
+            assert proc["node_sink_source"].values[-1] == 0.0
 
     def test_derived_parameters_frozen(self, graph_run):
         proc = graph_run["model"].model_dict["flow_graph"]

@@ -413,15 +413,18 @@ Port conventions (established by the groundwater port):
 
 ## FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)
 
-**Status:** Stage 1 + Stage 2 Rounds A and B implemented and
+**Status:** Stage 1 + Stage 2 Rounds A, B, and C implemented and
 validated (July 2026). `flow_graph.py` (make_flow_graph factory +
-njit kernel), `hydrology/prms_channel_flow_node.py` +
-`pass_through_flow_node.py` + `starfit_flow_node.py`,
-`tests/test_flow_graph.py` -- pure-channel graph AND the
-pass-through-insertion (above nhm_seg 1829) scenario both match the
-drb seg_outflow answers at 1e-10 (pywatershed's own scalar-node
-standard); `tests/test_starfit_flow_node.py` matches the STARFIT
-reference means at 1e-7 (see Round B below).
+njit kernel); node types `hydrology/prms_channel_flow_node.py`,
+`pass_through_flow_node.py`, `starfit_flow_node.py`,
+`obsin_flow_node.py`, `source_sink_flow_node.py`.
+`tests/test_flow_graph.py` -- pure-channel plus three insertion
+scenarios (pass-through / neutral source_sink splice / neutral obsin
+headwater, all above nhm_seg 1829) match the drb seg_outflow answers
+at 1e-10 (pywatershed's own scalar-node standard);
+`tests/test_starfit_flow_node.py` matches the STARFIT reference means
+at 1e-7 (Round B below); `tests/test_obsin_source_sink_nodes.py` =
+synthetic hand-computed branch coverage (Round C below).
 
 **Stage 2 Round A DONE (registry dispatch):** the Stage-1 hand-coded
 2-branch switch is GONE. Each node type now supplies the njit contract
@@ -475,6 +478,34 @@ lake_storage/lake_release/lake_spill vs
 `starfit_mean_output_1995-2001.nc` at 1e-7 (pywatershed's own
 tolerance) -- green on the first run; full serial + 4-rank MPI sweep
 green.
+
+**Stage 2 Round C DONE (obsin + source_sink, July 2026):**
+`hydrology/obsin_flow_node.py` (outflow = observed/specified flow;
+negative obs = pass through; NOT mass conservative) +
+`hydrology/source_sink_flow_node.py` (outflow = inflow + requested
+source/sink; sinks limited/skipped by `flow_min`) -- two more types
+through the registry, no kernel edits. Port decisions: pywatershed's
+per-node pandas-Series-by-date lookups become `kind="input"` fields
+(`node_obs_flow`, `node_source_sink`) served in lockstep
+(`missing_data_as_zero` NOT ported = data-prep); each type's
+`_seg_outflow` scalar lives directly in the graph's
+`node_outflow_substep` work buffer (own row only) -- sole state is a
+sink/source accumulator; the per-substep running mean collapses to
+one divide in `finalize` (identical value). Both harvest
+`node_sink_source` (obsin: created/discarded flow; source_sink: the
+APPLIED source/sink) = the motivating consumers for the deferred
+Budget design. **Behavioral finding (verbatim pywatershed):** an
+obsin node with obs < 0 LATCHES the first substep's inflow as its
+outflow for the whole day -- NOT pass-through-equivalent under
+sub-hourly-varying upstream muskingum flow (caught by a failing
+first version of the drb equivalence test). Tests:
+`tests/test_obsin_source_sink_nodes.py` (synthetic, hand-computed,
+every branch, no external data -- the first FlowGraph tests that run
+in CI) + two new drb scenarios in `tests/test_flow_graph.py`
+(neutral source_sink splice reproduces the pass-through answers;
+neutral obsin as a zero-inflow HEADWATER above nhm_seg 1829 -- see
+the latching finding). Remaining pywatershed node type:
+starfit_source_sink (combined; after io_in_cfs).
 
 **Numba dispatch spike DONE (July 2026, numba 0.65.1) -- registry
 mechanism now DECIDED (supersedes the "closure-binding" hope in the
