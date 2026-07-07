@@ -419,9 +419,29 @@ Port conventions (established by the groundwater port):
 `tests/test_flow_graph.py` -- pure-channel graph AND the
 pass-through-insertion (above nhm_seg 1829) scenario both match the
 drb seg_outflow answers at 1e-10 (pywatershed's own scalar-node
-standard). The numba dispatch spike (literal_unroll / closure-array
-writes) is still owed; STARFIT is FlowGraph Stage 2. The design notes
-below remain the record of intent.
+standard). STARFIT is FlowGraph Stage 2. The design notes below remain
+the record of intent.
+
+**Numba dispatch spike DONE (July 2026, numba 0.65.1) -- registry
+mechanism now DECIDED (supersedes the "closure-binding" hope in the
+design notes below):**
+- Captured (freevar/global) arrays are `readonly` under `@njit` --
+  writing to one is a TypingError ("Cannot modify readonly array").
+  So the closure-binding signature (`substep(istep, inode)` closing
+  over its own field arrays) is DEAD.
+- Numba rule: writable state must be an ARGUMENT. VERIFIED working
+  registry pattern: per-type `@njit substep(istep, inode, state)`
+  where `state` is a NAMEDTUPLE of the union arrays (array fields of a
+  namedtuple ARGUMENT are writable), dispatched by `literal_unroll`
+  over the function tuple (compiler-generated switch, kernel closes
+  over the tuple, recompiles per composition). Adding a type = add its
+  `substep` fn + its arrays to the state namedtuple; NO kernel edit.
+- Rides `NumbaExperimentalFeatureWarning` (first-class function
+  types) -- experimental but functional in 0.65.1.
+- First-class-function-types + `typed.List` (fully dynamic, no
+  per-composition recompile) also failed only on the readonly-capture
+  issue; would work with the same namedtuple-argument state if that
+  path is ever preferred over literal_unroll.
 
 Stage 3 direction (JLM's call): port pywatershed FlowGraph
 (`base/flow_graph.py`) -- heterogeneous flow-node types composed on one
@@ -460,15 +480,14 @@ directive. The phoenix version keeps the CONCEPT, re-expressed as data:
   numerics) called from ONE njit graph kernel walking `node_order`
   x 24 substeps; order-exact, zero per-step allocation. Stage 1
   HARD-CODES the two-branch switch; the registry-dispatch evolution
-  (when the first real new type arrives -- STARFIT) is either
+  (when the first real new type arrives -- STARFIT) uses
   `numba.literal_unroll` over a registered function tuple
-  (compiler-generated switch, inlined, recompile per composition) or
-  first-class function types (dynamic, indirect call). The uniform
-  per-type signature is the design crux: preferred = CLOSURE BINDING
-  (each type's factory closes over the .values refs of ITS fields --
-  structural sharing as the binding; numba's rules on WRITING to
-  closure-captured arrays need a spike) vs pass-the-union (clunky
-  fallback). The numba spike is a Stage-1 deliverable.
+  (compiler-generated switch, recompile per composition). The uniform
+  per-type signature was the design crux -- RESOLVED by the spike (see
+  the status box above): per-type `@njit substep(istep, inode, state)`
+  with `state` a NAMEDTUPLE of the union arrays (closure-binding is
+  dead -- captured arrays are readonly under njit; namedtuple-argument
+  array fields are writable).
 - **Inflows**: three Map-fed volume inputs on nnodes + in-kernel sum
   (the channel map-then-sum decision carried over); inserted nodes =
   zero ROWS in the weights.
