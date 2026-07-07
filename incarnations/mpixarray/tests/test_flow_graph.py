@@ -41,6 +41,7 @@ import pytest
 import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent.parent))
+from conftest import PYWS_INPUT_VOL_NAMES, pyws_domain_files
 from discretization import Discretization
 from flow_graph import make_flow_graph
 from hydrology.obsin_flow_node import ObsInFlowNode
@@ -49,58 +50,22 @@ from hydrology.prms_channel_flow_node import PRMSChannelFlowNode
 from hydrology.source_sink_flow_node import SourceSinkFlowNode
 from model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[4]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
-GEN_DIR = DOMAIN_DIR / "output"
-
-INPUT_VOL_NAMES = ("sroff_vol", "ssres_flow_vol", "gwres_flow_vol")
-NODE_INPUT_NAMES = {nn: f"node_{nn}" for nn in INPUT_VOL_NAMES}
+DOMAIN = "drb_2yr"
+NODE_INPUT_NAMES = {nn: f"node_{nn}" for nn in PYWS_INPUT_VOL_NAMES}
 DIS_FLOAT_VARS = ("seg_length", "seg_slope", "seg_depth")
 NHM_SEG_INSERT_ABOVE = 1829
 # pywatershed's own scalar-node-vs-array-muskingum standard
 RTOL = ATOL = 1.0e-10
 S_PER_TIME = np.float64(60.0 * 60.0 * 24.0)
 
-_needed = [
-    DOMAIN_DIR / "parameters_PRMSChannel.nc",
-    DOMAIN_DIR / "parameters_dis_seg.nc",
-    GEN_DIR / "seg_outflow.nc",
-] + [GEN_DIR / f"{nn}.nc" for nn in INPUT_VOL_NAMES]
-_missing = [str(ff) for ff in _needed if not ff.exists()]
+_missing = [str(ff) for ff in pyws_domain_files(DOMAIN) if not ff.exists()]
 pytestmark = pytest.mark.skipif(
     bool(_missing),
     reason=(
-        "pywatershed drb_2yr test data not generated; missing: "
+        f"pywatershed {DOMAIN} test data not generated; missing: "
         + ", ".join(_missing[:3])
     ),
 )
-
-
-@pytest.fixture(scope="module")
-def channel_params_ds():
-    return xr.open_dataset(DOMAIN_DIR / "parameters_PRMSChannel.nc")
-
-
-@pytest.fixture(scope="module")
-def dis_seg_ds():
-    return xr.open_dataset(DOMAIN_DIR / "parameters_dis_seg.nc")
-
-
-@pytest.fixture(scope="module")
-def weights(channel_params_ds):
-    """0/1 hru->segment aggregation weights from hru_segment."""
-    hru_segment = channel_params_ds["hru_segment"].values
-    n_seg = channel_params_ds.sizes["nsegment"]
-    ww = np.zeros((n_seg, hru_segment.shape[0]))
-    for ihru in range(hru_segment.shape[0]):
-        if hru_segment[ihru] > 0:
-            ww[hru_segment[ihru] - 1, ihru] = 1.0
-    return ww
-
-
-@pytest.fixture(scope="module")
-def answers():
-    return xr.open_dataarray(GEN_DIR / "seg_outflow.nc")
 
 
 # the insertion scenarios: type to splice in + its NEUTRAL (=
@@ -120,11 +85,12 @@ INSERT_TYPES: dict[str, Any] = {
 )
 def graph_run(
     request,
-    dis_seg_ds,
-    channel_params_ds,
-    weights,
+    pyws_domain,
     tmp_path_factory,
 ):
+    drb = pyws_domain(DOMAIN)
+    dis_seg_ds = drb["dis_seg_ds"]
+    channel_params_ds = drb["channel_params_ds"]
     insert_class = INSERT_TYPES.get(request.param)
     insert = insert_class is not None
     out_dir = tmp_path_factory.mktemp(f"flow_graph_{request.param}")
@@ -213,23 +179,13 @@ def graph_run(
         # applies (outflow = inflow + 0); channel rows never read it
         graph_params["flow_min"] = ("nnodes", np.zeros(n_nodes))
 
-    # -- inputs: hru volumes PRE-AGGREGATED to nodes (see docstring);
-    # inserted node = zero column (no lateral inflow) --
-    def node_input(name):
-        hru_da = xr.open_dataarray(GEN_DIR / f"{name}.nc")
-        node_vals = hru_da.values @ weights.T  # (time, n_seg)
-        if insert:
-            zero_col = np.zeros((node_vals.shape[0], 1))
-            node_vals = np.concatenate([node_vals, zero_col], axis=1)
-        return xr.DataArray(
-            node_vals,
-            dims=("time", "nnodes"),
-            coords={"time": hru_da["time"].values},
-            name=NODE_INPUT_NAMES[name],
-        )
-
+    # -- inputs: hru volumes PRE-AGGREGATED to nodes (conftest
+    # factory; inserted node = zero column, no lateral inflow) --
     node_inputs = {
-        NODE_INPUT_NAMES[nn]: node_input(nn) for nn in INPUT_VOL_NAMES
+        NODE_INPUT_NAMES[nn]: drb["node_vol_input"](
+            nn, NODE_INPUT_NAMES[nn], 1 if insert else 0
+        )
+        for nn in PYWS_INPUT_VOL_NAMES
     }
 
     # neutral per-step data for the inserted type (all nodes, all
@@ -275,11 +231,12 @@ def graph_run(
         "n_seg": n_seg,
         "insert": insert,
         "insert_class": insert_class,
+        "answers": drb["seg_outflow"],
     }
 
 
 class TestFlowGraph:
-    def test_node_outflows_all_timesteps(self, graph_run, answers):
+    def test_node_outflows_all_timesteps(self, graph_run):
         """Channel nodes match the PRMSChannel answers over the full
         run (inserted pass-through excluded -- it has no answer)."""
         output_ds = xr.open_zarr(
@@ -288,7 +245,7 @@ class TestFlowGraph:
         n_seg = graph_run["n_seg"]
         np.testing.assert_allclose(
             output_ds["node_outflows"].values[:, :n_seg],
-            answers.values,
+            graph_run["answers"].values,
             rtol=RTOL,
             atol=ATOL,
         )

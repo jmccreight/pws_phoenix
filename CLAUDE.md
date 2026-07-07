@@ -602,6 +602,29 @@ last-substep bookkeeping -- latent pywatershed edge, it hardcodes
 lake_outflow_sub_next) NOT ported; no daily source/sink variant
 (pywatershed hardcodes compute_daily=False there).
 
+**Mixed channel+STARFIT graph GREEN (July 2026; both reservoir modes
+passed FIRST RUN once ucb_2yr data were generated):**
+`tests/test_mixed_channel_starfit.py` mirrors pywatershed
+test_starfit_flow_graph.py -- **domain = ucb_2yr, NOT drb** (Big
+Sandy, grand_id 419 in starfit/istarf_conus_grand.nc, at its real
+location; the pywatershed test skips all other domains). First
+3-type composition (channel + pass_through + starfit|starfit_daily,
+parametrized over reservoir mode), n_substeps=24, io_in_cfs=True.
+Geometry = the pywatershed helpers' INTERCEPTION semantics (the
+target's upstreams are redirected into the chain): [44426's ups] ->
+PT2 -> STARFIT -> PT3 -> seg 44426, and [44409's ups] -> PT1 ->
+44409 (its disconnected-node wrinkle not replicated). Big Sandy's
+nan initial_storage + NaT start_time -> the NOR-midpoint seed is
+replicated TEST-SIDE (epiweek of time0 - 1 day = the pywatershed
+control-init time; raw week; supplied in Mcf). Checks (pywatershed's
+own rigor -- it has no reference for the reservoir): segments not
+downstream of 44426 match seg_outflow at 1e-10 (the transparent
+44409 chain is NOT ignored); PT transparency + outflow ==
+release+spill at 1e-12. A full pywatershed-FlowGraph A/B is
+deferred (~8M pure-python node-substep calls). conftest gained the
+session `pyws_domain(domain)` factory + `pyws_domain_files()` skip
+helper (test_flow_graph.py now consumes "drb_2yr" through it).
+
 **Numba dispatch spike DONE (July 2026, numba 0.65.1) -- registry
 mechanism now DECIDED (supersedes the "closure-binding" hope in the
 design notes below):**

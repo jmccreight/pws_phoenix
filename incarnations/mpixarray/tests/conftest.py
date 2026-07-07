@@ -16,9 +16,85 @@ intentional and explicit:
   - output backend differs (serial zarr store vs MPI streamed NetCDF).
 """
 
+import pathlib as pl
+
 import numpy as np
 import pytest
 import xarray as xr
+
+# ---- pywatershed-domain FlowGraph data (shared by
+# test_flow_graph.py [drb_2yr] and test_mixed_channel_starfit.py
+# [ucb_2yr]). GENERATED pywatershed test data; consumer modules carry
+# their own skipifs via pyws_domain_files(). ----
+MPIX_ROOT = pl.Path(__file__).parents[4]
+PYWS_TEST_DATA = MPIX_ROOT / "pywatershed" / "test_data"
+PYWS_INPUT_VOL_NAMES = ("sroff_vol", "ssres_flow_vol", "gwres_flow_vol")
+
+
+def pyws_domain_files(domain):
+    """The files a channel FlowGraph test needs from a GENERATED
+    pywatershed domain (for module-level skipifs)."""
+    ddir = PYWS_TEST_DATA / domain
+    gen_dir = ddir / "output"
+    return [
+        ddir / "parameters_PRMSChannel.nc",
+        ddir / "parameters_dis_seg.nc",
+        gen_dir / "seg_outflow.nc",
+        *[gen_dir / f"{nn}.nc" for nn in PYWS_INPUT_VOL_NAMES],
+    ]
+
+
+@pytest.fixture(scope="session")
+def pyws_domain():
+    """Factory: pywatershed domain name -> the channel FlowGraph data
+    (params/dis datasets, hru->segment weights, seg_outflow answers,
+    and a node-volume-input builder), cached per session."""
+    cache: dict = {}
+
+    def _get(domain):
+        if domain in cache:
+            return cache[domain]
+        ddir = PYWS_TEST_DATA / domain
+        gen_dir = ddir / "output"
+        channel_params = xr.open_dataset(ddir / "parameters_PRMSChannel.nc")
+        dis_seg = xr.open_dataset(ddir / "parameters_dis_seg.nc")
+
+        # 0/1 hru->segment aggregation weights from hru_segment
+        hru_segment = channel_params["hru_segment"].values
+        n_seg = channel_params.sizes["nsegment"]
+        weights = np.zeros((n_seg, hru_segment.shape[0]))
+        for ihru in range(hru_segment.shape[0]):
+            if hru_segment[ihru] > 0:
+                weights[hru_segment[ihru] - 1, ihru] = 1.0
+
+        def node_vol_input(name, node_name, n_extra):
+            """hru volumes PRE-AGGREGATED to graph nodes (volumes @
+            weights.T -- identical math and float order to a per-step
+            Map apply; Map/MapMPI wiring is proven by the PRMSChannel
+            submodel tests). Inserted nodes get ZERO columns (no
+            lateral inflow)."""
+            hru_da = xr.open_dataarray(gen_dir / f"{name}.nc")
+            node_vals = hru_da.values @ weights.T  # (time, n_seg)
+            if n_extra:
+                zeros = np.zeros((node_vals.shape[0], n_extra))
+                node_vals = np.concatenate([node_vals, zeros], axis=1)
+            return xr.DataArray(
+                node_vals,
+                dims=("time", "nnodes"),
+                coords={"time": hru_da["time"].values},
+                name=node_name,
+            )
+
+        cache[domain] = {
+            "channel_params_ds": channel_params,
+            "dis_seg_ds": dis_seg,
+            "weights": weights,
+            "seg_outflow": xr.open_dataarray(gen_dir / "seg_outflow.nc"),
+            "node_vol_input": node_vol_input,
+        }
+        return cache[domain]
+
+    return _get
 
 
 @pytest.fixture(scope="session")
