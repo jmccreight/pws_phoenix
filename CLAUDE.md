@@ -413,14 +413,30 @@ Port conventions (established by the groundwater port):
 
 ## FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)
 
-**Status:** Stage 1 implemented and validated (July 2026, first try):
-`flow_graph.py` (make_flow_graph factory + njit switch-kernel),
+**Status:** Stage 1 + Stage 2 Round A implemented and validated (July
+2026). `flow_graph.py` (make_flow_graph factory + njit kernel),
 `hydrology/prms_channel_flow_node.py` + `pass_through_flow_node.py`,
 `tests/test_flow_graph.py` -- pure-channel graph AND the
 pass-through-insertion (above nhm_seg 1829) scenario both match the
 drb seg_outflow answers at 1e-10 (pywatershed's own scalar-node
-standard). STARFIT is FlowGraph Stage 2. The design notes below remain
-the record of intent.
+standard).
+
+**Stage 2 Round A DONE (registry dispatch):** the Stage-1 hand-coded
+2-branch switch is GONE. Each node type now supplies the njit contract
+`prepare(inode, state)` / `substep(istep, inode, state)` /
+`finalize(inode, n_sub, state)` (uniform sigs; `state` = the
+composition's graph-state NAMEDTUPLE of all union arrays, built once in
+initialize() -- refs, no per-step alloc) alongside numpy
+`initialize_type`/`advance_type` + `fields`. The kernel
+(`_build_graph_kernel`) dispatches each via `literal_unroll` over the
+per-type function tuples; graph-level work (lateral sum, routing,
+outlet) stays in the kernel. `_KERNEL_TYPE_NAMES` gate + `_UNUSED`
+stand-ins DELETED; a node-type-contract check replaces them. Adding a
+type = write the 5 methods + declare fields, NO kernel edit. Tests
+byte-identical green at 1e-10. Rides `NumbaExperimentalFeatureWarning`
+(literal_unroll, ~21/run). STARFIT = FlowGraph Stage 2 Round B (first
+real new type through the registry). The spike finding below is the
+record of WHY this shape.
 
 **Numba dispatch spike DONE (July 2026, numba 0.65.1) -- registry
 mechanism now DECIDED (supersedes the "closure-binding" hope in the
@@ -475,18 +491,17 @@ directive. The phoenix version keeps the CONCEPT, re-expressed as data:
   is composed per model; kind codes = position in `kinds`.
   Model.__init__ itself is UNCHANGED (a FlowGraph is just another
   process_dict entry; see the mockup in session notes / git history).
-- **Compute = switch-kernel**: per-type scalar `@njit` substep
-  functions (port pywatershed's own `_calculate_subtimestep_numba`
-  numerics) called from ONE njit graph kernel walking `node_order`
-  x 24 substeps; order-exact, zero per-step allocation. Stage 1
-  HARD-CODES the two-branch switch; the registry-dispatch evolution
-  (when the first real new type arrives -- STARFIT) uses
-  `numba.literal_unroll` over a registered function tuple
-  (compiler-generated switch, recompile per composition). The uniform
-  per-type signature was the design crux -- RESOLVED by the spike (see
-  the status box above): per-type `@njit substep(istep, inode, state)`
-  with `state` a NAMEDTUPLE of the union arrays (closure-binding is
-  dead -- captured arrays are readonly under njit; namedtuple-argument
+- **Compute = switch-kernel (IMPLEMENTED via registry dispatch, Round
+  A)**: per-type scalar `@njit` substep functions (pywatershed's own
+  `_calculate_subtimestep` numerics) called from ONE njit graph kernel
+  walking `node_order` x 24 substeps; order-exact, zero per-step
+  allocation. The registry dispatch uses `numba.literal_unroll` over
+  the per-type function tuples (compiler-generated switch, recompile
+  per composition). The uniform per-type signature was the design crux
+  -- RESOLVED by the spike (see the status box above): per-type `@njit
+  substep(istep, inode, state)` with `state` a NAMEDTUPLE of the union
+  arrays (closure-binding is dead -- captured arrays are readonly under
+  njit; namedtuple-argument
   array fields are writable).
 - **Inflows**: three Map-fed volume inputs on nnodes + in-kernel sum
   (the channel map-then-sum decision carried over); inserted nodes =

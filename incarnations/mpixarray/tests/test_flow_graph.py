@@ -255,10 +255,15 @@ class TestFlowGraph:
         )
         assert graph_class.node_type_names[0] == "prms_channel"
 
-    def test_unknown_node_type_raises(self):
+    def test_incomplete_node_type_raises(self):
+        """A type missing the njit contract (prepare/substep/finalize)
+        is rejected with a clear error -- registry dispatch means ANY
+        conforming type composes, so the gate is the contract, not a
+        name allow-list."""
+
         class BogusFlowNode:
             type_name = "bogus"
             fields: dict = {}
 
-        with pytest.raises(ValueError, match="not supported"):
+        with pytest.raises(ValueError, match="contract attribute"):
             make_flow_graph((BogusFlowNode,))

@@ -7,10 +7,9 @@ Ported from pywatershed hydrology/prms_channel_flow_graph.py
 (see flow_graph.py): the maker's coefficient derivation becomes
 initialize_type (SHARING muskingum_mann_coefficients with PRMSChannel
 -- one derivation, two consumers); the per-node scalar state becomes
-(nnodes,) arrays; the node's `_calculate_subtimestep` numerics are
-(Stage 1) inlined in the flow_graph kernel switch. A uniform-signature
-substep-function contract (registry dispatch) is the recorded
-evolution -- see CLAUDE.md.
+(nnodes,) arrays; the node's `_calculate_subtimestep` numerics become
+the njit `substep` (pywatershed _calculate_subtimestep_numpy verbatim,
+scalars at [inode]), dispatched by the graph kernel via literal_unroll.
 
 Numerics notes (pywatershed node semantics, kept verbatim):
 - routing state starts at ZERO (the node maker passes no
@@ -24,10 +23,60 @@ Numerics notes (pywatershed node semantics, kept verbatim):
   write its OWN rows of any field it shares with another type.
 """
 
+import numba
 import numpy as np
 
 from hydrology.prms_channel import muskingum_mann_coefficients
 from process import DataArrayMeta
+
+
+@numba.njit
+def _prepare(inode, state):
+    state.seg_inflow[inode] = 0.0
+    state.seg_outflow[inode] = 0.0
+    state.inflow_ts[inode] = 0.0
+
+
+@numba.njit
+def _substep(istep, inode, state):
+    # pywatershed _calculate_subtimestep_numpy, verbatim, scalars at
+    # [inode]; inflows read live from the graph state
+    inflow_up = state.node_upstream_inflow_sub[inode]
+    inflow_lat = state.node_lateral_inflow[inode]
+    seg_current_inflow = inflow_lat + inflow_up
+    state.seg_inflow[inode] += seg_current_inflow
+    state.inflow_ts[inode] += seg_current_inflow
+
+    remainder = (istep + 1) % state.tsi[inode]
+    if remainder == 0:
+        # node routed on the current hour
+        state.inflow_ts[inode] /= state.ts[inode]
+        if state.tsi[inode] > 0:
+            # Muskingum routing equation
+            state.outflow_ts[inode] = (
+                state.inflow_ts[inode] * state.c0[inode]
+                + state.inflow_ts_prev[inode] * state.c1[inode]
+                + state.outflow_ts[inode] * state.c2[inode]
+            )
+        else:
+            state.outflow_ts[inode] = state.inflow_ts[inode]
+        state.inflow_ts_prev[inode] = state.inflow_ts[inode]
+        state.inflow_ts[inode] = 0.0
+
+    state.seg_outflow[inode] += state.outflow_ts[inode]
+    state.node_outflow_substep[inode] = state.outflow_ts[inode]
+
+
+@numba.njit
+def _finalize(inode, n_sub, state):
+    state.seg_outflow[inode] /= n_sub
+    state.seg_inflow[inode] /= n_sub
+    state.node_outflows[inode] = state.seg_outflow[inode]
+    state.node_storage_changes[inode] = (
+        state.seg_inflow[inode] - state.seg_outflow[inode]
+    )
+    state.node_storages[inode] = np.nan
+    state.node_sink_source[inode] = 0.0
 
 
 class PRMSChannelFlowNode:
@@ -138,6 +187,11 @@ class PRMSChannelFlowNode:
             description="Previous sub-timestep inflow (routing state)",
         ),
     }
+
+    # njit node contract (Dispatchers; dispatched by the graph kernel)
+    prepare = _prepare
+    substep = _substep
+    finalize = _finalize
 
     @staticmethod
     def initialize_type(dataset) -> None:
