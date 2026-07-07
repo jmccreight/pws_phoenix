@@ -413,11 +413,12 @@ Port conventions (established by the groundwater port):
 
 ## FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)
 
-**Status:** Stage 1 + Stage 2 Rounds A, B, and C implemented and
-validated (July 2026). `flow_graph.py` (make_flow_graph factory +
-njit kernel); node types `hydrology/prms_channel_flow_node.py`,
-`pass_through_flow_node.py`, `starfit_flow_node.py`,
-`obsin_flow_node.py`, `source_sink_flow_node.py`.
+**Status:** Stage 1 + Stage 2 Rounds A-D implemented and validated
+(July 2026) -- ALL pywatershed flow-node types are ported.
+`flow_graph.py` (make_flow_graph factory + njit kernel); node types
+`hydrology/prms_channel_flow_node.py`, `pass_through_flow_node.py`,
+`starfit_flow_node.py`, `obsin_flow_node.py`,
+`source_sink_flow_node.py`, `starfit_source_sink_flow_node.py`.
 `tests/test_flow_graph.py` -- pure-channel plus three insertion
 scenarios (pass-through / neutral source_sink splice / neutral obsin
 headwater, all above nhm_seg 1829) match the drb seg_outflow answers
@@ -504,8 +505,66 @@ every branch, no external data -- the first FlowGraph tests that run
 in CI) + two new drb scenarios in `tests/test_flow_graph.py`
 (neutral source_sink splice reproduces the pass-through answers;
 neutral obsin as a zero-inflow HEADWATER above nhm_seg 1829 -- see
-the latching finding). Remaining pywatershed node type:
-starfit_source_sink (combined; after io_in_cfs).
+the latching finding).
+
+**Stage 2 Round D DONE (starfit_source_sink, July 2026) -- ALL
+pywatershed flow-node types now ported:**
+`hydrology/starfit_source_sink_flow_node.py` -- STARFIT whose
+sources/sinks divert STORAGE (before the release calc), min-storage
+rule for sinks. pywatershed subclasses StarfitFlowNode; here the same
+seams are SHARED njit helpers refactored out of starfit_flow_node.py
+(pre_release_calculations / istarf_release(storage as ARG) /
+post_release_calculations(applied-diversion as ARG; 0.0 for the plain
+node = IEEE identity, byte-equivalent -- Round B test stayed green
+through the refactor) + starfit_prepare/starfit_finalize/
+initialize_starfit_type(type_name)/starfit_advance_type). The
+combined substep = pre -> diversion calc -> release(from
+lake_storage_after_source_sink) -> post(+applied diversion in the
+storage change); finalize overwrites node_sink_source with the
+applied-diversion running mean. `node_source_sink` input META is
+SHARED with SourceSinkFlowNode (same object -- one array serves both
+in a mixed graph). Names adopt pywatershed's own "very confusing"
+TODO: `lake_sink_source_sub`/`lake_sink_source`/
+`lake_sink_source_accum` (= its _source_sink/_sink_source/
+_sink_source_sum). NOT ported: `_negative_sink_source`
+(Budget-only). Validation mirrors pywatershed's OWN combined-node
+autotest (cms): tiny constant sink (-28e-17), storage_min=0, same
+115-reservoir reference means at 1e-7 -- parametrized into
+tests/test_starfit_flow_node.py; plus an applied-diversion check
+(one reservoir drains to empty and exercises the min-storage
+limiting branch for free). Family caveat: a both-starfit-types graph
+runs the shared advance twice -- safe (idempotent march; see
+starfit_advance_type docstring).
+
+**io_in_cfs DONE (July 2026) -- STARFIT composes into cfs graphs:**
+`make_flow_graph(..., io_in_cfs=True)` (GRAPH-level flow units;
+default True = the pywatershed/NHM convention), threaded to the
+hooks: `initialize_type(dataset, n_substeps, io_in_cfs)` (contract
+grew again; the 4 unit-agnostic types ignore it -- muskingum/
+pass-through/obsin/source_sink are linear in flow). DESIGN: no
+branches in njit code -- the STARFIT family gets two
+parameter_derived per-node broadcasts `io_to_cms` / `cms_to_io` set
+to the pywatershed constants (cms_to_cfs = 35.314666721489, module
+constants in starfit_flow_node.py; its cm_to_cf == cms_to_cfs so one
+pair serves flows AND storages) in a cfs graph and to **1.0 in a cms
+graph -- multiplying by 1.0 is an IEEE identity, so the validated
+cms path is byte-identical**. Conversion points (pywatershed
+hourly-path verbatim): inflows in at pre_release; the routed
+lake_outflow_sub out at the end of post_release; the 7 harvested
+outputs (incl. storages -> millions of cubic feet) in
+starfit_finalize BEFORE harvest -- incl. the verbatim
+lake_storage_old double-conversion (harmless: rewritten in advance;
+corrupts only the transient advance-computed change) -- ; combined
+node: request converted AT READ (input buffer is read-only;
+pywatershed converts in prepare) and lake_sink_source leaves in io
+units per substep. QUIRK kept: `source_sink_storage_min` is ALWAYS
+internal MCM even in cfs (pywatershed never converts it).
+Validation: test_starfit_flow_node.py parametrized node class x
+{cms, cfs} = the full pywatershed autotest matrix, all at 1e-7
+(cfs = inflows/initial_storage/answers x the constants, as the
+autotest does). Next natural step: a real mixed channel+STARFIT drb
+graph (n_substeps conflict: channel wants 24, STARFIT reference is
+1 substep/day -- needs a decision).
 
 **Numba dispatch spike DONE (July 2026, numba 0.65.1) -- registry
 mechanism now DECIDED (supersedes the "closure-binding" hope in the

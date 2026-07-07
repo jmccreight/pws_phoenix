@@ -290,6 +290,7 @@ def make_flow_graph(
     node_types: tuple,
     class_name: str = "FlowGraph",
     n_substeps: int = 24,
+    io_in_cfs: bool = True,
 ) -> type[FlowGraphBase]:
     """Compose a FlowGraph Process CLASS from node types.
 
@@ -310,6 +311,13 @@ def make_flow_graph(
             nodes share it). 24 = the channel's sub-hourly muskingum;
             a STARFIT-only graph uses 1 (its reference data is one
             substep/day). Substep length is 24/n_substeps hours.
+        io_in_cfs: the graph's FLOW UNITS are cfs (GRAPH-level; True =
+            the pywatershed/NHM native convention, its default too).
+            Most node types are unit-agnostic (linear in flow) and
+            ignore it; the STARFIT family computes internally in
+            cms/MCM and converts at its IO boundary -- with IDENTITY
+            factors when False (a cms graph), so that path is
+            byte-identical to no conversion.
 
     The composed class declares the UNION of _GRAPH_FIELDS and each
     type's fields; a same-named field shared by two types must be THE
@@ -395,7 +403,7 @@ def make_flow_graph(
         # types' rows hold nan pad).
         self._obj["node_type"].attrs["node_type_names"] = list(type_names)
         for tt_class in node_types:
-            tt_class.initialize_type(self._obj, n_substeps)
+            tt_class.initialize_type(self._obj, n_substeps, io_in_cfs)
         # cache the graph-state namedtuple ONCE -- references, NOT
         # copies (per the memory prime directive); the serial-grid
         # dataset buffers are stable, and Input buffers update in place.
@@ -418,6 +426,7 @@ def make_flow_graph(
     class_attrs["node_type_names"] = node_type_names
     class_attrs["_field_names"] = field_names
     class_attrs["_n_substeps"] = n_substeps
+    class_attrs["_io_in_cfs"] = io_in_cfs
     class_attrs["initialize"] = initialize
     class_attrs["advance"] = advance
     class_attrs["calculate"] = calculate
