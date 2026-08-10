@@ -15,14 +15,30 @@ dependencies:
   - git
   - make
   - ipython
-  # != pin matches pyPRMS's requirement so its pip install does NOT
+  # notebooks (incarnations/mpixarray/examples/); rides
+  # into CI/HPC builds too -- accepted (JLM Aug 2026) over a separate
+  # env or the lab-from-base + ipykernel pattern. jupytext opens
+  # py:percent files AS notebooks (right-click -> Open With ->
+  # Notebook) with edits round-tripping to the .py
+  - jupyterlab
+  - jupytext
+  # ---- IO-stack + numba pins (Aug 2026): these encode env surgery
+  # that previously lived ONLY in the env's conda revision history
+  # (rev 1/2, Jul 2026) and was silently undone by the jupyterlab
+  # env update's re-solve (zarr 3.3 + xarray 2026.7 incompatible;
+  # HDF5 stack churn; numpy 2.5 > numba's ceiling). Do not relax
+  # without running the full test sweep. ----
+  # 1.7.3 pinned (rev-2 surgery downgraded 1.7.4 -> 1.7.3); also
+  # matches pyPRMS's !=1.7.4 requirement so its pip install does NOT
   # replace the conda build with a PyPI wheel (ABI mismatch with
   # conda numpy -> "numpy.ndarray size changed" RuntimeWarning);
   # revisit when pyPRMS lands on conda-forge
-  - netCDF4!=1.7.4
+  - netCDF4=1.7.3
+  - libnetcdf=4.9.*
   - networkx  # Discretization.topological_order (pywatershed-identical)
-  - numpy>=2.0.0
+  - numpy>=2.0.0,<2.5  # numba's ceiling (also the mypy hook's pin)
   - numba
+  - xarray=2026.4.*  # 2026.7 requires zarr>=3.3 (see zarr note below)
   - pandas>=1.4.0
   - pip
   - mypy
@@ -42,8 +58,11 @@ dependencies:
   - sphinx-autosummary-accessors
   - sphinx-copybutton
   - tqdm
-  - xarray>=2024.06.0
-  - zarr
+  # zarr is deliberately NOT a conda dep: the env of record runs PIP
+  # zarr 2.18.* (see the pip section) -- conda zarr was removed at env
+  # rev 1 (Jul 2026). Listing it here is what let the jupyterlab
+  # update reinstall conda zarr 3.3.0 over the pip install (breaking
+  # xarray and mangling the pip layer).
   # ---- BEGIN parallel-io ----------------------------------------
   # The MPI + parallel-HDF5/NetCDF stack (mirrors the mpix meta-repo
   # environment_parallel_io.yaml) hosting the mpixarray ecosystem
@@ -56,13 +75,19 @@ dependencies:
   # (the mpixarray import is optional).
   - mpich
   - mpi4py
-  - hdf5=*=mpi*
+  - hdf5=1.14.*=mpi*  # rev-2 surgery: 2.1.0 -> 1.14.6 (netcdf 4.9 compat)
   - h5py=*=mpi*
   - h5netcdf
   - pytest-mpi
   # ---- END parallel-io ------------------------------------------
   - pip:
       - pytest-error-for-skips
+      # THE zarr of record (serial Output writer + test reads);
+      # deliberately pip, v2 line -- see the conda-section note.
+      # If ever reinstalling by hand: pip install --force-reinstall
+      # --no-deps (a bare force-reinstall upgraded numpy past
+      # numba's ceiling, Aug 2026)
+      - zarr==2.18.*
       # pywatershed import-chain dep for the A/B parity tests
       # (pywatershed itself is used from the mpix-root repo clone via
       # sys.path); contextily + tqdm ride in the conda section above

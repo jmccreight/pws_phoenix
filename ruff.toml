@@ -1,6 +1,21 @@
 # Ruff configuration for pws_phoenix.
 #
-# Line length is pinned here (referenced by CLAUDE.md's python conventions);
-# everything else uses ruff defaults. Applies to all subdirectories, since
-# ruff walks up to the nearest config -- including incarnations/.
+# Line length is pinned here (referenced by CLAUDE.md's python conventions).
+# Applies to all subdirectories, since ruff walks up to the nearest
+# config -- including incarnations/.
 line-length = 79
+
+# The rule selection is pinned to ruff's CLASSIC defaults (what "ruff
+# defaults" meant when this repo's code was written). Ruff 0.16
+# (arrived Aug 2026 via the pwpx env update that added jupyterlab)
+# expanded its default selection enormously; adopting that richer set
+# would be a deliberate repo-wide `ruff check --fix` sweep (JLM's
+# call), not an accident of a conda solve.
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+# py:percent notebooks legitimately import mid-file (a sys.path/
+# __file__ setup cell precedes the imports, and later cells may
+# import where the narrative introduces them)
+[lint.per-file-ignores]
+"**/examples/*.py" = ["E402"]

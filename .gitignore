@@ -2,6 +2,10 @@
 *.nc
 __pycache__
 pyrightconfig.json
+.ipynb_checkpoints
+
+# per-notebook data directories (XX_name/ beside XX_name.py)
+incarnations/*/examples/[0-9][0-9]_*/
 
 external_repos/landlab/landlab
 external_repos/landlab/xarray-simlab
