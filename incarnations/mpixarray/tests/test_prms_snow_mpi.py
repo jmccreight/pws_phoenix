@@ -1,26 +1,21 @@
-"""MPI regression: the ported PRMSGroundwater via ModelMPI vs pywatershed.
+"""MPI regression: the ported PRMSSnow via ModelMPI vs pywatershed.
 
-Same drb_2yr domain and answers as the serial test
-(test_prms_groundwater.py), distributed over the "nhru" grid with the
-mpixarray streaming pipeline. Rank 0 assembles the ONE combined input
-file (the known kitchen-sink constraint) from the domain's parameter /
-dis / generated forcing files; `gwres_flow` streams to parallel NetCDF
-and is validated globally over all timesteps; the remaining variables
-are validated from final state, gathered rank-ordered.
+Same drb_2yr domain and answers as the serial test (test_prms_snow.py),
+distributed over the "nhru" grid with the mpixarray streaming pipeline.
+This is also the first MPI test with NON-space parameter dims riding
+the combined input file: the (nmonth, nhru) monthly params and the
+(ndoy, nhru) soltab table get their nhru axis decomposed per rank
+(mpixarray isels only the parallelized dim), while (ndeplval,) and
+('scalar',) params replicate whole.
 
-drb_2yr has 765 HRUs -- NOT divisible by common rank counts. That is a
-deliberate probe: real domains aren't rank-divisible, so this also
-exercises mpixarray's uneven decomposition (the toy tests use even
-splits).
-
-All collective MPI ops live in module-scoped fixtures; test methods are
-pure asserts (see test_up_low_regression_mpi.py for the pattern and the
-teardown notes).
+`pkwater_equiv` streams to parallel NetCDF and is validated globally
+over all timesteps at pywatershed's own 1e-3 snow standard; iso and
+snow_evap are validated from final state, gathered rank-ordered (the
+knife-edge-amplified tcal/through_rain are covered by the serial
+tests; see test_prms_snow.py).
 
 Run with:
-    mpirun -n 4 pytest --with-mpi tests/test_prms_groundwater_mpi.py -v
-
-rtol = atol = 1e-13 matches pywatershed's own autotest comparison.
+    mpirun -n 4 pytest --with-mpi tests/test_prms_snow_mpi.py -v
 """
 
 import pathlib as pl
@@ -34,27 +29,38 @@ import xarray as xr
 from mpi4py import MPI
 
 sys.path.insert(0, str(pl.Path(__file__).parent.parent))
-from hydrology.prms_groundwater import PRMSGroundwater
+from hydrology.prms_snow import PRMSSnow
 from model import ModelMPI
 
 MPIX_ROOT = pl.Path(__file__).parents[4]
 DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
 
-INPUT_NAMES = ("soil_to_gw", "ssr_to_gw", "dprst_seep_hru")
-STREAMED_NAME = "gwres_flow"  # the one to_netcdf var (mpixarray limit)
-FINAL_STATE_NAMES = (
-    "gwres_stor",
-    "gwres_sink",
-    "gwres_stor_change",
-    "gwres_flow_vol",
+INPUT_NAMES = (
+    "hru_ppt",
+    "hru_intcpevap",
+    "net_ppt",
+    "net_rain",
+    "net_snow",
+    "orad_hru",
+    "potet",
+    "pptmix",
+    "prmx",
+    "swrad",
+    "tavgc",
+    "tmaxc",
+    "tminc",
+    "transp_on",
 )
-# pywatershed's own autotest comparison standard
-RTOL = ATOL = 1.0e-13
+STREAMED_NAME = "pkwater_equiv"  # the one to_netcdf var
+FINAL_STATE_NAMES = ("iso", "snow_evap")
+# pywatershed's own snow autotest comparison standard
+RTOL = ATOL = 1.0e-3
 
 _needed = [
-    DOMAIN_DIR / "parameters_PRMSGroundwater.nc",
+    DOMAIN_DIR / "parameters_PRMSSnow.nc",
     DOMAIN_DIR / "parameters_dis_hru.nc",
+    GEN_DIR / "soltab_horad_potsw.nc",
 ] + [
     GEN_DIR / f"{nn}.nc"
     for nn in INPUT_NAMES + FINAL_STATE_NAMES + (STREAMED_NAME,)
@@ -71,39 +77,37 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def mpi_paths():
-    """Rank 0 assembles the ONE combined input file (params + dis vars +
-    IC + forcings, subset to exactly the declared fields) and broadcasts
-    the temp dir; rank 0 cleans up afterward (no barrier in teardown --
-    see test_up_low_regression_mpi.py)."""
+    """Rank 0 assembles the ONE combined input file (params incl. the
+    2-D monthly / soltab tables + dis hru_type + forcings) and
+    broadcasts the temp dir; rank 0 cleans up (no barrier in
+    teardown)."""
     comm = MPI.COMM_WORLD
     tmp = tempfile.mkdtemp() if comm.rank == 0 else None
     tmp = comm.bcast(tmp, root=0)
     assert tmp is not None
-    data_dir = pl.Path(tmp) / "prms_gw_mpi_data"
+    data_dir = pl.Path(tmp) / "prms_snow_mpi_data"
     input_file = data_dir / "model_input.nc"
     output_file = data_dir / "model_output.nc"
     if comm.rank == 0:
         data_dir.mkdir(parents=True, exist_ok=True)
-        proc_params = xr.load_dataset(
-            DOMAIN_DIR / "parameters_PRMSGroundwater.nc"
-        )
+        proc_params = xr.load_dataset(DOMAIN_DIR / "parameters_PRMSSnow.nc")
+        soltab = xr.load_dataarray(
+            GEN_DIR / "soltab_horad_potsw.nc"
+        ).rename({"doy": "ndoy", "nhm_id": "nhru"})
         dis_hru = xr.load_dataset(DOMAIN_DIR / "parameters_dis_hru.nc")
-        # pywatershed output files put forcings on the "nhm_id" dim;
-        # the parameter files use "nhru" -- unify on the grid dim (a
-        # mismatch decomposes params but NOT forcings; see git history)
         forcings = [
             xr.load_dataarray(GEN_DIR / f"{nn}.nc").rename({"nhm_id": "nhru"})
             for nn in INPUT_NAMES
         ]
         combined = xr.merge(
             [
-                proc_params[["gwflow_coef", "gwsink_coef", "gwstor_init"]],
-                dis_hru[["hru_area", "hru_in_to_cf"]],
+                proc_params,
+                soltab.to_dataset(name="soltab_horad_potsw"),
+                dis_hru[["hru_type"]],
                 *forcings,
             ],
             compat="no_conflicts",
         )
-        # mpixarray parallelize/set_streaming need real dim-coordinates
         combined = combined.assign_coords(
             nhru=np.arange(combined.sizes["nhru"])
         )
@@ -128,8 +132,8 @@ def mpi_run(mpi_paths):
     """Build + run + finalize ModelMPI ONCE; every collective lives here."""
     comm = MPI.COMM_WORLD
     process_dict = {
-        "prms_groundwater": {
-            "class": PRMSGroundwater,
+        "prms_snow": {
+            "class": PRMSSnow,
             "discretization": "nhru",
         },
     }
@@ -142,11 +146,13 @@ def mpi_run(mpi_paths):
     model = ModelMPI(process_dict, control)
     model.run(np.float64(1.0))
 
-    # Final state of the non-streamed vars, gathered globally (single
-    # scheme -> rank-ordered contiguous blocks; sizes may be uneven).
     final = {
         nn: np.concatenate(
-            comm.allgather(model._ds_mpi_stream[nn].values.copy())
+            comm.allgather(
+                np.asarray(
+                    model._ds_mpi_stream[nn].values, dtype=np.float64
+                ).copy()
+            )
         )
         for nn in FINAL_STATE_NAMES
     }
@@ -156,21 +162,21 @@ def mpi_run(mpi_paths):
 
 
 @pytest.mark.mpi(min_size=2)
-class TestPRMSGroundwaterMPI:
-    # -- streamed gwres_flow over all timesteps (global, rank 0) --
-    def test_streamed_gwres_flow_all_timesteps(self, mpi_run, answers):
+class TestPRMSSnowMPI:
+    # -- streamed pkwater_equiv over all timesteps (global, rank 0) --
+    def test_streamed_pkwater_equiv_all_timesteps(self, mpi_run, answers):
         if MPI.COMM_WORLD.rank != 0:
             return
         with xr.load_dataset(mpi_run["output_file"]) as ds_out:
-            flow_out = ds_out[f"{STREAMED_NAME}_out"].values
+            out = ds_out[f"{STREAMED_NAME}_out"].values
         np.testing.assert_allclose(
-            flow_out,
+            out,
             answers[STREAMED_NAME].values,
             rtol=RTOL,
             atol=ATOL,
         )
 
-    # -- final state of everything else, gathered globally --
+    # -- final state, gathered globally --
     def test_final_state_gathered(self, mpi_run, answers):
         for nn, vals in mpi_run["final"].items():
             np.testing.assert_allclose(

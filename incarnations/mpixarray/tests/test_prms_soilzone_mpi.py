@@ -1,26 +1,21 @@
-"""MPI regression: the ported PRMSGroundwater via ModelMPI vs pywatershed.
+"""MPI regression: the ported PRMSSoilzone via ModelMPI vs pywatershed.
 
 Same drb_2yr domain and answers as the serial test
-(test_prms_groundwater.py), distributed over the "nhru" grid with the
+(test_prms_soilzone.py), distributed over the "nhru" grid with the
 mpixarray streaming pipeline. Rank 0 assembles the ONE combined input
-file (the known kitchen-sink constraint) from the domain's parameter /
-dis / generated forcing files; `gwres_flow` streams to parallel NetCDF
-and is validated globally over all timesteps; the remaining variables
-are validated from final state, gathered rank-ordered.
-
-drb_2yr has 765 HRUs -- NOT divisible by common rank counts. That is a
-deliberate probe: real domains aren't rank-divisible, so this also
-exercises mpixarray's uneven decomposition (the toy tests use even
-splits).
-
-All collective MPI ops live in module-scoped fixtures; test methods are
-pure asserts (see test_up_low_regression_mpi.py for the pattern and the
-teardown notes).
+file (params + dis vars + the 11 forcings, including the MUTABLE
+sroff/sroff_vol); `ssres_flow` streams to parallel NetCDF and is
+validated globally over all timesteps; a representative set of the
+remaining variables is validated from final state, gathered
+rank-ordered. Soilzone's initialize() (the derived-parameter +
+initial-state block) is purely per-element, so each rank derives its
+own rows.
 
 Run with:
-    mpirun -n 4 pytest --with-mpi tests/test_prms_groundwater_mpi.py -v
+    mpirun -n 4 pytest --with-mpi tests/test_prms_soilzone_mpi.py -v
 
-rtol = atol = 1e-13 matches pywatershed's own autotest comparison.
+rtol = atol = 1e-10 (observed level; upstream's own standard is 5e-6
+-- see the serial test).
 """
 
 import pathlib as pl
@@ -34,26 +29,45 @@ import xarray as xr
 from mpi4py import MPI
 
 sys.path.insert(0, str(pl.Path(__file__).parent.parent))
-from hydrology.prms_groundwater import PRMSGroundwater
+from hydrology.prms_soilzone import PRMSSoilzone
 from model import ModelMPI
 
 MPIX_ROOT = pl.Path(__file__).parents[4]
 DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
 
-INPUT_NAMES = ("soil_to_gw", "ssr_to_gw", "dprst_seep_hru")
-STREAMED_NAME = "gwres_flow"  # the one to_netcdf var (mpixarray limit)
-FINAL_STATE_NAMES = (
-    "gwres_stor",
-    "gwres_sink",
-    "gwres_stor_change",
-    "gwres_flow_vol",
+INPUT_NAMES = (
+    "dprst_evap_hru",
+    "dprst_seep_hru",
+    "hru_impervevap",
+    "hru_intcpevap",
+    "infil_hru",
+    "potet",
+    "transp_on",
+    "snow_evap",
+    "snowcov_area",
+    "sroff",
+    "sroff_vol",
 )
-# pywatershed's own autotest comparison standard
-RTOL = ATOL = 1.0e-13
+DIS_NAMES = ("hru_type", "hru_area", "hru_in_to_cf")
+STREAMED_NAME = "ssres_flow"  # the one to_netcdf var (mpixarray limit)
+FINAL_STATE_NAMES = (
+    "ssres_flow_vol",
+    "soil_moist",
+    "soil_rechr",
+    "soil_lower",
+    "slow_stor",
+    "ssres_stor",
+    "soil_to_gw",
+    "ssr_to_gw",
+    "recharge",
+    "hru_actet",
+)
+# observed level; upstream's own soilzone standard is 5e-6
+RTOL = ATOL = 1.0e-10
 
 _needed = [
-    DOMAIN_DIR / "parameters_PRMSGroundwater.nc",
+    DOMAIN_DIR / "parameters_PRMSSoilzone.nc",
     DOMAIN_DIR / "parameters_dis_hru.nc",
 ] + [
     GEN_DIR / f"{nn}.nc"
@@ -71,39 +85,34 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def mpi_paths():
-    """Rank 0 assembles the ONE combined input file (params + dis vars +
-    IC + forcings, subset to exactly the declared fields) and broadcasts
-    the temp dir; rank 0 cleans up afterward (no barrier in teardown --
-    see test_up_low_regression_mpi.py)."""
+    """Rank 0 assembles the ONE combined input file (all 19 process
+    params + dis vars + forcings) and broadcasts the temp dir; rank 0
+    cleans up afterward (no barrier in teardown)."""
     comm = MPI.COMM_WORLD
     tmp = tempfile.mkdtemp() if comm.rank == 0 else None
     tmp = comm.bcast(tmp, root=0)
     assert tmp is not None
-    data_dir = pl.Path(tmp) / "prms_gw_mpi_data"
+    data_dir = pl.Path(tmp) / "prms_soilzone_mpi_data"
     input_file = data_dir / "model_input.nc"
     output_file = data_dir / "model_output.nc"
     if comm.rank == 0:
         data_dir.mkdir(parents=True, exist_ok=True)
         proc_params = xr.load_dataset(
-            DOMAIN_DIR / "parameters_PRMSGroundwater.nc"
+            DOMAIN_DIR / "parameters_PRMSSoilzone.nc"
         )
         dis_hru = xr.load_dataset(DOMAIN_DIR / "parameters_dis_hru.nc")
-        # pywatershed output files put forcings on the "nhm_id" dim;
-        # the parameter files use "nhru" -- unify on the grid dim (a
-        # mismatch decomposes params but NOT forcings; see git history)
         forcings = [
             xr.load_dataarray(GEN_DIR / f"{nn}.nc").rename({"nhm_id": "nhru"})
             for nn in INPUT_NAMES
         ]
         combined = xr.merge(
             [
-                proc_params[["gwflow_coef", "gwsink_coef", "gwstor_init"]],
-                dis_hru[["hru_area", "hru_in_to_cf"]],
+                proc_params,  # exactly the 19 declared process params
+                dis_hru[list(DIS_NAMES)],
                 *forcings,
             ],
             compat="no_conflicts",
         )
-        # mpixarray parallelize/set_streaming need real dim-coordinates
         combined = combined.assign_coords(
             nhru=np.arange(combined.sizes["nhru"])
         )
@@ -128,8 +137,8 @@ def mpi_run(mpi_paths):
     """Build + run + finalize ModelMPI ONCE; every collective lives here."""
     comm = MPI.COMM_WORLD
     process_dict = {
-        "prms_groundwater": {
-            "class": PRMSGroundwater,
+        "prms_soilzone": {
+            "class": PRMSSoilzone,
             "discretization": "nhru",
         },
     }
@@ -156,9 +165,9 @@ def mpi_run(mpi_paths):
 
 
 @pytest.mark.mpi(min_size=2)
-class TestPRMSGroundwaterMPI:
-    # -- streamed gwres_flow over all timesteps (global, rank 0) --
-    def test_streamed_gwres_flow_all_timesteps(self, mpi_run, answers):
+class TestPRMSSoilzoneMPI:
+    # -- streamed ssres_flow over all timesteps (global, rank 0) --
+    def test_streamed_ssres_flow_all_timesteps(self, mpi_run, answers):
         if MPI.COMM_WORLD.rank != 0:
             return
         with xr.load_dataset(mpi_run["output_file"]) as ds_out:

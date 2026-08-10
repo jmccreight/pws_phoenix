@@ -286,6 +286,7 @@ class PRMSChannel(Process):
     )
     seg_inflow = DataArrayMeta(
         kind="variable",
+        restart=True,
         dims=("space",),
         dtype=np.float64,
         description="Segment inflow, daily mean [cfs]",
@@ -305,6 +306,7 @@ class PRMSChannel(Process):
     )
     outflow_ts = DataArrayMeta(
         kind="variable",
+        restart=True,
         dims=("space",),
         dtype=np.float64,
         description="Sub-timestep outflow (routing state; instantaneous)",
