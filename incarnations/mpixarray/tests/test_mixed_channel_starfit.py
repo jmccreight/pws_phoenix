@@ -144,7 +144,7 @@ def nor_midpoint_initial_storage(bs, init_date):
 
 @pytest.fixture(scope="module")
 def big_sandy():
-    with xr.open_dataset(GRAND_PARAM_FILE) as ds:
+    with xr.load_dataset(GRAND_PARAM_FILE) as ds:
         return ds.where(ds.grand_id == BIG_SANDY_GRAND_ID, drop=True).isel(
             nreservoirs=0
         )

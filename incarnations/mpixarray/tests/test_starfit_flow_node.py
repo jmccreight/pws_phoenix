@@ -92,7 +92,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def graph_params():
-    with xr.open_dataset(PARAM_FILE) as ds:
+    with xr.load_dataset(PARAM_FILE) as ds:
         sub = ds.isel(nreservoirs=STARFIT_INDS_TEST).load()
     # pywatershed node data-prep (see module docstring)
     obs = sub["Obs_MEANFLOW_CUMECS"].values
@@ -108,13 +108,13 @@ def graph_params():
 
 @pytest.fixture(scope="module")
 def inflow_da():
-    with xr.open_dataset(INFLOW_FILE) as ds:
+    with xr.load_dataset(INFLOW_FILE) as ds:
         return ds["lake_inflow"].isel(grand_id=STARFIT_INDS_TEST).load()
 
 
 @pytest.fixture(scope="module")
 def answers():
-    with xr.open_dataset(ANSWER_FILE) as ds:
+    with xr.load_dataset(ANSWER_FILE) as ds:
         return ds.isel(grand_id=STARFIT_INDS_TEST).load()
 
 

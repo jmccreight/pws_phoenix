@@ -77,7 +77,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def inflow_da():
-    with xr.open_dataset(INFLOW_FILE) as ds:
+    with xr.load_dataset(INFLOW_FILE) as ds:
         return (
             ds["lake_inflow"]
             .isel(
@@ -141,7 +141,7 @@ def phoenix_run(inflow_da, tmp_path_factory):
     graph (n_substeps=24, cms)."""
     out_dir = tmp_path_factory.mktemp("starfit_daily_parity")
 
-    with xr.open_dataset(PARAM_FILE) as ds:
+    with xr.load_dataset(PARAM_FILE) as ds:
         sub = ds.isel(nreservoirs=STARFIT_INDS_TEST).load()
     # the standard data-prep (see test_starfit_flow_node)
     obs = sub["Obs_MEANFLOW_CUMECS"].values

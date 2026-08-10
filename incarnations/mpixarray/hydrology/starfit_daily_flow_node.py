@@ -214,12 +214,15 @@ class StarfitDailyFlowNode:
         # graph). The hourly-only accumulators ride along unused
         # (union-of-fields design).
         **StarfitFlowNode.fields,
+        # restart=True: computed at each day's end, read at the NEXT
+        # day's first substep (the one-day lag) -- prognostic
         "lake_outflow_sub_next": DataArrayMeta(
             kind="variable",
             dims=("space",),
             dtype=np.float64,
             description="Next day's constant outflow rate, computed "
             "at the current day's end [io flow units]",
+            restart=True,
         ),
     }
 
