@@ -7,12 +7,17 @@ external inputs enter from outside, and the Time global feeds every
 process. Built purely from the declarations via ``Model.input_spec``
 -- no data are loaded and no model is constructed.
 
-Backend-agnostic by design (mermaid may prove insufficient for dense
-configurations): the constructor builds a small intermediate
-representation -- ``grids`` (cluster -> process nodes), ``externals``
-and typed ``edges`` -- and ``to_mermaid()`` renders it; further
-renderers (e.g. graphviz) can be added beside it without touching the
-builder.
+Backend-agnostic by design: the constructor builds a small
+intermediate representation -- ``grids`` (cluster -> process nodes),
+``externals`` and typed ``edges`` -- with two renderers beside it:
+
+- ``to_dot()`` (graphviz source): the STRUCTURED renderer -- data
+  flow runs along one axis (rankdir=LR), with prior-step back-edges
+  excluded from the ranking. Preferred when the graphviz package/
+  binary is available; the method itself needs neither.
+- ``to_mermaid()``: the zero-dependency fallback -- renders in
+  JupyterLab (>= 4.1) markdown and on GitHub, but its layout
+  scatters on dense configurations (mermaid offers no rank control).
 
 Edge semantics:
 
@@ -27,6 +32,17 @@ Edge semantics:
 - dotted, from Time: the model clock reaches every process (drawn
   once per grid cluster to keep the figure readable).
 
+The SUPPLY side of the contract is drawn in gray, INSIDE each
+process node (an HTML-like table): a white header (the process --
+computed) over gray sections for the required parameters (static |
+time-varying, classified from the declared dims), the ``initial=``
+value seams, and the RESTARTABLE INITIAL STATE (every
+``restart=True`` variable is a settable initial condition -- a warm
+start supplies all of them). Section headers always carry counts;
+``show_params=True`` expands the names. External inputs are gray
+nodes. Together with the edges, that IS the contract: gray = you
+supply it, white = the model computes it.
+
 Usage (e.g. in a notebook):
 
     graph = ModelContractGraph(process_dict, maps=maps)
@@ -37,9 +53,14 @@ Usage (e.g. in a notebook):
 from typing import Any
 
 from model import Model
+from process import _dict_of_kind
 
 # how many variable names an edge label lists before eliding
 _LABEL_MAX = 3
+
+# a parameter with one of these dims is TIME-VARYING (cyclic --
+# indexed by a derived calendar coordinate, not model time)
+_CYCLIC_DIMS = ("nmonth", "ndoy")
 
 
 class ModelContractGraph:
@@ -54,10 +75,12 @@ class ModelContractGraph:
         show_params: bool = False,
     ) -> None:
         maps = maps or {}
-        spec = Model.input_spec(
-            process_dict, maps=maps, include_optional=True
-        )
+        spec = Model.input_spec(process_dict, maps=maps, include_optional=True)
         self.show_params = show_params
+        # schedule position (process_dict order): edges pointing
+        # AGAINST it are prior-step back-edges by construction and
+        # must not drive the flow-axis layout
+        self._order = {slot: ii for ii, slot in enumerate(process_dict)}
 
         # -- clusters: grid -> [(slot, class name, n params)] --
         self.grids: dict[str, list[tuple[str, str, int]]] = {}
@@ -81,6 +104,34 @@ class ModelContractGraph:
                 for name, info in gg["external_inputs"].items()
             }
 
+        # -- the supply side of the contract, per process: required
+        # parameters (static vs time-varying, classified from the
+        # declared dims) and the initial-value seams --
+        self.parameters: dict[str, dict[str, list[str]]] = {}
+        for slot, entry in process_dict.items():
+            static: list[str] = []
+            cyclic: list[str] = []
+            for name, meta in _dict_of_kind(
+                entry["class"], "parameter"
+            ).items():
+                if any(dd in _CYCLIC_DIMS for dd in meta.dims):
+                    cyclic.append(name)
+                else:
+                    static.append(name)
+            self.parameters[slot] = {"static": static, "cyclic": cyclic}
+        self.initial_values: dict[str, list[str]] = {}
+        for grid, gg in spec["required"].items():
+            for init_name, info in gg["initial_values"].items():
+                self.initial_values.setdefault(info["process"], []).append(
+                    init_name
+                )
+        # every restart=True variable is a settable initial condition
+        # (a warm start supplies all of them; see Model.write_restart)
+        self.restart_vars: dict[str, list[str]] = {
+            slot: list(entry["class"].get_restart_variables())
+            for slot, entry in process_dict.items()
+        }
+
         # -- internal edges, aggregated per (producer, consumer) --
         internal: dict[tuple[str, str], list[str]] = {}
         for grid, gg in spec["optional"].items():
@@ -91,9 +142,7 @@ class ModelContractGraph:
                     # a supply fact, not a process-to-process flow
                     continue
                 for consumer in info["consumers"]:
-                    internal.setdefault((producer, consumer), []).append(
-                        name
-                    )
+                    internal.setdefault((producer, consumer), []).append(name)
         self.internal_edges: list[tuple[str, str, list[str]]] = [
             (src, dst, names) for (src, dst), names in internal.items()
         ]
@@ -113,7 +162,9 @@ class ModelContractGraph:
                     return slot
             return f"({grid})"
 
-        self.map_edges: list[tuple[str, str, str]] = []
+        # aggregated per (producer, consumer) pair, like the internal
+        # edges -- separate arcs per variable dominate the drawing
+        map_pairs: dict[tuple[str, str], list[str]] = {}
         for grid, gg in spec["optional"].items():
             for name, info in gg["map_fed_inputs"].items():
                 label = (
@@ -123,9 +174,71 @@ class ModelContractGraph:
                 )
                 src = _producer_of(info["source_grid"], info["source_var"])
                 for consumer in info["consumers"]:
-                    self.map_edges.append((src, consumer, label))
+                    map_pairs.setdefault((src, consumer), []).append(label)
+        self.map_edges: list[tuple[str, str, list[str]]] = [
+            (src, dst, labels) for (src, dst), labels in map_pairs.items()
+        ]
 
     # -- renderers ------------------------------------------------------
+
+    def _param_counts(self, slot: str) -> str:
+        """The bubble's one-line parameter summary ('' if none)."""
+        pp = self.parameters[slot]
+        if not pp["static"] and not pp["cyclic"]:
+            return ""
+        counts = f"params: {len(pp['static'])} static"
+        if pp["cyclic"]:
+            counts += f" + {len(pp['cyclic'])} tv"
+        return counts
+
+    def _dot_table(self, slot: str, cls_name: str) -> str:
+        """The process node as an HTML-like table: a white header (the
+        process -- computed) over GRAY sections for everything the
+        modeler supplies -- parameters (static | time-varying),
+        initial values, and the restartable initial state. Section
+        headers always show counts; ``show_params=True`` expands the
+        names."""
+
+        def section(title: str, names: list[str]) -> str:
+            body = f"<B>{title}</B>"
+            if self.show_params and names:
+                for nn in sorted(names):
+                    body += f'<BR ALIGN="LEFT"/>{nn}'
+                body += '<BR ALIGN="LEFT"/>'
+            return (
+                '<TR><TD BGCOLOR="gray90" ALIGN="LEFT">'
+                f'<FONT POINT-SIZE="9">{body}</FONT></TD></TR>'
+            )
+
+        pp = self.parameters[slot]
+        rows = [
+            f'<TR><TD BGCOLOR="white"><B>{slot}</B><BR/>{cls_name}</TD></TR>'
+        ]
+        if pp["static"]:
+            rows.append(
+                section(
+                    f"parameters: {len(pp['static'])} static", pp["static"]
+                )
+            )
+        if pp["cyclic"]:
+            rows.append(
+                section(
+                    f"parameters: {len(pp['cyclic'])} time-varying",
+                    pp["cyclic"],
+                )
+            )
+        inits = self.initial_values.get(slot, [])
+        if inits:
+            rows.append(section(f"initial values: {len(inits)}", inits))
+        state = self.restart_vars.get(slot, [])
+        if state:
+            rows.append(
+                section(f"initial state (restartable): {len(state)}", state)
+            )
+        return (
+            '<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" '
+            'CELLPADDING="4">' + "".join(rows) + "</TABLE>"
+        )
 
     @staticmethod
     def _label(names: list[str]) -> str:
@@ -134,16 +247,19 @@ class ModelContractGraph:
         shown = ", ".join(names[:_LABEL_MAX])
         return f"{shown} +{len(names) - _LABEL_MAX}"
 
-    def to_mermaid(self) -> str:
-        """Render the graph as mermaid flowchart text."""
-        out = ["flowchart TB"]
+    def to_mermaid(self, direction: str = "TB") -> str:
+        """Render the graph as mermaid flowchart text (`direction`:
+        "TB" portrait or "LR" landscape; mermaid decides the rest of
+        the layout itself)."""
+        out = [f"flowchart {direction}"]
         out.append('    time(["Time (the model clock)"])')
         for grid, procs in self.grids.items():
             out.append(f'    subgraph {grid}["grid: {grid}"]')
-            for slot, cls_name, n_params in procs:
+            for slot, cls_name, _n_params in procs:
                 label = f"{slot}<br/>{cls_name}"
-                if self.show_params:
-                    label += f"<br/>({n_params} parameters)"
+                counts = self._param_counts(slot)
+                if counts:
+                    label += f"<br/>{counts}"
                 out.append(f'        {slot}["{label}"]')
             out.append("    end")
             out.append(f"    time -.-> {grid}")
@@ -152,10 +268,16 @@ class ModelContractGraph:
                 out.append(f'    ext_{name}(["{name}"])')
                 for consumer in consumers:
                     out.append(f"    ext_{name} --> {consumer}")
+        for slot, inits in self.initial_values.items():
+            for init_name in inits:
+                out.append(
+                    f'    init_{init_name}(["initial value: {init_name}"])'
+                )
+                out.append(f"    init_{init_name} --> {slot}")
         for src, dst, names in self.internal_edges:
             out.append(f'    {src} -- "{self._label(names)}" --> {dst}')
-        for src, dst, label in self.map_edges:
-            out.append(f'    {src} -. "{label}" .-> {dst}')
+        for src, dst, labels in self.map_edges:
+            out.append(f'    {src} -. "{self._label(labels)}" .-> {dst}')
         return "\n".join(out)
 
     def to_markdown(self) -> str:
@@ -165,3 +287,82 @@ class ModelContractGraph:
 
     def _repr_markdown_(self) -> str:
         return self.to_markdown()
+
+    def to_dot(
+        self,
+        rankdir: str = "LR",
+        size: float | str | None = None,
+    ) -> str:
+        """Render the graph as graphviz dot source -- the STRUCTURED
+        renderer: data flow runs along one axis. The schedule order
+        drives the ranking; prior-step back-edges (snow -> canopy
+        etc.) are drawn but excluded from it (``constraint=false``),
+        which is what keeps the axis clean -- mermaid has no such
+        control. Render with the ``graphviz`` package/binary
+        (``graphviz.Source(graph.to_dot())``) or any dot viewer; this
+        method itself needs neither.
+
+        Args:
+            rankdir: the flow axis -- ``"LR"`` (landscape, default)
+                or ``"TB"`` (portrait; fits page/notebook widths).
+            size: maximum drawing size in INCHES -- a number caps
+                both dimensions (e.g. ``10``), a string is passed to
+                graphviz verbatim (e.g. ``"8,11"`` for width,height;
+                append ``!`` to also scale up). The drawing scales
+                DOWN proportionally to fit. None (default) = natural
+                size.
+        """
+        out = [
+            "digraph model_contract {",
+            f"    rankdir={rankdir};",
+            "    compound=true;",
+        ]
+        if size is not None:
+            out.append(f'    size="{size}";')
+        out += [
+            '    fontname="Helvetica";',
+            '    node [shape=box, style=rounded, fontname="Helvetica"];',
+            '    edge [fontname="Helvetica", fontsize=10];',
+            '    time [label="Time\\n(the model clock)", shape=oval,'
+            " style=dashed];",
+        ]
+        for grid, procs in self.grids.items():
+            out.append(f"    subgraph cluster_{grid} {{")
+            out.append(f'        label="grid: {grid}";')
+            out.append(
+                '        style="rounded,filled"; fillcolor=gray98;'
+                " color=gray60;"
+            )
+            for slot, cls_name, _n_params in procs:
+                out.append(
+                    f"        {slot} [shape=plain, "
+                    f"label=<{self._dot_table(slot, cls_name)}>];"
+                )
+            out.append("    }")
+            first = self.grids[grid][0][0]
+            out.append(
+                f"    time -> {first} [lhead=cluster_{grid}, "
+                "style=dotted, arrowhead=none, constraint=false];"
+            )
+        for grid, ext in self.externals.items():
+            for name, consumers in ext.items():
+                out.append(
+                    f'    ext_{name} [label="{name}", shape=ellipse, '
+                    "style=filled, fillcolor=gray90, "
+                    'fontname="Helvetica-Bold"];'
+                )
+                for consumer in consumers:
+                    out.append(f"    ext_{name} -> {consumer};")
+        big = len(self._order)
+        for src, dst, names in self.internal_edges:
+            attrs = [f'label="{self._label(names)}"']
+            if self._order.get(src, big) > self._order.get(dst, big):
+                attrs.append("constraint=false")  # prior-step back-edge
+            out.append(f"    {src} -> {dst} [{', '.join(attrs)}];")
+        for src, dst, labels in self.map_edges:
+            out.append(
+                f"    {src} -> {dst} "
+                f'[label="{self._label(labels)}", style=dashed];'
+            )
+        out.append("}")
+        return "\n".join(out)

@@ -214,14 +214,24 @@ pprint(spec["optional"], sort_dicts=False)
 # ## The contract, drawn
 #
 # The same information makes a picture: `ModelContractGraph` renders
-# the configuration from the declarations alone -- each grid is a
-# cluster of processes, solid labeled edges are on-grid couplings
-# (structural sharing, including the prior-step back-edges), dashed
-# edges are the Maps carrying variables between grids, stadium nodes
-# are the external inputs, and Time (the model clock) reaches every
-# process. In JupyterLab (>= 4.1) the object below renders as a
-# diagram; as a script, or anywhere else, `print(graph.to_mermaid())`
-# gives text you can paste into GitHub or mermaid.live.
+# the configuration from the declarations alone. Each grid is a
+# cluster; each process is a TABLE -- a white header (the process,
+# which the model computes) over GRAY sections for everything YOU
+# supply: its parameters (static | time-varying), any initial
+# values, and its restartable initial state (every prognostic
+# variable can be given a starting value -- a warm start supplies
+# all of them at once; see `help(Model)` on restart). Solid labeled
+# edges are on-grid couplings, dashed edges are the Maps carrying
+# variables between grids, gray ellipses are the external forcings,
+# and Time (the model clock) reaches every process. Gray = supplied,
+# white = computed -- that is the contract at a glance.
+#
+# With the `graphviz` package installed you get the STRUCTURED
+# layout -- data flows top to bottom in schedule order (pass
+# `rankdir="LR"` for landscape, `size=` to cap inches). Without it,
+# the cell falls back to mermaid (renders in JupyterLab >= 4.1, but
+# scatters more); `print(graph.to_dot())` always works for pasting
+# into any dot viewer.
 
 # %%
 from model_contract_graph import ModelContractGraph
@@ -230,10 +240,30 @@ graph = ModelContractGraph(process_dict, maps=maps)
 print(
     f"{sum(len(pp) for pp in graph.grids.values())} processes on "
     f"{len(graph.grids)} grids; {len(graph.internal_edges)} internal "
-    f"couplings, {len(graph.map_edges)} map-fed inputs, "
+    f"couplings, "
+    f"{sum(len(ll) for _, _, ll in graph.map_edges)} map-fed inputs, "
     f"{sum(len(ee) for ee in graph.externals.values())} external inputs"
 )
-graph  # the diagram (JupyterLab >= 4.1)
+try:
+    from graphviz import Source
+
+    diagram: object = Source(graph.to_dot(rankdir="TB"))
+except ImportError:
+    diagram = graph  # mermaid fallback (JupyterLab >= 4.1)
+diagram
+
+# %% [markdown]
+# The section headers carry the counts; `show_params=True` expands
+# every NAME inside its section -- the complete contract as one
+# (tall) reference figure.
+
+# %%
+graph_full = ModelContractGraph(process_dict, maps=maps, show_params=True)
+try:
+    diagram_full: object = Source(graph_full.to_dot(rankdir="TB"))
+except NameError:  # graphviz not installed
+    diagram_full = graph_full
+diagram_full
 
 # %% [markdown]
 # ## Parameters matching the PRMS `*_init*` naming convention

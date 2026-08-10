@@ -117,12 +117,11 @@ def test_two_grid_toy():
 def test_nhm_shape(nhm_graph):
     assert sum(len(pp) for pp in nhm_graph.grids.values()) == 10
     assert sorted(nhm_graph.grids) == ["nhru", "nsegment"]
-    # 13 maps, each with exactly one consumer in this configuration
-    assert len(nhm_graph.map_edges) == 13
+    # 13 mapped variables aggregated onto 9 producer->consumer pairs
+    assert len(nhm_graph.map_edges) == 9
+    assert sum(len(labels) for _, _, labels in nhm_graph.map_edges) == 13
     # the prior-step back-edge appears as an ordinary internal edge
-    pairs = {
-        (src, dst) for src, dst, _ in nhm_graph.internal_edges
-    }
+    pairs = {(src, dst) for src, dst, _ in nhm_graph.internal_edges}
     assert ("prms_snow", "prms_canopy") in pairs
     # externals: the four CBH forcings
     assert sorted(nhm_graph.externals["nhru"]) == [
@@ -137,17 +136,88 @@ def test_nhm_shape(nhm_graph):
 def test_label_elision_and_params(nhm_graph):
     mermaid = nhm_graph.to_mermaid()
     assert " +" in mermaid  # aggregated edge labels elide long lists
-    assert "parameters" not in mermaid
-    graph = ModelContractGraph(
-        {
-            "upper": {"class": Upper, "discretization": "hru"},
-        },
-        show_params=True,
-    )
-    assert "parameters)" in graph.to_mermaid()
+    # mermaid (the fallback) carries the one-line parameter summary
+    # in the bubble; dot uses the sectioned table (test_supply_side)
+    assert "prms_snow<br/>PRMSSnow<br/>params: 21 static + 4 tv" in mermaid
 
 
 def test_markdown_fence(nhm_graph):
     md = nhm_graph.to_markdown()
     assert md.startswith("```mermaid\n") and md.endswith("\n```")
     assert nhm_graph._repr_markdown_() == md
+
+
+def test_dot(nhm_graph):
+    dot = nhm_graph.to_dot()
+    assert "rankdir=LR;" in dot
+    assert "subgraph cluster_nhru {" in dot
+    assert "subgraph cluster_nsegment {" in dot
+    # the prior-step back-edge is drawn but excluded from ranking
+    snow_canopy = [
+        line
+        for line in dot.splitlines()
+        if line.strip().startswith("prms_snow -> prms_canopy")
+    ]
+    assert len(snow_canopy) == 1
+    assert "constraint=false" in snow_canopy[0]
+    # forward internal edges DO rank
+    atmos_canopy = [
+        line
+        for line in dot.splitlines()
+        if line.strip().startswith("prms_atmosphere -> prms_canopy")
+    ]
+    assert "constraint=false" not in atmos_canopy[0]
+    # 13 dashed map EDGES (the Time node is also style=dashed)
+    dashed_edges = [
+        ll for ll in dot.splitlines() if "->" in ll and "style=dashed" in ll
+    ]
+    assert len(dashed_edges) == 9  # aggregated pairs (13 variables)
+    assert dot.strip().endswith("}")
+
+
+def test_supply_side(nhm_graph):
+    """The contract's supply half: parameter classification, the
+    initial-value seams, and the restartable state -- all sectioned
+    INSIDE the process node."""
+    # classification from the declared dims
+    atmos = nhm_graph.parameters["prms_atmosphere"]
+    assert "tmax_cbh_adj" in atmos["cyclic"]  # (nmonth, space)
+    assert "soltab_potsw" in atmos["cyclic"]  # (ndoy, space)
+    assert "temp_units" in atmos["static"]
+    # initial-value seams attach to their processes
+    assert nhm_graph.initial_values == {
+        "prms_groundwater": ["gwstor_init"],
+        "prms_channel": ["segment_flow_init"],
+    }
+    # every restart=True variable is a settable initial condition
+    assert "pkwater_equiv" in nhm_graph.restart_vars["prms_snow"]
+    assert nhm_graph.restart_vars["prms_groundwater"] == ["gwres_stor"]
+    # default: sectioned counts, no names
+    dot = nhm_graph.to_dot()
+    assert "<B>prms_snow</B>" in dot
+    assert "parameters: 21 static" in dot
+    assert "initial values: 1" in dot
+    n_snow_state = len(nhm_graph.restart_vars["prms_snow"])
+    assert f"initial state (restartable): {n_snow_state}" in dot
+    assert "albset_rna" not in dot  # names only with show_params
+    # show_params expands the names inside the sections
+    full = ModelContractGraph(
+        {
+            "prms_atmosphere": {
+                "class": PRMSAtmosphere,
+                "discretization": "nhru",
+            },
+        },
+        show_params=True,
+    ).to_dot()
+    assert "parameters: 17 time-varying" in full
+    assert 'tmax_cbh_adj<BR ALIGN="LEFT"/>' in full
+    assert "tmax_sum" in full  # restartable state, by name
+
+
+def test_dot_orientation_and_size(nhm_graph):
+    assert "rankdir=TB;" in nhm_graph.to_dot(rankdir="TB")
+    assert 'size="10";' in nhm_graph.to_dot(size=10)
+    assert 'size="8,11";' in nhm_graph.to_dot(size="8,11")
+    assert '    size="' not in nhm_graph.to_dot()
+    assert nhm_graph.to_mermaid(direction="LR").startswith("flowchart LR")

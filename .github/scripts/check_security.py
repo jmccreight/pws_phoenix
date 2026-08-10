@@ -304,6 +304,15 @@ class SecurityChecker:
                 if re.match(r"^\d+\.\d+", hostname):
                     continue
 
+                # Skip matches that abut an underscore in the line:
+                # hostname labels cannot contain underscores, so e.g.
+                # `graph.internal_edges` (match truncated at the "_")
+                # or `foo_bar.internal` is Python code, not a hostname
+                if match.end() < len(line) and line[match.end()] == "_":
+                    continue
+                if match.start() > 0 and line[match.start() - 1] == "_":
+                    continue
+
                 # Skip filenames with extensions (e.g., file.xml, test.json)
                 # Real hostnames don't have common file extensions
                 if re.search(
@@ -315,7 +324,7 @@ class SecurityChecker:
                 # Skip Python code patterns (e.g., dict.items, list.keys, pytest.main)
                 # Common Python attributes, methods, and testing patterns
                 python_patterns = [
-                    r"\.(items|keys|values|get|pop|append|extend|update|copy)\b",  # dict/list methods
+                    r"\.(items|keys|values|get|pop|append|extend|update|copy|setdefault)\b",  # dict/list methods
                     r"\.(main|raises|mark|fixture|skip|warns|exitcode|fail|exit)\b",  # pytest
                     r"\.(assert|testing\.assert|allclose|array_equal)\b",  # numpy/xarray testing
                     r"(np|xr|pd)\.testing\.",  # numpy/xarray/pandas testing modules
