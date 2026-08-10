@@ -99,6 +99,11 @@ clone via sys.path). Run tests from `incarnations/mpixarray/`:
 1. please use pyton 3.14 syntax, particularly for typehinting.
 2. Please read the ruff.toml for line length setting.
 3. Avoid single-letter variable names. For throwaway loop variables, prefer doubled letters, e.g. `cc` instead of `c`, `kk` instead of `k`.
+4. Example notebooks are py:percent `.py` files written for USERS —
+   follow `.claude/skills/notebooks/SKILL.md` (format mechanics, the
+   required how-to-open header, and the pywatershed-numbered-notebook
+   tone) whenever writing or editing anything under an `examples/`
+   directory.
 
 # Prime directive: memory
 
@@ -364,8 +369,176 @@ does it internally via `hru_segment` in `_calculate`) -> a REAL
 two-grid submodel (groundwater live -> channel;
 `sroff_vol`/`ssres_flow_vol` from disk via a carrier process --
 `tests/test_prms_channel{,_mpi}.py`, serial + distributed w/ MapMPI
-x3); (3, next) optionally PRMSRunoff replacing the disk-fed
-`sroff_vol`.
+x3); (3, DONE July 2026) `hydrology/prms_runoff.py` -- PRMSRunoff
+(dprst-ACTIVE path), standalone parity green first run serial
+(`tests/test_prms_runoff.py`) + 4-rank MPI (`..._mpi.py`; its
+per-element `initialize()` distributes -- a first: gw has no init
+hook, channel runs replicated). Tolerance = 1e-10, pywatershed's OWN
+runoff autotest standard (1e-13 fails on `sroff_vol` magnitudes --
+runoff is branchy/thresholdy; do not chase tighter). Port findings:
+the `_dprst_clos_flag == OFF` param-zeroing hack (hit by ALL nhm
+domains: `dprst_frac_open == 1`) is provably a no-op -> not ported
+(comment in `initialize()`); `dprst_area_clos` is STATIC after init
+(upstream never assigns dprst_comp's recomputed local back -- answer
+file confirms; preserved, do not "fix"); helper fns
+(`compute_infil`/`perv_comp`/`check_capacity`/`dprst_comp`/
+`imperv_et`) stay separate njit functions with verbatim
+signatures/keyword calls; `intcp_changeover_in_net_rain` fixed False
+(compile-time module constant). (4, DONE July 2026) PRMSRunoff wired
+LIVE into the submodel tests (`test_prms_channel{,_mpi}.py`, green
+first run): the sroff Map sources runoff's computed `sroff_vol` under
+the same name (no Map change); the carrier shrank to `ssres_flow_vol`
+only (PRMSSoilzone's stand-in); and groundwater's `dprst_seep_hru`
+input now comes LIVE from runoff by structural sharing -- the FIRST
+real same-grid inter-process flux (schedule: runoff before gw, NHM
+order; works distributed per-rank under MPI). Chain tolerance relaxed
+1e-13 -> 1e-10 (runoff's precision floor propagates;
+`seg_stor_change` carve-out unchanged). (5, DONE July 2026) `hydrology/prms_soilzone.py` -- PRMSSoilzone,
+standalone parity green first run serial + 4-rank MPI
+(`tests/test_prms_soilzone{,_mpi}.py`), AND the submodel tests are now
+the FULL live chain (carrier DELETED): runoff -> soilzone -> gw on one
+shared hru dataset -> MapMPI x3 -> channel, green first run serial +
+MPI. Port findings: `sroff`/`sroff_vol` = the first
+`kind="mutable_input"` (soilzone adds dunnian IN PLACE -- zero on nhm
+domains, the sat_threshold>=999 guard behind pywatershed's own runoff
+autotest skip); the `soil_lower_prev`/`soil_rechr_prev` back-edge to
+runoff is PRIOR-step-correct because Model/ModelMPI run ALL advance()
+hooks before any calculate(); shared disk forcings (potet etc.) are
+fed ONCE and shared; overlapping params across the three param files
+merge (identical NHM values); tolerance pinned at the OBSERVED 1e-10
+(upstream's own soilzone standard is a loose 5e-6 -- its fastmath
+path; relax if other platforms' libm ulps bite); soil_moist_max<1e-5
+is the one true-param edit -> NotImplementedError guard; derived-param
+clamps applied silently pre-freeze; `soil_zone_max`/`_swale_limit`
+computed upstream but never read by its kernel -> not ported;
+upstream underscore names (`_sat_threshold`, `_pref_flow_den`, flags)
+kept verbatim as parameter_derived; np.bool_ added to process.py
+`_FILL_VALUE`. (6, DONE July 2026) `hydrology/prms_canopy.py` -- PRMSCanopy,
+standalone parity green first run serial + 4-rank MPI
+(`tests/test_prms_canopy{,_mpi}.py`) at upstream's own 1e-12, AND
+wired into the chain tests (now canopy -> runoff -> soilzone -> gw ->
+channel; canopy's net_rain/net_ppt/net_snow/intcp_changeover/
+hru_intcpevap live; disk forcings reduced to atmosphere+snow
+products). Port findings: `pptmix` = second `mutable_input` (canopy
+ZEROES it where intercepted trace snow becomes rain but never READS
+it -> feeding the post-edit answer file is exact); upstream hardwires
+hru_type all-LAND (ignores the dis) -> module constant, LAKE branches
+kept verbatim/dead; intcp_form recomputed each step (declared int64
+var, no per-step alloc); epan_coef hardwired 1.0; upstream fastmath
+again, strict IEEE here holds 1e-12. (7, DONE July 2026) `hydrology/prms_snow.py` -- PRMSSnow (~3300
+upstream lines), standalone serial + 4-rank MPI green + wired into
+the chain tests (now canopy -> snow -> runoff -> soilzone -> gw ->
+channel serial + MPI; runoff has NO disk forcings left; canopy's
+pk_ice_prev/freeh2o_prev = prior-step back-edge from snow). THE
+headline finding: the port is **BIT-IDENTICAL to pywatershed's own
+strict-IEEE numpy path** (`tests/test_prms_snow_ab_numpy.py`, exact
+equality over a 120-day A/B, all 14 compared states) -- but the
+GENERATED answers come from pywatershed's fastmath numba path, which
+drifts ~1e-8-relative from ITS OWN numpy path all season and flips
+pack-survival knife edges on ~0.02% of hru-days (tcal excursions of
+O(400) cal/cm^2 -- pywatershed's own numpy run shows the same vs its
+own answers). Hence the layered test strategy:
+`test_prms_snow.py` = upstream's own 5-var/1e-3 list with
+tcal+through_rain on an outlier-FRACTION criterion; the A/B carries
+the precision guarantee; and `test_prms_channel.py` grew TWO modes --
+"snow_disk" (5-process chain, STRICT 1e-10 plumbing canary) and
+"snow_live" (full chain vs the fastmath answers at (1e-2, 1e-2) +
+outlier fraction; measured 15%/1.6%/0.015% of seg-days outside
+1e-10/1e-8/1e-2 -- muskingum smears the seasonal 1e-8 noise). MPI
+chain test = snow_live mode. Port details: soltab_horad_potsw =
+STATIC (ndoy, space) PARAMETER indexed by current_doy (pyws netcdf
+reader semantics); (nmonth, space) params indexed by current_month-1
+in-kernel; scalar params (albset_*, den_init/den_max/settle_const)
+extracted as kernel floats; tmax_allsnow F->C conversion folded
+per-element (mpixarray CANNOT declare multi-dim derived buffers: its
+buffer creation decomposes EVERY dim -- model.py (a2) now resolves
+declared dims but only "space" is safely decomposable); nonzero
+snowpack_init -> NotImplementedError (upstream's init block is buggy:
+transposed curve indexing + where-tuple misuse; nhm ships zeros);
+pptmix_nopack = float64 0/1 (runoff consumes it as float);
+dnearzero is HARDCODED 2.23e-16 upstream (NOT finfo eps; fixed in
+runoff/canopy too); tiny_snowpack/`set_snow_zero`/verbose = dead
+upstream. ALSO: tests now use `xr.load_dataset`/`load_dataarray` (open, load,
+CLOSE) instead of `open_*` everywhere EXCEPT test_ref_behaviors.py
+(which deliberately pins lazy-open semantics) -- the grown suite
+accumulated >128 open netCDF handles and the xarray file-manager LRU
+churned reopen/evict on every access (a de-facto hang at 255% CPU,
+stack pinned in file_manager._acquire_with_cache_info; bisect:
+test_flow_graph + test_prms_channel reproduced it minimally).
+(8, DONE July 2026 -- **ARC COMPLETE**) PRMSSolarGeometry +
+PRMSAtmosphere (transp_on is IN atmosphere -- no separate Transp
+process). Solar geometry = a parameter FACTORY, not a Process
+(`atmosphere/prms_solar_geometry.py` `compute_soltabs(dis_hru)` ->
+(ndoy, nhru) tables; its true nature is parameter derivation, and it
+sidesteps the mpixarray multi-dim buffer limit); validated vs
+generated tables at 1e-10 (sunhrs carries ~5e-11 noise). Atmosphere
+(`atmosphere/prms_atmosphere.py`) = the PER-STEP port of upstream's
+all-time-vectorized preprocessing (its own docstring anticipates
+this); transp_tindex = per-step state (transp_on/tmax_sum/
+transp_check) with the time-zero block run in-kernel at istep0;
+pptmix = atmosphere VARIABLE that canopy edits in place downstream;
+validated at upstream's own 1e-5 (fails 1e-6; answers are f64 but
+upstream only achieves 1e-5 with the same files). Chain tests now:
+snow_live mode = THE FULL 7-PROCESS MODEL FROM RAW CBH (prcp/tmax/
+tmin) + live compute_soltabs, serial + 4-rank MPI green; snow_disk
+canary unchanged (no atmosphere -- its 1e-5 would break the 1e-10
+canary). **Full port inventory, conventions, the snow/fastmath story,
+and domain facts: `incarnations/mpixarray/PORTS.md`.**
+
+(9) NoDprst variants BY ADDITION (July 2026, DONE): the hierarchy
+inversion fix -- `PRMS{Groundwater,Runoff,Soilzone}NoDprst` are the
+minimal BASE classes (same modules); the full classes EXTEND them by
+adding the dprst declarations and overriding initialize/advance/
+kernel (full kernel bodies untouched; soilzone init varies only
+through the `_set_hru_frac_perv` hook). Pinned bit-for-bit against
+the full classes with dprst disabled by data
+(`tests/test_prms_no_dprst.py`); answer parity
+(`tests/test_prms_no_dprst_parity.py`) skips until the nhm_no_dprst
+answers are generated into `test_data/drb_2yr/output_no_dprst/`.
+Full story: PORTS.md "Realized for NoDprst".
+
+(10) Ag variants (July 2026, DONE): PRMSRunoffAg = additive extension
+of PRMSRunoff (declaration override turns the frozen pervious
+geometry into per-step variables under TIME-VARYING ag_frac;
+intcp_changeover_in_net_rain became a runtime kernel arg -- fgr is
+GSFLOW); PRMSSoilzoneAg = SIBLING dual-area family core (superset
+rule; rationale in its module docstring) with one shared kernel;
+PRMSSoilzoneAgObsET = additive obs-AET iteration (It0 loop +
+extracted irrigation-adjust kernel). Validated vs fgr_ag_2yr GSFLOW
+Fortran answers (spinup + analysis w/ dynamic ag_frac) serial +
+4-rank MPI + live RunoffAg->SoilzoneAg chain. The change-variables
+carve-out and remaining ag caveats: PORTS.md "The agricultural (Ag)
+ports".
+
+(11) Stream-temperature arc (July 2026; all but the chain stage DONE):
+PRMSHydraulicGeometry{WidthOnly,Full} (1e-5, all 5 vars); shade
+physics verbatim-extracted to `hydrology/prms_stream_shade.py` (5e-3
+= upstream's own family standard); `hydrology/prms_stream_temp.py` =
+abstract `PRMSStreamTempBase` (physics; `_compute_shade` hook) with
+leaves PRMSStreamTemp (dynamic shade; 5e-3, 6 vars, drb
+nhm_stream_temp), PRMSStreamTempConstantShade (segshade_sum/win --
+behavioral pin only, pywatershed generates no answers for that mode),
+PRMSStreamTempSegHumidity (seg_humid input->variable override;
+matrix + scalar configs, one parametrized test); the hru->segment
+aggregation kernels + `resolve_aggregation_topology` ported and
+pinned A/B at 1e-5 standalone; MPI = replicated segment grid running
+HydraulicGeometry -> StreamTemp with LIVE seg_flow_width beside a
+distributed gw grid (`tests/test_prms_stream_temp_mpi.py`).
+CHAIN DONE (July 2026) -- the governing principle (JLM): Maps NEVER
+originate variables -> ccov relocated to PRMSAtmosphereBase
+(`ccov_hru`, verbatim block, exact pin), every aggregate then exactly
+linear-static -> ten plain static-weights Maps, weights derived by
+basis-vector PROBING of the pinned kernels
+(`derive_aggregation_weights` + `AGGREGATION_MAP_SPEC`; weights ==
+kernels at 1e-12; -99.9 marker raises, drb marker-free; CBH-humidity
+config = core class + Map, no leaf). Live tests: Maps chain
+(atmosphere + carrier -> 10 Maps -> HG -> StreamTemp; aggregates
+1e-5, temps 5e-3) and the COMPLETE NHM from raw CBH through stream
+temperature, serial + 4-rank MPI (13 Maps; 5e-3 with outlier
+fraction <= 5e-3 -- the two pywatershed answer generations differ
+from EACH OTHER via snow knife-edge flips; bit-identical cross-rank
+replication). THE ARC IS COMPLETE. Full record: PORTS.md "The
+stream-temperature chain".
 
 Stage-2 findings: the map-then-sum float-order deviation proved BENIGN
 (all flow vars match at 1e-13); the one tolerance carve-out is
@@ -858,6 +1031,18 @@ Target structure -- a tree (conceptually a DataTree; see the data-model caveat):
   rev transform (e.g. disaggregate `dis0→dis1`, aggregate `dis1→dis0`), usually
   parameterized by cross-grid weights. Maps are also where cross-discretization
   MPI partitioning/comm will live (internal, never user-facing).
+  **Principle (decided July 2026, stream-temp chain):** a Map is a
+  per-variable grid-to-grid CORRESPONDENCE — one variable in, one out,
+  the same quantity (renaming and static factors are part of the
+  correspondence) — and never ORIGINATES a quantity; calculations
+  belong to processes on the grid where their inputs live. A
+  "computed Map" was considered and rejected (it would be a second
+  cross-grid concept with its own MPI/time story); instead, embedded
+  computations relocate to source-grid processes (ccov_hru →
+  PRMSAtmosphere), leaving exactly-linear static-weights
+  correspondences — derivable by basis-probing a reference
+  implementation. Full discussion: `map.py` docstring + PORTS.md
+  "The stream-temperature chain".
 
 Containment (where data/code live) -- general multi-grid example:
 
