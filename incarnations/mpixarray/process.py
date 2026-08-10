@@ -73,6 +73,15 @@ class DataArrayMeta:
     dtype: type
     description: str = ""
     initial: str | None = None  # kwarg name supplying initial values
+    # PROGNOSTIC state marker (kind="variable" only): the variable
+    # belongs in a restart file -- the minimal set that, restored at a
+    # time step, reproduces the continuous run exactly (the perfect-
+    # restart tests police completeness). Flag CURRENT state variables
+    # only, never their *_prev copies: advance() runs before any
+    # calculate(), so restored currents regenerate the prevs. Also the
+    # natural cut at the prognostic variables for state-updating
+    # techniques (JLM, Aug 2026).
+    restart: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -92,31 +101,47 @@ def _proc_subclass_mro(cls: type) -> tuple[type, ...]:
     )
 
 
+def _resolved_fields(cls: type) -> dict[str, DataArrayMeta]:
+    """Return the FINAL DataArrayMeta per field name for a Process subclass.
+
+    Walks the full MRO base-first, so a subclass redeclaration of a
+    name OVERRIDES the base's declaration entirely -- including its
+    kind (e.g. an Ag variant turning a frozen ``parameter_derived``
+    geometry field into a per-step ``variable``). A field keeps the
+    ordering position of its FIRST declaration; subclass-new fields
+    follow the base's.
+    """
+    fields: dict[str, DataArrayMeta] = {}
+    for cc in _proc_subclass_mro(cls):
+        for name, val in vars(cc).items():
+            if isinstance(val, DataArrayMeta):
+                fields[name] = val
+    return fields
+
+
 def _keys_of_kind(cls: type, kind: str) -> tuple[str, ...]:
-    """Return field names declared with a given kind on a Process subclass.
+    """Return field names whose RESOLVED declaration has a given kind.
 
     Walks the full MRO so fields declared on intermediate base classes
-    are included.
+    are included; a redeclared name is counted once, under its final
+    (most-derived) kind only.
     """
     return tuple(
-        name
-        for cc in _proc_subclass_mro(cls)
-        for name, val in vars(cc).items()
-        if isinstance(val, DataArrayMeta) and val.kind == kind
+        name for name, val in _resolved_fields(cls).items() if val.kind == kind
     )
 
 
 def _dict_of_kind(cls: type, kind: str) -> dict[str, DataArrayMeta]:
-    """Return {name: DataArrayMeta} for fields of a given kind on a Process subclass.
+    """Return {name: DataArrayMeta} for resolved fields of a given kind.
 
     Walks the full MRO so fields declared on intermediate base classes
-    are included.
+    are included; a redeclared name is counted once, under its final
+    (most-derived) kind only.
     """
     return {
         name: val
-        for cc in _proc_subclass_mro(cls)
-        for name, val in vars(cc).items()
-        if isinstance(val, DataArrayMeta) and val.kind == kind
+        for name, val in _resolved_fields(cls).items()
+        if val.kind == kind
     }
 
 
@@ -128,6 +153,8 @@ _FILL_VALUE: dict[type, object] = {
     np.float64: np.nan,
     # ints have no nan; use a glaringly-invalid sentinel
     np.int64: np.iinfo(np.int64).min,
+    # bools have no invalid value; initialize() must fully set them
+    np.bool_: False,
 }
 
 
@@ -165,7 +192,7 @@ class Process(ABC):
     # the defining module first -- importing registers). The other
     # anticipated consumer is restart/checkpoint rehydration
     # (serialized state can only record a process *name*).
-    _registry: dict[str, type] = {}
+    _registry: dict[str, type["Process"]] = {}
 
     # Home grid (co-registration). None = the model's single/default grid; a
     # subclass may set a default, a process_dict entry can override it.
@@ -229,3 +256,41 @@ class Process(ABC):
     @classmethod
     def get_var_names(cls) -> tuple[str, ...]:
         return _keys_of_kind(cls, "variable")
+
+    @classmethod
+    def get_restart_variables(cls) -> tuple[str, ...]:
+        """Names of the PROGNOSTIC state variables (declared
+        ``restart=True``) -- the restart-file set, derived from the
+        declarations (pywatershed's hand-maintained
+        get_restart_variables() lists are the cross-check during
+        flagging). The declaration-override seam applies: a variant's
+        redeclaration replaces the base's flag."""
+        return tuple(
+            name
+            for name, meta in _dict_of_kind(cls, "variable").items()
+            if meta.restart
+        )
+
+    # ------------------------------------------------------------------
+    # Restart state hooks -- for the few processes carrying EVOLVING
+    # python-attribute state outside the grid dataset (e.g. stream
+    # temp's gw/ss silos + circular-buffer indices). Static attrs
+    # (topology, lookup tables) are rebuilt by initialize() and do NOT
+    # belong here; within-step scratch does not either.
+    # ------------------------------------------------------------------
+
+    def get_restart_state(self) -> dict[str, np.ndarray]:
+        """Evolving python-attribute state for the restart file
+        (default: none). Keys are attr-local names; the Model
+        namespaces them per process on disk."""
+        return {}
+
+    def set_restart_state(self, state: dict[str, np.ndarray]) -> None:
+        """Restore what get_restart_state() returned (default: none
+        expected -- raises if state arrives for a process that
+        declares no python-attr restart state)."""
+        if state:
+            raise ValueError(
+                f"{type(self).__name__} received restart state "
+                f"{sorted(state)} but implements no set_restart_state."
+            )

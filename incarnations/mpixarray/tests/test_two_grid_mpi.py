@@ -62,9 +62,7 @@ def two_grid_toy(dimensions, make_two_grid_toy):
 
 
 @pytest.fixture(scope="module")
-def answers(
-    dimensions, two_grid_toy, two_grid_weights, compute_two_grid_answers
-):
+def answers(dimensions, two_grid_toy, two_grid_weights, compute_two_grid_answers):
     """Ground truth, recomputed identically on every rank."""
     return compute_two_grid_answers(two_grid_toy, two_grid_weights, dimensions)
 
@@ -109,9 +107,7 @@ def mpi_paths(two_grid_toy, two_grid_weights):
         # Segment inputs + weights, one file each (the bare DataArrays
         # need a name for NetCDF).
         toy["low_params"].to_netcdf(paths["low_params"])
-        toy["forcing_low"].rename("forcing_low").to_netcdf(
-            paths["forcing_low"]
-        )
+        toy["forcing_low"].rename("forcing_low").to_netcdf(paths["forcing_low"])
         toy["low_storage_initial"].rename("storage_initial").to_netcdf(
             paths["storage_initial"]
         )
@@ -180,13 +176,16 @@ def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
             }
             weights = two_grid_weights
         else:  # "files": segment inputs and the weights all from disk
+            # TODO: JLM: is this branch worthwhile? it requires files to
+            # feed memory but that seems not like a thing of concern for us.
             lower_data = {
                 "parameters": mpi_paths["low_params"],
                 "forcing_low": mpi_paths["forcing_low"],
                 "storage_initial": mpi_paths["storage_initial"],
             }
-            with xr.open_dataarray(mpi_paths["weights"]) as da:
+            with xr.load_dataarray(mpi_paths["weights"]) as da:
                 weights = da.load().values
+
         process_dict = {
             "upper": {"class": Upper, "discretization": "hru"},
             "lower": {
@@ -204,6 +203,9 @@ def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
             )
         }
         control = {
+            # TODO: JLM: this "input_file mechanism seems insufficient for
+            # multiple parallel discretizations. or is there ever only one?
+            # to look at is what is loaded from yaml.
             "input_file": mpi_paths["input_file"],
             # Routed by owning grid: flow (hru) streams via mpixarray;
             # storage (segment) goes to the rank-0 zarr Output.
@@ -221,14 +223,10 @@ def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
     storage_final = seg_ds["storage"].values.copy()
     lower_flow_final = seg_ds["flow"].values.copy()
     # The map's target buffer must BE Lower's cross-grid input (zero-copy).
-    map_wired = (
-        seg_ds["flow"].values is maps["hru_to_seg"].target_values.values
-    )
+    map_wired = seg_ds["flow"].values is maps["hru_to_seg"].target_values.values
     # Replicated segment grid: every rank must hold the identical answer.
     gathered = comm.allgather(storage_final)
-    replicated_identical = all(
-        np.array_equal(gathered[0], gg) for gg in gathered
-    )
+    replicated_identical = all(np.array_equal(gathered[0], gg) for gg in gathered)
     model.finalize()
     comm.Barrier()  # ensure output files are fully flushed before reads
     return {
@@ -257,7 +255,7 @@ class TestTwoGridMPI:
     def test_streamed_flow_all_timesteps(self, mpi_run, answers):
         if MPI.COMM_WORLD.rank != 0:
             return
-        with xr.open_dataset(mpi_run["output_parallel_netcdf"]) as ds_out:
+        with xr.load_dataset(mpi_run["output_parallel_netcdf"]) as ds_out:
             flow_out = ds_out["flow_out"].values  # (n_time, n_hru) global
         np.testing.assert_allclose(flow_out, answers["flow"], rtol=1e-12)
 
@@ -278,8 +276,6 @@ class TestTwoGridMPI:
     def test_serial_grid_storage_all_timesteps(self, mpi_run, answers):
         if MPI.COMM_WORLD.rank != 0:
             return
-        with xr.open_zarr(
-            mpi_run["serial_store"], consolidated=False
-        ) as ds_out:
+        with xr.open_zarr(mpi_run["serial_store"], consolidated=False) as ds_out:
             storage_out = ds_out["storage"].values  # (n_time, n_segment)
         np.testing.assert_allclose(storage_out, answers["storage"], rtol=1e-12)

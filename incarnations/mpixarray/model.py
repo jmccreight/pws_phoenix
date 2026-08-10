@@ -49,6 +49,18 @@ class Model:
     writes output via the Output collector (one zarr store) when the control
     dict requests it.
 
+    Restart: ``model.write_restart(dir)`` after a run saves the
+    prognostic state (the ``DataArrayMeta(restart=True)`` variables +
+    any ``get_restart_state()`` hook state) to self-locating per-grid
+    files; ``control["restart_read"] = dir`` warm-starts a new model
+    from them, resuming at the step after the saved time. USER
+    CONVENIENCE BY DESIGN: a warm start takes the SAME (superset)
+    input files as the original run -- inputs need only COVER the
+    restart time; the model indexes in (serial) or time-slices the
+    stream (MPI), so no restart-specific input preparation is ever
+    needed. Restart files are format-identical across serial and MPI:
+    either can warm-start from the other's.
+
     Usage:
         with Model(process_dict, control) as model:
             model.run(dt, n_steps)
@@ -109,9 +121,16 @@ class Model:
 
         self._set_time()
 
-        self.current_time_index = np.array([0], dtype=np.int32)
+        # Warm start (construction-time option): restore the flagged
+        # prognostic state written by write_restart() and resume AFTER
+        # the file's state time. Cold start: _start_index = 0.
+        self._start_index = 0
+        if control.get("restart_read") is not None:
+            self._read_restart(pl.Path(control["restart_read"]))
+
+        self.current_time_index = np.array([self._start_index], dtype=np.int32)
         self.current_time = np.array(
-            [self.times[0].values], dtype="datetime64[D]"
+            [self.times[self._start_index].values], dtype="datetime64[D]"
         )
 
         # Optional output collector (serial path). Created when the control
@@ -178,13 +197,156 @@ class Model:
                 self._opened_files.append(opened)
         return shared
 
-    def _resolve_grid(self, entry: Dict[str, Any]) -> str:
+    @staticmethod
+    def _resolve_grid(entry: Dict[str, Any]) -> str:
         """A process entry's home grid: process_dict override, else the class
         default (`Process.discretization`), else the single grid "space"."""
         grid = entry.get("discretization") or entry["class"].discretization
         return grid if grid is not None else "space"
 
-    def _initialize_inputs_and_proceses(self) -> None:  # noqa: spelling
+    @classmethod
+    def input_spec(
+        cls,
+        process_dict: Dict[str, Any],
+        maps: Union[Dict[str, Any], None] = None,
+        include_optional: bool = False,
+    ) -> Dict[str, Dict[str, Any]]:
+        """The model's INPUT CONTRACT, from declarations alone -- a DRY
+        RUN of assembly's resolution logic: no data are loaded, only
+        each entry's "class" and "discretization" are read (all other
+        entry keys -- parameters, forcings -- are ignored), and map
+        objects contribute only their grid/variable wiring.
+
+        The contract is about what must be SUPPLIED, so the top level
+        is required-vs-optional, then grid, then category:
+
+        spec["required"][grid]:
+        - "external_inputs": {name: {"consumers": [...]}} -- the
+          INPUTS proper: time-varying data served in model-time
+          lockstep (forcings/boundary data). A shared name is
+          supplied ONCE and shared structurally.
+        - "parameters": {name: [declaring processes]} -- static
+          supplied data. Where each name is PACKAGED (a grid's dis
+          dataset -- consulted first at assembly -- vs a process
+          parameters dataset) is not resolved here: that is a
+          data-preparation decision, and assembly accepts either.
+          Note PRMS initial-condition parameters (`*_init*` by its
+          own naming convention, consumed by initialize()) are in
+          this list -- they are ordinary supplied parameters.
+        - "initial_values": {init_name: {"variable", "process"}} --
+          the DataArrayMeta ``initial=`` seams: OPTIONAL direct
+          supplies of a state variable's starting values via a
+          process_dict entry key.
+
+        spec["optional"][grid] (informational; included only when
+        ``include_optional=True``):
+        - "internal_inputs": {name: {"producer", "consumers"}} --
+          inputs satisfied on-grid by structural sharing (another
+          process's variable or derived parameter, including
+          prior-step back-edges; or a same-named supplied parameter).
+        - "derived_parameters": {name: [processes]} -- computed by
+          initialize(); never supplied.
+        - "map_fed_inputs": {name: {"map", "source_grid",
+          "source_var", "consumers"}} -- satisfied by a Map's target
+          buffer.
+
+        This is the single source of truth for "what does this model
+        consume" -- consumers (the examples/00_input_contract.py notebook, the
+        PRMS translation layer) should call it rather than maintain
+        lists by hand. Schedule/order validity (writers before
+        consumers, map placement) is NOT checked here; real assembly
+        does that.
+        """
+        maps = maps or {}
+        proc_grid = {
+            kk: cls._resolve_grid(vv) for kk, vv in process_dict.items()
+        }
+        grid_procs: Dict[str, List[str]] = {}
+        for kk in process_dict:
+            grid_procs.setdefault(proc_grid[kk], []).append(kk)
+
+        spec: Dict[str, Dict[str, Any]] = {"required": {}}
+        if include_optional:
+            spec["optional"] = {}
+        for grid, proc_names in grid_procs.items():
+            parameters: Dict[str, List[str]] = {}
+            derived: Dict[str, List[str]] = {}
+            var_owner: Dict[str, str] = {}
+            initial_values: Dict[str, Any] = {}
+            for kk in proc_names:
+                pcls = process_dict[kk]["class"]
+                for name in pcls.get_parameters():
+                    parameters.setdefault(name, []).append(kk)
+                for name in pcls.get_parameters_derived():
+                    derived.setdefault(name, []).append(kk)
+                for name, meta in pcls.get_variables().items():
+                    var_owner.setdefault(name, kk)
+                    if meta.initial is not None:
+                        initial_values[meta.initial] = {
+                            "variable": name,
+                            "process": kk,
+                        }
+
+            consumers: Dict[str, List[str]] = {}
+            for kk in proc_names:
+                pcls = process_dict[kk]["class"]
+                for name in tuple(pcls.get_inputs()) + tuple(
+                    pcls.get_mutable_inputs()
+                ):
+                    consumers.setdefault(name, []).append(kk)
+            map_feed = {
+                mm.target_var: {
+                    "map": map_name,
+                    "source_grid": mm.source_grid,
+                    "source_var": mm.source_var,
+                }
+                for map_name, mm in maps.items()
+                if mm.target_grid == grid
+            }
+
+            inputs_internal: Dict[str, Any] = {}
+            inputs_map_fed: Dict[str, Any] = {}
+            inputs_external: Dict[str, Any] = {}
+            for name, cons in consumers.items():
+                if name in var_owner:
+                    inputs_internal[name] = {
+                        "producer": var_owner[name],
+                        "consumers": cons,
+                    }
+                elif name in derived:
+                    inputs_internal[name] = {
+                        "producer": derived[name][0],
+                        "consumers": cons,
+                    }
+                elif name in map_feed:
+                    inputs_map_fed[name] = {
+                        **map_feed[name],
+                        "consumers": cons,
+                    }
+                elif name in parameters:
+                    # a same-named supplied parameter satisfies the input
+                    # structurally (assembly adds it to the grid dataset)
+                    inputs_internal[name] = {
+                        "producer": f"(parameter of {parameters[name][0]})",
+                        "consumers": cons,
+                    }
+                else:
+                    inputs_external[name] = {"consumers": cons}
+
+            spec["required"][grid] = {
+                "external_inputs": inputs_external,
+                "parameters": parameters,
+                "initial_values": initial_values,
+            }
+            if include_optional:
+                spec["optional"][grid] = {
+                    "internal_inputs": inputs_internal,
+                    "derived_parameters": derived,
+                    "map_fed_inputs": inputs_map_fed,
+                }
+        return spec
+
+    def _initialize_inputs_and_proceses(self) -> None:  # (sic)
         """Assemble ONE shared dataset per grid from its processes' field specs,
         then bind each process to it. Same-named vars are added once, so
         cross-process sharing (param_shared_name, Upper.flow -> Lower.flow) is
@@ -466,10 +628,12 @@ class Model:
             vv.calculate(dt, self.time)
 
     def run(self, dt: np.float64, n_steps: np.int32) -> None:
-        """Run simulation for n_steps time steps."""
+        """Run simulation for n_steps time steps (from the restart
+        resume point when warm-started; from time zero otherwise)."""
         if self._finalized:
             raise RuntimeError("Cannot run a finalized Model.")
-        for tt in range(n_steps):
+        start = self._start_index
+        for tt in range(start, start + int(n_steps)):
             self.current_time_index[0] = tt
             self.current_time[0] = self.times[tt].values
             self.time.set_index(tt)
@@ -477,6 +641,127 @@ class Model:
             self.calculate(dt=dt)
             if self.output is not None:
                 self.output.collect_current_timestep(tt)
+
+    # -- restart ---------------------------------------------------------
+
+    def write_restart(self, directory: Union[str, pl.Path]) -> None:
+        """Write per-grid restart files for the LAST COMPLETED step:
+        every process's flagged prognostic variables
+        (``DataArrayMeta(restart=True)`` -> ``get_restart_variables()``)
+        plus any python-attr restart state (``get_restart_state()``,
+        namespaced ``{process}__{name}``), stamped with the state's
+        timestamp (attrs["state_time"]) -- the file is self-locating:
+        a warm-started model resumes at the FOLLOWING step of its own
+        time axis. Grids with no restart content write no file.
+        Files: ``{date}_restart_{grid}.nc``."""
+        dd = pl.Path(directory)
+        dd.mkdir(parents=True, exist_ok=True)
+        tt = int(self.current_time_index[0])
+        state_time = self.times[tt].values
+        date_str = np.datetime_as_string(state_time.astype("datetime64[D]"))
+        for grid, disc in self.discretizations.items():
+            assert disc.dataset is not None
+            ds_out = xr.Dataset()
+            for proc_name, proc in self.model_dict.items():
+                if self._proc_grid[proc_name] != grid:
+                    continue
+                for name in type(proc).get_restart_variables():
+                    if name not in ds_out:
+                        ds_out[name] = disc.dataset[name]
+                for key, arr in proc.get_restart_state().items():
+                    full = f"{proc_name}__{key}"
+                    ds_out[full] = xr.DataArray(
+                        arr,
+                        dims=[f"{full}_d{ii}" for ii in range(arr.ndim)],
+                    )
+            if not ds_out.data_vars:
+                continue
+            ds_out.attrs["state_time"] = str(state_time)
+            ds_out.to_netcdf(dd / f"{date_str}_restart_{grid}.nc")
+
+    def _read_restart(self, directory: pl.Path) -> None:
+        """Restore state from write_restart() files and set the resume
+        index. Validates: exactly one file per grid-with-restart-content
+        (and none for grids without), the file's variable set == the
+        current flag set (a flag change between write and read fails
+        loudly), consistent state_time across grids, and that the state
+        time exists on this model's time axis with steps remaining."""
+        state_times = set()
+        for grid in self.discretizations:
+            expected: set = set()
+            hook_procs = []
+            for proc_name, proc in self.model_dict.items():
+                if self._proc_grid[proc_name] != grid:
+                    continue
+                expected |= set(type(proc).get_restart_variables())
+                hook_procs.append(proc_name)
+            found = sorted(directory.glob(f"*_restart_{grid}.nc"))
+            if not expected and not found:
+                continue
+            if len(found) != 1:
+                raise ValueError(
+                    f"restart_read: grid '{grid}' needs exactly one "
+                    f"*_restart_{grid}.nc in {directory}; found "
+                    f"{[ff.name for ff in found]}."
+                )
+            ds_in = xr.load_dataset(found[0])
+            state_times.add(str(ds_in.attrs["state_time"]))
+            all_names = [str(nn) for nn in ds_in.data_vars]
+            file_vars = {nn for nn in all_names if "__" not in nn}
+            if file_vars != expected:
+                raise ValueError(
+                    f"restart file {found[0].name}: variable set "
+                    f"{sorted(file_vars)} != this model's flagged set "
+                    f"{sorted(expected)} (flags changed since the file "
+                    "was written?)."
+                )
+            for name in file_vars:
+                self._restore_grid_var(grid, name, ds_in[name].values)
+            for proc_name in hook_procs:
+                prefix = f"{proc_name}__"
+                state = {
+                    nn[len(prefix) :]: ds_in[nn].values
+                    for nn in all_names
+                    if nn.startswith(prefix)
+                }
+                if state:
+                    self.model_dict[proc_name].set_restart_state(state)
+        if not state_times:
+            raise ValueError(
+                f"restart_read: no restart files found in {directory} "
+                "and no process declares restart variables."
+            )
+        if len(state_times) != 1:
+            raise ValueError(
+                f"restart_read: inconsistent state times across grid "
+                f"files: {sorted(state_times)}."
+            )
+        state_time = np.datetime64(state_times.pop())
+        where = np.where(self.times.values == state_time)[0]
+        if where.size != 1:
+            raise ValueError(
+                f"restart state time {state_time} not found on this "
+                "model's time axis (inputs must cover the restart "
+                "time)."
+            )
+        self._start_index = int(where[0]) + 1
+        if self._start_index >= self.ntime:
+            raise ValueError(
+                f"restart state time {state_time} is this model's "
+                "final step: nothing to run."
+            )
+        for inp in self.inputs_dict.values():
+            inp.set_index(self._start_index)
+
+    def _restore_grid_var(
+        self, grid: str, name: str, values: np.ndarray
+    ) -> None:
+        """Restore one restart variable into its grid dataset (the
+        subclass seam: restart files are FULL-extent, and ModelMPI
+        restores only its rank's block of the distributed grid)."""
+        grid_ds = self.discretizations[grid].dataset
+        assert grid_ds is not None
+        grid_ds[name].values[:] = values
 
     def finalize(self) -> None:
         """Close all file handles opened during initialization."""
@@ -545,6 +830,14 @@ class ModelMPI(Model):
                           output vars are requested
         time_chunk_size   serial-grid Output time chunking (default 365)
         mpi_grid          name of the distributed grid/dim (default "space")
+        restart_read      directory of write_restart() files to warm-start
+                          from: saved state restores over the cold init
+                          and the stream is time-sliced to BEGIN at the
+                          resume step. Takes the SAME (superset)
+                          input_file as the original run -- it need only
+                          COVER the restart time; restart files are
+                          serial/MPI interchangeable (see the Model
+                          docstring).
 
     process_dict is as in Model (order = schedule; serial-grid entries carry
     "discretization" + their data); distributed-grid entries need only
@@ -640,11 +933,39 @@ class ModelMPI(Model):
         n_time = int(ds_input.sizes["time"])
         self._ntime = n_time
         self.time = Time(ds_input["time"])
+        # restart machinery (shared with the serial base): the full
+        # time axis + the last-computed-step tracker
+        self.times = ds_input["time"]
+        self.ntime = n_time
+        self.current_time_index = np.zeros(1, dtype=np.int64)
+
+        # ---- Restart (warm start), part 1 of 2: locate the resume
+        #      index BEFORE the stream is built, and LAZILY time-slice
+        #      the input dataset so the stream simply BEGINS at the
+        #      resume step (the superset input file serves any restart
+        #      -- no duplicate files, no fast-forward). Model time
+        #      stays GLOBALLY indexed (run() offsets by the start
+        #      index), so istep0-gated blocks cannot re-fire. Full
+        #      validation + the state restore are part 2, at the end
+        #      of _build once the buffers exist. ----
+        self._start_index = 0
+        restart_read = control.get("restart_read")
+        if restart_read is not None:
+            self._start_index = self._peek_restart_resume_index(
+                pl.Path(restart_read)
+            )
+        if self._start_index:
+            ds_source = ds_input.isel(
+                time=slice(self._start_index, None)
+            )
+        else:
+            ds_source = ds_input
+        n_stream = n_time - self._start_index
 
         self.discretizations = {
             mpi_grid: Discretization([mpi_grid], comm=comm)
         }
-        ds_mpi = self.discretizations[mpi_grid].decompose(ds_input)
+        ds_mpi = self.discretizations[mpi_grid].decompose(ds_source)
         comm = self.discretizations[mpi_grid].comm  # parallelize may refine
         self._comm = comm
 
@@ -652,7 +973,7 @@ class ModelMPI(Model):
         #      input vars (served per step via step.mpi.src) and keeps the
         #      space-only static params + ICs as buffers on ds_mpi_stream. ----
         ds_mpi_stream = ds_mpi.mpi.set_streaming(
-            "time", window=1, out_times=list(range(n_time))
+            "time", window=1, out_times=list(range(n_stream))
         )
 
         # Realize the static (space-only) survivors -- params + ICs -- in
@@ -759,14 +1080,22 @@ class ModelMPI(Model):
                     _declare(name, (mpi_grid,), np.nan, False)
                     declared.add(name)
         # (a2) derived parameters -- computed by initialize() pre-loop.
+        # Dims resolve like the serial path: "space" -> the distributed
+        # grid dim; other declared dims (e.g. PRMSSnow's "nmonth") pass
+        # through -- they exist on ds_mpi_stream via the static params
+        # that carry them and replicate whole (only mpi_grid is
+        # decomposed).
         # NOTE: non-f64 dtypes (e.g. int64) are untested against the
         # mpixarray buffer declaration until a distributed process
         # declares one.
         for cls in mpi_classes.values():
             for name, meta in cls.get_parameters_derived().items():
                 if name not in declared:
+                    dims = tuple(
+                        mpi_grid if dd == "space" else dd for dd in meta.dims
+                    )
                     ds_mpi_stream.mpi[name] = {
-                        "dims": (mpi_grid,),
+                        "dims": dims,
                         "dtype": meta.dtype,
                         "fill_value": meta.dtype(_FILL_VALUE[meta.dtype]),
                         "to_netcdf": False,
@@ -841,6 +1170,9 @@ class ModelMPI(Model):
         sizes = comm.allgather(local_n)
         start = int(sum(sizes[: comm.rank]))
         n_global = int(sum(sizes))
+        # this rank's block of the global extent (contiguous
+        # rank-ordered) -- also the restart restore/gather arithmetic
+        self._decomp_slice = (start, start + local_n)
         for map_name, mm in self.maps.items():
             if mm.target_grid == mpi_grid:
                 raise ValueError(
@@ -887,6 +1219,15 @@ class ModelMPI(Model):
                     }
                 )
 
+        # ---- Restart (warm start), part 2 of 2: full validation +
+        #      the state restore, AFTER the init hooks so the saved
+        #      state overwrites initialize()'s cold state. EVERY rank
+        #      reads the full-extent files and restores its own block
+        #      (SPMD-uniform, no collectives). Recomputes the same
+        #      start index located by part 1. ----
+        if restart_read is not None:
+            self._read_restart(pl.Path(restart_read))
+
     # -- run ------------------------------------------------------------
 
     def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:
@@ -905,8 +1246,15 @@ class ModelMPI(Model):
             for kk, proc in self.model_dict.items()
             if self._proc_grid[kk] == mpi_grid
         ]
+        # warm start: the stream was time-sliced at build to BEGIN at
+        # the resume index, so `tt` here is stream-local; model time
+        # stays GLOBALLY indexed via the offset (istep0-gated blocks
+        # must not re-fire at the resume step).
+        start = self._start_index
         for tt, step in enumerate(ds_mpi_stream.mpi.iter_time()):
-            self.time.set_index(tt)
+            gtt = tt + start
+            self.current_time_index[0] = gtt
+            self.time.set_index(gtt)
             src = step.mpi.src
             # Refill this step's input buffers from the source slab.
             for name in self._file_input_names:
@@ -934,7 +1282,115 @@ class ModelMPI(Model):
                     step[buf].mpi.write()
             # Serial-grid output: rank 0 only (collective-free branch).
             if self.output is not None:
-                self.output.collect_current_timestep(tt)
+                self.output.collect_current_timestep(gtt)
+
+    # -- restart ---------------------------------------------------------
+
+    def _peek_restart_resume_index(self, directory: pl.Path) -> int:
+        """Locate the resume index BEFORE the stream is built (part 1
+        of the warm start; the input dataset is time-sliced to start
+        there): read state_time from every restart file's attrs and
+        find the following step on the FULL time axis. Full per-grid
+        validation and the state restore are _read_restart's job (part
+        2), once the buffers exist -- it recomputes this same index."""
+        found = sorted(directory.glob("*_restart_*.nc"))
+        if not found:
+            raise ValueError(
+                f"restart_read: no restart files found in {directory}."
+            )
+        state_times = set()
+        for ff in found:
+            with xr.open_dataset(ff) as ds_in:
+                state_times.add(str(ds_in.attrs["state_time"]))
+        if len(state_times) != 1:
+            raise ValueError(
+                f"restart_read: inconsistent state times across grid "
+                f"files: {sorted(state_times)}."
+            )
+        state_time = np.datetime64(state_times.pop())
+        where = np.where(self.times.values == state_time)[0]
+        if where.size != 1:
+            raise ValueError(
+                f"restart state time {state_time} not found on this "
+                "model's time axis (inputs must cover the restart "
+                "time)."
+            )
+        start = int(where[0]) + 1
+        if start >= self.ntime:
+            raise ValueError(
+                f"restart state time {state_time} is this model's "
+                "final step: nothing to run."
+            )
+        return start
+
+    def write_restart(self, directory: Union[str, pl.Path]) -> None:
+        """Serial-FORMAT full-extent restart files, written by rank 0
+        (gather-then-write, mirroring the rank-0 zarr Output stance):
+        the distributed grid's flagged variables are allgathered
+        (contiguous rank-ordered blocks -> concatenate = global order);
+        serial (replicated) grids write from rank 0's identical copy.
+        The files are format-identical to serial Model.write_restart,
+        so serial and MPI runs can warm-start each other. The loop is
+        collective-uniform (every rank joins every allgather; only the
+        writes are rank-branched, and they hold no collectives) and
+        ends on a Barrier so the files are complete before any rank
+        proceeds -- e.g. straight into a warm-started model."""
+        comm = self._comm
+        dd = pl.Path(directory)
+        if comm.rank == 0:
+            dd.mkdir(parents=True, exist_ok=True)
+        tt = int(self.current_time_index[0])
+        state_time = self.times[tt].values
+        date_str = np.datetime_as_string(state_time.astype("datetime64[D]"))
+        for grid, disc in self.discretizations.items():
+            distributed = grid == self._mpi_grid
+            ds_out = xr.Dataset()
+            for proc_name, proc in self.model_dict.items():
+                if self._proc_grid[proc_name] != grid:
+                    continue
+                for name in type(proc).get_restart_variables():
+                    if name in ds_out:
+                        continue
+                    if distributed:
+                        parts = comm.allgather(
+                            self._ds_mpi_stream[name].values.copy()
+                        )
+                        ds_out[name] = ((grid,), np.concatenate(parts))
+                    else:
+                        assert disc.dataset is not None
+                        ds_out[name] = disc.dataset[name]
+                state = proc.get_restart_state()
+                if distributed and state:
+                    raise NotImplementedError(
+                        f"process '{proc_name}': python-attr restart "
+                        "state (get_restart_state) on the DISTRIBUTED "
+                        "grid is not implemented -- no distributed "
+                        "process carries hook state today."
+                    )
+                for key, arr in state.items():
+                    full = f"{proc_name}__{key}"
+                    ds_out[full] = xr.DataArray(
+                        arr,
+                        dims=[f"{full}_d{ii}" for ii in range(arr.ndim)],
+                    )
+            if not ds_out.data_vars:
+                continue
+            ds_out.attrs["state_time"] = str(state_time)
+            if comm.rank == 0:
+                ds_out.to_netcdf(dd / f"{date_str}_restart_{grid}.nc")
+        comm.Barrier()
+
+    def _restore_grid_var(
+        self, grid: str, name: str, values: np.ndarray
+    ) -> None:
+        """Distributed grid: restore this rank's contiguous block of
+        the full-extent restart variable; serial grids restore whole
+        (replicated), as in the base."""
+        if grid == self._mpi_grid:
+            aa, bb = self._decomp_slice
+            self._ds_mpi_stream[name].values[:] = values[aa:bb]
+        else:
+            super()._restore_grid_var(grid, name, values)
 
     # -- finalize -------------------------------------------------------
 

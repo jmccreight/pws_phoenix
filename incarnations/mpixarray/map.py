@@ -5,6 +5,32 @@ Map: couples two discretizations by remapping a variable from a source grid to
 a target grid via a (dense, for now) weight matrix. Foundational module --
 imports only numpy/xarray.
 
+CONCEPT (design principle, JLM July 2026): a Map is a grid-to-grid
+CORRESPONDENCE, per variable -- one variable in, one variable out, the
+same physical quantity on both sides. Renaming across the boundary is
+part of the correspondence (``variable={source: target}``, e.g.
+``sroff_vol -> seg_sroff_vol``); so are static unit/normalization
+factors folded into the weights. What a Map must NEVER do is
+ORIGINATE a quantity: computing a new variable from others is process
+work, and belongs on the grid where its inputs live ("what map would
+own the calculation?" has no good answer, because calculations don't
+belong to correspondences). A consequence worth knowing: any
+transform that respects this principle and has static coefficients IS
+a weight matrix -- when an upstream code buries a nonlinear
+computation inside an aggregation (PRMS stream_temp's in-loop cloud
+cover), the fix is to relocate the computation to a process on the
+source grid (ccov_hru on PRMSAtmosphereBase), after which the
+remaining correspondence is exactly linear and rides this class
+unchanged (weights can even be RECOVERED by probing the reference
+implementation with basis vectors; a nonzero zero-input probe means
+an affine constant, which a pure-matmul Map cannot express -- extend
+deliberately if a real case ever needs it). The rejected alternative
+-- a "computed Map" invoking kernels directly -- would have been a
+second cross-grid concept beside this one, with its own MPI story and
+(in the ccov case) a time dependence Maps otherwise don't have. The
+full case study: incarnations/mpixarray/PORTS.md "The
+stream-temperature chain".
+
 Construction is keyword-only; the ``{source: target}`` dicts read "from -> to":
 
     Map(weights=w, grid={"hru": "segment"}, variable={"flow": "flow"})

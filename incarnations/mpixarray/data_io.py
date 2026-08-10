@@ -70,6 +70,12 @@ class Input:
         self._current_index += np.int64(1)
         self._current_values[:] = self.data[self._current_index, :]
 
+    def set_index(self, index: int) -> None:
+        """Fast-forward (restart): the NEXT advance() serves `index`.
+        current_values is left untouched -- the run loop advances
+        before any calculate reads it."""
+        self._current_index = np.int64(index) - np.int64(1)
+
     @property
     def current_values(self) -> xr.DataArray:
         """Values at the current time step."""

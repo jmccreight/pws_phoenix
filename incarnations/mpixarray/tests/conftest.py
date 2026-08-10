@@ -74,8 +74,8 @@ def pyws_domain():
             return cache[domain]
         ddir = PYWS_TEST_DATA / domain
         gen_dir = ddir / "output"
-        channel_params = xr.open_dataset(ddir / "parameters_PRMSChannel.nc")
-        dis_seg = xr.open_dataset(ddir / "parameters_dis_seg.nc")
+        channel_params = xr.load_dataset(ddir / "parameters_PRMSChannel.nc")
+        dis_seg = xr.load_dataset(ddir / "parameters_dis_seg.nc")
 
         # 0/1 hru->segment aggregation weights from hru_segment
         hru_segment = channel_params["hru_segment"].values
@@ -91,7 +91,7 @@ def pyws_domain():
             Map apply; Map/MapMPI wiring is proven by the PRMSChannel
             submodel tests). Inserted nodes get ZERO columns (no
             lateral inflow)."""
-            hru_da = xr.open_dataarray(gen_dir / f"{name}.nc")
+            hru_da = xr.load_dataarray(gen_dir / f"{name}.nc")
             node_vals = hru_da.values @ weights.T  # (time, n_seg)
             if n_extra:
                 zeros = np.zeros((node_vals.shape[0], n_extra))
@@ -107,7 +107,7 @@ def pyws_domain():
             "channel_params_ds": channel_params,
             "dis_seg_ds": dis_seg,
             "weights": weights,
-            "seg_outflow": xr.open_dataarray(gen_dir / "seg_outflow.nc"),
+            "seg_outflow": xr.load_dataarray(gen_dir / "seg_outflow.nc"),
             "node_vol_input": node_vol_input,
         }
         return cache[domain]

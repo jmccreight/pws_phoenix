@@ -77,6 +77,17 @@ class Time:
         return int(delta.astype(int) + 1)
 
     @property
+    def jsol(self) -> int:
+        """Day of the SOLAR year (1-based): days since the most recent
+        Dec 22 (matches pywatershed utils/time_utils.datetime_jsol).
+        Closed form: doy + 10 -- December 22..31 count from the
+        previous Dec 22 (Dec has fixed length, so no leap-year term)
+        -- except Dec 22-31 itself, where jsol = day_of_month - 21."""
+        if self.month == 12 and self.day_of_month > 21:
+            return self.day_of_month - 21
+        return self.doy + 10
+
+    @property
     def current_epiweek(self) -> int:
         """CDC epiweek (1-53) of the current model time (matches
         pywatershed utils/time_utils.datetime_epiweek). Lazy-imports

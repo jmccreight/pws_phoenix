@@ -57,3 +57,22 @@ def test_accepts_dataarray():
     tt = Time(xr.DataArray(dates, dims=["time"]))
     assert tt.year == 2000
     assert tt.month == 6
+
+
+def test_jsol():
+    """Solar day of year (days since the most recent Dec 22, 1-based)
+    matches pywatershed's datetime_jsol convention, including across
+    the Dec 22 rollover and a leap year."""
+    cases = [  # (date, jsol)
+        ("2000-12-21", 366),  # leap: doy 356 + 10
+        ("2000-12-22", 1),
+        ("2000-12-31", 10),
+        ("2001-01-01", 11),
+        ("2001-06-21", 182),  # doy 172 + 10
+        ("2001-12-21", 365),  # non-leap: doy 355 + 10
+    ]
+    dates = np.array([cc[0] for cc in cases], dtype="datetime64[D]")
+    tt = Time(dates)
+    for ii, (_date, jsol) in enumerate(cases):
+        tt.set_index(ii)
+        assert tt.jsol == jsol

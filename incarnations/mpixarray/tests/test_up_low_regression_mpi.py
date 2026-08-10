@@ -159,7 +159,7 @@ class TestRegressionMPI:
     def test_streamed_flow_all_timesteps(self, mpi_run, answers):
         if MPI.COMM_WORLD.rank != 0:
             return
-        with xr.open_dataset(mpi_run["output_file"]) as ds_out:
+        with xr.load_dataset(mpi_run["output_file"]) as ds_out:
             flow_out = ds_out["flow_out"].values  # (n_time, n_space) global
         np.testing.assert_allclose(
             flow_out, answers["expected_flow"], rtol=1e-12
