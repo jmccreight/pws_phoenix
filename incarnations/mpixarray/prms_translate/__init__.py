@@ -40,6 +40,11 @@ from prms_translate.control import (
     resolve_classes,
 )
 from prms_translate.dyn_param import load_dynamic_parameter
+from prms_translate.preprocess import (
+    digest_array,
+    verify_preprocessed,
+    write_preprocessed,
+)
 from prms_translate.parameters import (
     package_parameters,
     volume_map_weights,
@@ -61,9 +66,12 @@ __all__ = [
     "load_dynamic_parameter",
     "load_parameters",
     "mpi_model_from_control",
+    "digest_array",
     "package_parameters",
     "prms_metadata",
     "resolve_classes",
+    "verify_preprocessed",
     "volume_map_weights",
     "write_mpi_input_file",
+    "write_preprocessed",
 ]

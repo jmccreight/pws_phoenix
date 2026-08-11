@@ -99,10 +99,17 @@ class ModelKit:
 def assemble_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
+    preprocessed: str | pl.Path | None = None,
 ) -> ModelKit:
     """Legacy PRMS control file -> a ModelKit (see module docstring).
     `control` is the pws_phoenix control dict passed through to the
-    Model (output options, restart_read, ...)."""
+    Model (output options, restart_read, ...). `preprocessed` is an
+    OPTIONAL artifacts file from
+    ``prms_translate.write_preprocessed`` -- its stamped derivables
+    (solar tables, segment_order, hru_in_to_cf) and map weights are
+    VERIFIED against this run's parameters and used instead of
+    deriving in-chain (see prms_translate/preprocess.py for the
+    provenance/staleness design)."""
     control_file = pl.Path(control_file)
     ctl = load_control(control_file)
     cfg = from_control(ctl, control_file)
@@ -110,6 +117,13 @@ def assemble_from_control(
         control_file.parent / str(ctl.get("param_file").values)
     ).resolve()
     params = load_parameters(param_file)
+
+    artifacts: xr.Dataset | None = None
+    if preprocessed is not None:
+        from prms_translate.preprocess import verify_preprocessed
+
+        artifacts = xr.load_dataset(preprocessed)
+        verify_preprocessed(artifacts, params)
 
     stream_temp = "prms_stream_temp" in cfg.classes
     if stream_temp:
@@ -127,18 +141,35 @@ def assemble_from_control(
                 "(humidity_day) in the control file."
             )
 
-    # -- discretizations + the computed parameters --
-    discretizations = {
-        "nhru": Discretization(["nhru"]),
-        "nsegment": Discretization(
-            ["nsegment"],
-            parameters=xr.Dataset({"tosegment": params["tosegment"]}),
-            topo_order={"segment_order": "tosegment"},
-        ),
-    }
-    soltabs = compute_soltabs(
-        params[["hru_slope", "hru_aspect", "hru_lat"]], hru_dim="nhru"
-    )
+    # -- discretizations + the derivable parameters (from the
+    # verified artifacts when preprocessed, else derived in-chain) --
+    if artifacts is not None:
+        seg_dis_params = xr.Dataset(
+            {
+                "tosegment": params["tosegment"],
+                "segment_order": artifacts["segment_order"],
+            }
+        )
+        discretizations = {
+            "nhru": Discretization(["nhru"]),
+            "nsegment": Discretization(
+                ["nsegment"], parameters=seg_dis_params
+            ),
+        }
+        soltabs = artifacts[["soltab_potsw", "soltab_horad_potsw"]]
+    else:
+        discretizations = {
+            "nhru": Discretization(["nhru"]),
+            "nsegment": Discretization(
+                ["nsegment"],
+                parameters=xr.Dataset({"tosegment": params["tosegment"]}),
+                topo_order={"segment_order": "tosegment"},
+            ),
+        }
+        soltabs = compute_soltabs(
+            params[["hru_slope", "hru_aspect", "hru_lat"]],
+            hru_dim="nhru",
+        )
 
     # -- process_dict in NHM (resolution) order; the humidity carrier
     # slots in just before the first segment-grid process --
@@ -168,7 +199,11 @@ def assemble_from_control(
         "prms_translate.volume_map_weights(params): 0/1 assignment "
         "matrix from hru_segment"
     )
-    vol_weights = volume_map_weights(params)
+    vol_weights = (
+        artifacts["weights_vol"].values
+        if artifacts is not None
+        else volume_map_weights(params)
+    )
     maps = {
         "sroff_vol": _map(
             "sroff_vol", "seg_sroff_vol", vol_weights, vol_derivation
@@ -187,15 +222,21 @@ def assemble_from_control(
         ),
     }
     if stream_temp:
-        seg_dis = discretizations["nsegment"].parameters
-        assert seg_dis is not None
-        agg_weights = derive_aggregation_weights(
-            params["hru_segment"].values,
-            params["hru_area"].values,
-            params["tosegment"].values,
-            seg_dis["segment_order"].values.astype(np.int64),
-            params["seg_close"].values,
-        )
+        if artifacts is not None:
+            agg_weights = {
+                kk: artifacts[f"weights_{kk}"].values
+                for kk in ("flow", "swrad", "met", "humid")
+            }
+        else:
+            seg_dis = discretizations["nsegment"].parameters
+            assert seg_dis is not None
+            agg_weights = derive_aggregation_weights(
+                params["hru_segment"].values,
+                params["hru_area"].values,
+                params["tosegment"].values,
+                seg_dis["segment_order"].values.astype(np.int64),
+                params["seg_close"].values,
+            )
         agg_derivation = (
             "derive_aggregation_weights(hru_segment, hru_area, "
             "tosegment, segment_order, seg_close)"
@@ -207,11 +248,10 @@ def assemble_from_control(
 
     # -- the contract drives the supply --
     spec = Model.input_spec(process_dict, maps=maps)
-    packaged = package_parameters(
-        params,
-        cfg.classes,
-        extra={str(nn): soltabs[nn] for nn in soltabs.data_vars},
-    )
+    extra = {str(nn): soltabs[nn] for nn in soltabs.data_vars}
+    if artifacts is not None:
+        extra["hru_in_to_cf"] = artifacts["hru_in_to_cf"]
+    packaged = package_parameters(params, cfg.classes, extra=extra)
     for slot, ds in packaged.items():
         process_dict[slot]["parameters"] = ds
     for grid, gg in spec["required"].items():
@@ -262,8 +302,11 @@ def assemble_from_control(
 def model_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
+    preprocessed: str | pl.Path | None = None,
 ) -> Model:
     """The one-liner: legacy PRMS control file -> a constructed (and
     thereby validated) pws_phoenix Model. See assemble_from_control
-    for the kit underneath."""
-    return assemble_from_control(control_file, control).model()
+    for the kit underneath (and for `preprocessed`)."""
+    return assemble_from_control(
+        control_file, control, preprocessed=preprocessed
+    ).model()
