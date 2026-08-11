@@ -456,6 +456,39 @@ flow-driven variables see the knife-edge cascade).
   (obsin), yaml serialization of the assembled config (converges
   with Options/from_yaml backlog).
 
+  **Beyond the endpoint (Aug 2026; details in the commit history
+  ceec14a.. onward):** assemble.py = the ASSEMBLY KIT
+  (`assemble_from_control` -> ModelKit, edit-then-`.model()`) + the
+  `model_from_control` one-liner (control path is the only input;
+  PRMS `*OutVar_names` translate -- filtered, gated on a supplied
+  store -- but PRMS output PATHS never do: drb's literally point
+  into the answers directory). assemble_mpi.py = the legacy->
+  PARALLEL path (`write_mpi_input_file` + `mpi_model_from_control`
+  under mpirun; hru-local results bit-identical to serial,
+  aggregated ones to ~1e-9 by Allreduce order). Notebooks are
+  NUMBERED with per-notebook data dirs (00 contract, 01 legacy
+  serial+parallel, 02 preprocessing; `.claude/skills/notebooks`).
+  `model_contract_graph.py` (core) = ModelContractGraph, the drawn
+  contract: graphviz LR/TB schedule-ranked layout (back-edges
+  unconstrained), sectioned process tables (gray = you supply it),
+  mermaid fallback. THE PARAMETER TAXONOMY (patently):
+  AUTHORED (kind="parameter") / DERIVABLE (kind="parameter" +
+  `derivation` -- required but generatable; the string NAMES ITS
+  INPUTS) / INTERNAL (kind="parameter_internal", RENAMED from
+  parameter_derived Aug 2026 -- init-computed, never supplied).
+  `input_spec` states it all: required {parameters,
+  derivable_parameters, initial_values, initial_state}, top-level
+  "maps" (one weights matrix per map, with derivation), optional
+  {internal_inputs, internal_parameters, map_fed_inputs}.
+  prms_translate/preprocess.py = the PRE-PROCESSING SUITE:
+  in-chain derivation is the DEFAULT (aligned by construction);
+  `write_preprocessed` is the opt-in cache -- artifacts stamped
+  with derivation + sha256 digests of the named inputs + own
+  digest, VERIFIED at `assemble_from_control(preprocessed=)`;
+  stale/tampered artifacts fail loudly. Backlog unchanged:
+  dyn/ag wiring, sf_data, kit->yaml, pyPRMS split-out (+ the two
+  upstream asks), compute-if-absent reclassification.
+
   **How variants are done here** (deliberate stance): pywatershed
   derives these by SUBTRACTIVE subclassing — the parent is the
   kitchen sink and children remove fields (re-declaring the whole
