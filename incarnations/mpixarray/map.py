@@ -78,6 +78,7 @@ class Map:
         weights: Any,
         grid: dict[str, str],
         variable: dict[str, str],
+        derivation: str | None = None,
     ) -> None:
         for name, mapping in (("grid", grid), ("variable", variable)):
             if len(mapping) != 1:
@@ -87,6 +88,10 @@ class Map:
                 )
         ((self.source_grid, self.target_grid),) = grid.items()
         ((self.source_var, self.target_var),) = variable.items()
+        # supply-or-derive provenance for the CONTRACT (Model.input_spec
+        # "maps" section): how the weights are obtained, when the map's
+        # author knows (None = the modeler supplies the matrix)
+        self.derivation = derivation
         self.weights = np.asarray(weights)
         self.target_values = xr.DataArray(
             np.zeros(self.weights.shape[0]), dims=[self.target_grid]

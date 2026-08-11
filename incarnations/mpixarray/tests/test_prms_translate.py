@@ -79,8 +79,7 @@ _fgr_needed = [
 _fgr_missing = [str(ff) for ff in _fgr_needed if not ff.exists()]
 fgr_skipif = pytest.mark.skipif(
     bool(_fgr_missing),
-    reason="fgr dynamic-parameter files missing: "
-    + ", ".join(_fgr_missing),
+    reason="fgr dynamic-parameter files missing: " + ", ".join(_fgr_missing),
 )
 
 
@@ -149,8 +148,7 @@ def test_resolve_stream_temp_leaves():
     with pytest.raises(NotImplementedError, match="combined"):
         resolve_classes(
             NHM_MODULES,
-            base
-            | {"stream_temp_shade_flag": 1, "strmtemp_humidity_flag": 1},
+            base | {"stream_temp_shade_flag": 1, "strmtemp_humidity_flag": 1},
         )
 
 
@@ -322,10 +320,15 @@ def test_assemble_stream_temp_kit():
     kit = assemble_from_control(DRB_DIR / "nhm_stream_temp.control")
     slots = list(kit.process_dict)
     assert len(slots) == 10  # 9 resolved + the humidity carrier
-    assert slots.index("humidity_carrier") == slots.index(
-        "prms_channel"
-    ) - 1  # just before the first segment-grid process
+    assert (
+        slots.index("humidity_carrier") == slots.index("prms_channel") - 1
+    )  # just before the first segment-grid process
     assert len(kit.maps) == 13  # 3 volumes + 10 aggregations
+    # the translator records HOW it derived each weights matrix
+    vol_deriv = kit.maps["sroff_vol"].derivation
+    assert vol_deriv is not None and "hru_segment" in vol_deriv
+    agg_deriv = kit.maps["seg_tave_air"].derivation
+    assert agg_deriv is not None and "derive_aggregation_weights" in agg_deriv
     assert sorted(kit.discretizations) == ["nhru", "nsegment"]
     for slot in ("prms_atmosphere", "prms_stream_temp"):
         assert "parameters" in kit.process_dict[slot]
@@ -450,9 +453,7 @@ def test_dyn_param_matches_pywatershed():
     np.testing.assert_array_equal(dyn.values, dp.data)
 
     # forward-fill parity with the established test recipe
-    times = np.arange(
-        np.datetime64("1999-10-01"), np.datetime64("2001-10-01")
-    )
+    times = np.arange(np.datetime64("1999-10-01"), np.datetime64("2001-10-01"))
     filled = forward_fill(dyn, times)
     idx = np.searchsorted(theirs_dates, times, side="right") - 1
     idx = np.clip(idx, 0, len(theirs_dates) - 1)

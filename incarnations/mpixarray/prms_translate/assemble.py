@@ -156,20 +156,35 @@ def assemble_from_control(
 
     # -- Maps: the three lateral volumes always; the ten stream-temp
     # aggregations (basis-probed weights) when stream temp is on --
-    def _map(source: str, target: str, ww: np.ndarray) -> Map:
+    def _map(source: str, target: str, ww: np.ndarray, derivation: str) -> Map:
         return Map(
             weights=ww,
             grid={"nhru": "nsegment"},
             variable={source: target},
+            derivation=derivation,
         )
 
+    vol_derivation = (
+        "prms_translate.volume_map_weights(params): 0/1 assignment "
+        "matrix from hru_segment"
+    )
     vol_weights = volume_map_weights(params)
     maps = {
-        "sroff_vol": _map("sroff_vol", "seg_sroff_vol", vol_weights),
-        "ssres_vol": _map(
-            "ssres_flow_vol", "seg_ssres_flow_vol", vol_weights
+        "sroff_vol": _map(
+            "sroff_vol", "seg_sroff_vol", vol_weights, vol_derivation
         ),
-        "gw_vol": _map("gwres_flow_vol", "seg_gwres_flow_vol", vol_weights),
+        "ssres_vol": _map(
+            "ssres_flow_vol",
+            "seg_ssres_flow_vol",
+            vol_weights,
+            vol_derivation,
+        ),
+        "gw_vol": _map(
+            "gwres_flow_vol",
+            "seg_gwres_flow_vol",
+            vol_weights,
+            vol_derivation,
+        ),
     }
     if stream_temp:
         seg_dis = discretizations["nsegment"].parameters
@@ -181,8 +196,12 @@ def assemble_from_control(
             seg_dis["segment_order"].values.astype(np.int64),
             params["seg_close"].values,
         )
+        agg_derivation = (
+            "derive_aggregation_weights(hru_segment, hru_area, "
+            "tosegment, segment_order, seg_close)"
+        )
         maps |= {
-            target: _map(source, target, agg_weights[wkey])
+            target: _map(source, target, agg_weights[wkey], agg_derivation)
             for target, (source, wkey) in AGGREGATION_MAP_SPEC.items()
         }
 
@@ -228,9 +247,7 @@ def assemble_from_control(
         kit_control["output_var_names"] = [
             nn for nn in cfg.output_var_names if nn in available
         ]
-        dropped = [
-            nn for nn in cfg.output_var_names if nn not in available
-        ]
+        dropped = [nn for nn in cfg.output_var_names if nn not in available]
 
     return ModelKit(
         process_dict=process_dict,

@@ -131,13 +131,12 @@ def mpi_model_from_control(
             weights=mm.weights,
             grid={mm.source_grid: mm.target_grid},
             variable={mm.source_var: mm.target_var},
+            derivation=mm.derivation,
         )
         for name, mm in kit.maps.items()
     }
     discretizations = {
-        gg: dd
-        for gg, dd in kit.discretizations.items()
-        if gg != mpi_grid
+        gg: dd for gg, dd in kit.discretizations.items() if gg != mpi_grid
     }
     return ModelMPI(
         process_dict, control, maps=maps, discretizations=discretizations

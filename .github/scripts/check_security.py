@@ -325,7 +325,7 @@ class SecurityChecker:
                 # Common Python attributes, methods, and testing patterns
                 python_patterns = [
                     r"\.(items|keys|values|get|pop|append|extend|update|copy|setdefault)\b",  # dict/list methods
-                    r"\.(main|raises|mark|fixture|skip|warns|exitcode|fail|exit)\b",  # pytest
+                    r"\.(main|raises|mark|fixture|skip|importorskip|warns|exitcode|fail|exit)\b",  # pytest
                     r"\.(assert|testing\.assert|allclose|array_equal)\b",  # numpy/xarray testing
                     r"(np|xr|pd)\.testing\.",  # numpy/xarray/pandas testing modules
                     r"\.(dev|pre|post|local)\b",  # version attributes

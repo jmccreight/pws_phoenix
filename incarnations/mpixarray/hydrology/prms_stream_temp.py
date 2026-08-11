@@ -2,9 +2,9 @@
 hydrology/prms_stream_temp.py
 =============================
 PRMSStreamTemp: PRMS/SNTemp daily mean stream temperature, ported
-from pywatershed (pywatershed/hydrology/prms_stream_temp.py; PRMS
-5.2.1.1 stream_temp.f90; Markstrom 2012 OFR 2012-1116, Sanders et al.
-2017 TM 6-D4). Stage 3 of the stream-temperature arc.
+from pywatershed (pywatershed/hydrology/prms_stream_temp.py;
+PRMS 5.2.1.1 stream_temp.f90; Markstrom 2012 OFR 2012-1116, Sanders
+et al. 2017 TM 6-D4). Stage 3 of the stream-temperature arc.
 
 SEGMENT-GRID process: energy-balance water temperature per segment in
 topological order (upstream flow-weighted mixing via upstream_idx),

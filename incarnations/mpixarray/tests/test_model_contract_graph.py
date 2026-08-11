@@ -131,6 +131,14 @@ def test_nhm_shape(nhm_graph):
         "tmin",
     ]
     assert nhm_graph.externals["nsegment"] == {}
+    # the Maps' weights requirement, summarized per grid pair
+    ww = nhm_graph.map_weights[("nhru", "nsegment")]
+    assert ww["count"] == 13
+    assert ww["derived"] == 0  # wiring maps carry no derivation
+    assert ww["shape"] == ("n_nsegment", "n_nhru")
+    dot = nhm_graph.to_dot()
+    assert "Map weights: 13 matrices (n_nsegment x n_nhru)" in dot
+    assert "Map weights: 13 (n_nsegment x n_nhru)" in (nhm_graph.to_mermaid())
 
 
 def test_label_elision_and_params(nhm_graph):

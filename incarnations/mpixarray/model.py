@@ -238,6 +238,17 @@ class Model:
           supplies of a state variable's starting values via a
           process_dict entry key.
 
+        spec["maps"] (present when maps are given) -- REQUIRED supply
+        too, kept beside "required" because that dict's keys are
+        grids: each Map in the configuration implies ONE weights
+        matrix. Per map name: {"source_grid", "target_grid",
+        "source_var", "target_var", "weights_shape" (a
+        ("n_<target_grid>", "n_<source_grid>") tuple -- rows map INTO
+        the target), "derivation"} -- the derivation string (from
+        ``Map(derivation=...)``) says how the matrix is obtained when
+        the map's author knows (e.g. the translation layer derives
+        NHM aggregation weights); None means the modeler supplies it.
+
         spec["optional"][grid] (informational; included only when
         ``include_optional=True``):
         - "internal_inputs": {name: {"producer", "consumers"}} --
@@ -266,6 +277,21 @@ class Model:
             grid_procs.setdefault(proc_grid[kk], []).append(kk)
 
         spec: Dict[str, Dict[str, Any]] = {"required": {}}
+        if maps:
+            spec["maps"] = {
+                map_name: {
+                    "source_grid": mm.source_grid,
+                    "target_grid": mm.target_grid,
+                    "source_var": mm.source_var,
+                    "target_var": mm.target_var,
+                    "weights_shape": (
+                        f"n_{mm.target_grid}",
+                        f"n_{mm.source_grid}",
+                    ),
+                    "derivation": getattr(mm, "derivation", None),
+                }
+                for map_name, mm in maps.items()
+            }
         if include_optional:
             spec["optional"] = {}
         for grid, proc_names in grid_procs.items():
@@ -955,9 +981,7 @@ class ModelMPI(Model):
                 pl.Path(restart_read)
             )
         if self._start_index:
-            ds_source = ds_input.isel(
-                time=slice(self._start_index, None)
-            )
+            ds_source = ds_input.isel(time=slice(self._start_index, None))
         else:
             ds_source = ds_input
         n_stream = n_time - self._start_index

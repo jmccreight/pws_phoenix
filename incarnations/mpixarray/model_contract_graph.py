@@ -132,6 +132,23 @@ class ModelContractGraph:
             for slot, entry in process_dict.items()
         }
 
+        # the Maps' supply requirement (spec["maps"]): one weights
+        # matrix per map, summarized per (source, target) grid pair
+        self.map_weights: dict[tuple[str, str], dict[str, Any]] = {}
+        for map_name, info in spec.get("maps", {}).items():
+            key = (info["source_grid"], info["target_grid"])
+            entry = self.map_weights.setdefault(
+                key,
+                {
+                    "count": 0,
+                    "derived": 0,
+                    "shape": info["weights_shape"],
+                },
+            )
+            entry["count"] += 1
+            if info["derivation"]:
+                entry["derived"] += 1
+
         # -- internal edges, aggregated per (producer, consumer) --
         internal: dict[tuple[str, str], list[str]] = {}
         for grid, gg in spec["optional"].items():
@@ -274,6 +291,14 @@ class ModelContractGraph:
                     f'    init_{init_name}(["initial value: {init_name}"])'
                 )
                 out.append(f"    init_{init_name} --> {slot}")
+        for (src_grid, tgt_grid), ww in self.map_weights.items():
+            label = (
+                f"Map weights: {ww['count']} "
+                f"({ww['shape'][0]} x {ww['shape'][1]})"
+            )
+            node = f"weights_{src_grid}_{tgt_grid}"
+            out.append(f'    {node}(["{label}"])')
+            out.append(f"    {node} -.- {tgt_grid}")
         for src, dst, names in self.internal_edges:
             out.append(f'    {src} -- "{self._label(names)}" --> {dst}')
         for src, dst, labels in self.map_edges:
@@ -353,6 +378,28 @@ class ModelContractGraph:
                 )
                 for consumer in consumers:
                     out.append(f"    ext_{name} -> {consumer};")
+        # the Maps' weights requirement: one gray supply note per grid
+        # pair, tied to the target cluster
+        for (src_grid, tgt_grid), ww in self.map_weights.items():
+            shape = f"({ww['shape'][0]} x {ww['shape'][1]})"
+            label = (
+                f"Map weights: {ww['count']} "
+                f"{'matrices' if ww['count'] > 1 else 'matrix'} "
+                f"{shape}"
+            )
+            if ww["derived"]:
+                label += f"\\n{ww['derived']} with a known derivation"
+            node = f"weights_{src_grid}_{tgt_grid}"
+            first = self.grids[tgt_grid][0][0]
+            out.append(
+                f'    {node} [label="{label}", shape=note, '
+                "style=filled, fillcolor=gray90, fontsize=9, "
+                'fontname="Helvetica-Bold"];'
+            )
+            out.append(
+                f"    {node} -> {first} [lhead=cluster_{tgt_grid}, "
+                "style=dotted, arrowhead=none, constraint=false];"
+            )
         big = len(self._order)
         for src, dst, names in self.internal_edges:
             attrs = [f'label="{self._label(names)}"']

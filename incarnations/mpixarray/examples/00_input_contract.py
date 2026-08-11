@@ -25,7 +25,10 @@
 # 1. **required** -> grid -> external inputs, parameters, initial
 #    values (the `initial=` seams; supplying them is optional but
 #    they are part of the supply surface)
-# 2. **optional** (`include_optional=True`) -> grid -> internal
+# 2. **maps** -> each Map in the configuration implies ONE weights
+#    matrix (required supply; kept beside "required" because that
+#    dict's keys are grids)
+# 3. **optional** (`include_optional=True`) -> grid -> internal
 #    inputs, derived parameters, map-fed inputs
 
 # %% [markdown]
@@ -209,6 +212,21 @@ pprint(spec["required"], sort_dicts=False)
 
 # %%
 pprint(spec["optional"], sort_dicts=False)
+
+# %% [markdown]
+# ## The Maps' requirement: weights
+#
+# Each Map carries one variable between the grids and requires ONE
+# weights matrix (rows map into the target grid). The `derivation`
+# field records how the matrix is obtained when the map's author
+# knows -- our wiring maps here carry none (`None` = you supply it),
+# but the translation layer records its derivations (the
+# `hru_segment` assignment matrix for the flow volumes, the
+# basis-probed aggregation weights for stream temperature), as the
+# full-circle section below demonstrates with REAL weights.
+
+# %%
+pprint(spec["maps"], sort_dicts=False)
 
 # %% [markdown]
 # ## The contract, drawn

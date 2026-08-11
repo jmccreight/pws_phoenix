@@ -151,8 +151,17 @@ def test_full_chain_contract():
         },
     }
     spec = Model.input_spec(process_dict, maps=maps, include_optional=True)
-    assert set(spec) == {"required", "optional"}
+    assert set(spec) == {"required", "maps", "optional"}
     assert set(spec["required"]) == {"nhru", "nsegment"}
+
+    # each Map implies ONE weights matrix (required supply)
+    assert len(spec["maps"]) == 13
+    sroff = spec["maps"]["sroff_vol"]
+    assert sroff["source_grid"] == "nhru"
+    assert sroff["target_grid"] == "nsegment"
+    assert sroff["target_var"] == "seg_sroff_vol"
+    assert sroff["weights_shape"] == ("n_nsegment", "n_nhru")
+    assert sroff["derivation"] is None  # wiring map: modeler supplies
     hru, seg = spec["required"]["nhru"], spec["required"]["nsegment"]
     hru_opt = spec["optional"]["nhru"]
     seg_opt = spec["optional"]["nsegment"]
