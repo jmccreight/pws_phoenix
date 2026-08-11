@@ -1,5 +1,5 @@
 """Part-(a) framework tests: dis-owned parameters, topological_order,
-the per-process initialize() hook, and kind="parameter_derived".
+the per-process initialize() hook, and kind="parameter_internal".
 
 Self-contained (tiny in-memory toy; no generated pywatershed data).
 networkx (used lazily by topological_order) is a DECLARED dependency
@@ -23,7 +23,7 @@ N_XY = 4
 
 class DerivedToy(Process):
     """Minimal process exercising dis-sourced parameters and
-    parameter_derived + initialize()."""
+    parameter_internal + initialize()."""
 
     base = DataArrayMeta(
         kind="parameter",
@@ -38,13 +38,13 @@ class DerivedToy(Process):
         description="toy forcing",
     )
     doubled = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="computed by initialize(): 2 * base",
     )
     counts = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.int64,
         description="computed by initialize(): int64 exercise",

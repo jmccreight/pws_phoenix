@@ -916,13 +916,21 @@ def _shade_all(
         )
 
 
-def _meta(kind, description, dtype=np.float64, dims=("space",), restart=False):
+def _meta(
+    kind,
+    description,
+    dtype=np.float64,
+    dims=("space",),
+    restart=False,
+    derivation=None,
+):
     return DataArrayMeta(
         kind=kind,
         dims=dims,
         dtype=dtype,
         description=description,
         restart=restart,
+        derivation=derivation,
     )
 
 
@@ -946,9 +954,11 @@ class PRMSStreamTempBase(Process):
     # -- dis_seg variables (grid-owned; dis-first sourcing) --
     segment_order = _meta(
         "parameter",
-        "Upstream-to-downstream ordering (0-based) -- DIS-derived: "
-        "Discretization(topo_order={'segment_order': 'tosegment'})",
+        "Upstream-to-downstream ordering (0-based)",
         np.int64,
+        derivation=(
+            "Discretization(topo_order={'segment_order': 'tosegment'})"
+        ),
     )
     tosegment = _meta(
         "parameter",
@@ -994,12 +1004,12 @@ class PRMSStreamTempBase(Process):
 
     # -- derived parameters (upstream edits/conversions of params) --
     _seg_slope = _meta(
-        "parameter_derived", "seg_slope clamped to >= 1e-7 (upstream edit)"
+        "parameter_internal", "seg_slope clamped to >= 1e-7 (upstream edit)"
     )
     seg_length_km = _meta(
-        "parameter_derived", "Segment length [km] (m / 1000)"
+        "parameter_internal", "Segment length [km] (m / 1000)"
     )
-    _seg_lat_rad = _meta("parameter_derived", "Segment latitude [radians]")
+    _seg_lat_rad = _meta("parameter_internal", "Segment latitude [radians]")
 
     # -- inputs: routing (PRMSChannel) + hydraulic geometry --
     seg_outflow = _meta("input", "Streamflow leaving each segment [cfs]")

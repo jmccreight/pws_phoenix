@@ -25,7 +25,7 @@ SEPARATED along framework seams (design decisions w/ JLM):
   Summing them into ``seg_lateral_inflow`` is channel physics and
   happens first thing in the kernel. Cross-dis fluxes are VOLUMES
   (cubic feet) -- dis-relative units (inches) never cross a Map.
-- **Muskingum coefficients -> parameter_derived.** ``c0/c1/c2/ts/tsi``
+- **Muskingum coefficients -> parameter_internal.** ``c0/c1/c2/ts/tsi``
   (+ 0-based ``tosegment0``) are computed in ``initialize()`` from
   process params (``mann_n``, ``x_coef``) + dis variables, then frozen.
 
@@ -193,6 +193,7 @@ class PRMSChannel(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.int64,
+        derivation="Discretization(topo_order={'segment_order': 'tosegment'})",
         description=(
             "Upstream-to-downstream ordering (0-based) -- DIS-derived: "
             "Discretization(topo_order={'segment_order': 'tosegment'})"
@@ -215,37 +216,37 @@ class PRMSChannel(Process):
 
     # -- derived parameters (computed by initialize(), then frozen) --
     tosegment0 = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.int64,
         description="Downstream segment (0-based; negative = outlet)",
     )
     ts = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Routing sub-timestep [h] (float)",
     )
     tsi = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.int64,
         description="Routing sub-timestep [h] (int; -1 = within-hour)",
     )
     c0 = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Muskingum c0 coefficient",
     )
     c1 = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Muskingum c1 coefficient",
     )
     c2 = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Muskingum c2 coefficient",

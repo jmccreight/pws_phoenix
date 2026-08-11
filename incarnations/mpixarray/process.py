@@ -64,7 +64,7 @@ class DataArrayMeta:
 
     kind: Literal[
         "parameter",
-        "parameter_derived",
+        "parameter_internal",
         "input",
         "mutable_input",
         "variable",
@@ -82,6 +82,23 @@ class DataArrayMeta:
     # natural cut at the prognostic variables for state-updating
     # techniques (JLM, Aug 2026).
     restart: bool = False
+    # SUPPLY-OR-DERIVE provenance (kind="parameter" only). THE
+    # PARAMETER TAXONOMY, to be kept patently clear (JLM, Aug 2026):
+    #
+    # 1. AUTHORED (kind="parameter", derivation=None): data or
+    #    calibration the modeler supplies. Required.
+    # 2. DERIVABLE (kind="parameter", derivation=<str>): STILL
+    #    REQUIRED at assembly, but obtainable by the stated
+    #    factory/formula from other supplied quantities (e.g. the
+    #    solar tables from slope/aspect/latitude). By convention the
+    #    string NAMES ITS INPUTS -- that list is what pre-processing
+    #    provenance stamps digest to detect stale artifacts. May
+    #    become optional under future compute-if-absent semantics.
+    # 3. INTERNAL (kind="parameter_internal", no derivation):
+    #    computed by initialize(), NEVER supplied, never part of the
+    #    contract's required half. "Internal" and "derivable" are
+    #    deliberately distinct words for distinct lifecycles.
+    derivation: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +123,7 @@ def _resolved_fields(cls: type) -> dict[str, DataArrayMeta]:
 
     Walks the full MRO base-first, so a subclass redeclaration of a
     name OVERRIDES the base's declaration entirely -- including its
-    kind (e.g. an Ag variant turning a frozen ``parameter_derived``
+    kind (e.g. an Ag variant turning a frozen ``parameter_internal``
     geometry field into a per-step ``variable``). A field keeps the
     ordering position of its FIRST declaration; subclass-new fields
     follow the base's.
@@ -213,7 +230,7 @@ class Process(ABC):
     def initialize(self) -> None:
         """Per-process init hook (default: no-op). Called ONCE by the Model
         after binding, IC loading, and input validation, before the run
-        loop. Compute `kind="parameter_derived"` fields in place here
+        loop. Compute `kind="parameter_internal"` fields in place here
         (e.g. Muskingum coefficients from mann_n + dis variables); the
         Model freezes them (read-only) after all hooks run. Contract:
         LOCAL (no collectives), reads params/dis vars off self._obj, no
@@ -236,10 +253,10 @@ class Process(ABC):
         return _keys_of_kind(cls, "parameter")
 
     @classmethod
-    def get_parameters_derived(cls) -> dict[str, DataArrayMeta]:
+    def get_parameters_internal(cls) -> dict[str, DataArrayMeta]:
         """Parameters COMPUTED by initialize() rather than supplied
         (read-only after; metas returned for allocation)."""
-        return _dict_of_kind(cls, "parameter_derived")
+        return _dict_of_kind(cls, "parameter_internal")
 
     @classmethod
     def get_inputs(cls) -> tuple[str, ...]:

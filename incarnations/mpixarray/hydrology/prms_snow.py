@@ -1482,6 +1482,7 @@ class PRMSSnow(Process):
         dtype=np.float64,
         description="Potential shortwave on a horizontal plane per Julian "
         "day [cal/cm^2] -- static table indexed by current_doy",
+        derivation="compute_soltabs(hru_slope, hru_aspect, hru_lat)",
     )
 
     # (tmax_allsnow_c: upstream converts the whole (nmonth, nhru)

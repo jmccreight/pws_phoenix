@@ -108,7 +108,7 @@ ANSWER_NAMES = (
     "swale_actet",
     "unused_potet",
 )
-# statics (parameter_derived here; upstream variables never written)
+# statics (parameter_internal here; upstream variables never written)
 STATIC_ANSWER_NAMES = ("pref_flow_thrsh", "pref_flow_max")
 # compared only on NON-ag HRUs (upstream mask_dict)
 NOT_AG_ONLY_NAMES = (
@@ -186,9 +186,7 @@ def model_run(parameters, tmp_path_factory):
     """Build + run + finalize the Model once for the module."""
     out_dir = tmp_path_factory.mktemp("prms_soilzone_ag_output")
     forcings = {
-        nn: xr.load_dataarray(GEN_DIR / f"{nn}.nc").rename(
-            {"nhm_id": "nhru"}
-        )
+        nn: xr.load_dataarray(GEN_DIR / f"{nn}.nc").rename({"nhm_id": "nhru"})
         for nn in DISK_INPUT_NAMES
     }
     # spinup: STATIC ag_frac, constant in time
@@ -229,9 +227,7 @@ def model_run(parameters, tmp_path_factory):
 class TestPRMSSoilzoneAg:
     # ============ TESTS ============
 
-    def test_all_variables_all_timesteps(
-        self, model_run, answers, not_ag_idx
-    ):
+    def test_all_variables_all_timesteps(self, model_run, answers, not_ag_idx):
         """Every output variable matches pywatershed over the full run."""
         output_ds = xr.load_dataset(
             model_run["control"]["output_serial_zarr"],
@@ -276,6 +272,9 @@ class TestPRMSSoilzoneAg:
                 actual = actual[not_ag_idx]
                 desired = desired[not_ag_idx]
             np.testing.assert_allclose(
-                actual, desired, rtol=rtol, atol=atol,
+                actual,
+                desired,
+                rtol=rtol,
+                atol=atol,
                 err_msg=f"final '{nn}' differs",
             )

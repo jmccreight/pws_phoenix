@@ -8,7 +8,7 @@ pywatershed's answers at its OWN autotest tolerance (rtol = atol =
 branchy threshold process, upstream does not hold it to the 1e-13 of
 groundwater/channel).
 
-Static (init-only) quantities -- the parameter_derived geometry plus
+Static (init-only) quantities -- the parameter_internal geometry plus
 dprst_area_clos (never written back by the kernel; see the module
 docstring) -- are validated once against the answer files' first
 timestep rather than streamed.
@@ -52,7 +52,7 @@ INPUT_NAMES = (
 )
 # time-varying answers (pywatershed compares all variables; dprst_in
 # has no answer file and dprst_vol_thres_open is excluded by upstream's
-# own autotest -- it is parameter_derived here)
+# own autotest -- it is parameter_internal here)
 ANSWER_NAMES = (
     "contrib_fraction",
     "infil",
@@ -127,8 +127,7 @@ def model_run(parameters, tmp_path_factory):
     # pywatershed output files put forcings on the "nhm_id" dim; the
     # parameter files use "nhru" -- unify on the grid dim
     forcings = {
-        nn: xr.load_dataarray(GEN_DIR / f"{nn}.nc")
-        .rename({"nhm_id": "nhru"})
+        nn: xr.load_dataarray(GEN_DIR / f"{nn}.nc").rename({"nhm_id": "nhru"})
         for nn in INPUT_NAMES
     }
     process_dict = {

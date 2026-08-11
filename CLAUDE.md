@@ -345,7 +345,7 @@ the `epiweeks` dep).
   `Process.initialize()` (default no-op), called once by the Model
   after binding/ICs/input-validation, before the run loop; contract =
   LOCAL (no collectives), no `Time`. Computes
-  **`kind="parameter_derived"`** fields (parameters COMPUTED at init
+  **`kind="parameter_internal"`** fields (parameters COMPUTED at init
   rather than supplied -- e.g. Muskingum c0/c1/c2 from mann_n + dis
   vars; kept in-model over offline precompute for single-source-of-
   truth with the calibration params). Allocated like variables
@@ -412,7 +412,7 @@ is the one true-param edit -> NotImplementedError guard; derived-param
 clamps applied silently pre-freeze; `soil_zone_max`/`_swale_limit`
 computed upstream but never read by its kernel -> not ported;
 upstream underscore names (`_sat_threshold`, `_pref_flow_den`, flags)
-kept verbatim as parameter_derived; np.bool_ added to process.py
+kept verbatim as parameter_internal; np.bool_ added to process.py
 `_FILL_VALUE`. (6, DONE July 2026) `hydrology/prms_canopy.py` -- PRMSCanopy,
 standalone parity green first run serial + 4-rank MPI
 (`tests/test_prms_canopy{,_mpi}.py`) at upstream's own 1e-12, AND
@@ -586,9 +586,9 @@ Port conventions (established by the groundwater port):
   Fix belongs in ncxarray: skip/type the fill value for coordinate and
   non-float variables.
 - Stage-2 framework part (a) is DONE (dis-owned params + init hook +
-  `parameter_derived`; see the Phase-2 backlog entries above).
+  `parameter_internal`; see the Phase-2 backlog entries above).
   Decisions taken with JLM: `segment_order` is DIS-owned (topology);
-  Kcoef/c0/c1/c2/ts/tsi are PROCESS-owned (`parameter_derived`,
+  Kcoef/c0/c1/c2/ts/tsi are PROCESS-owned (`parameter_internal`,
   computed in `initialize()` from mann_n/x_coef + dis vars); the three
   lateral-inflow fluxes are mapped to segments SEPARATELY (three Maps,
   same weights by reference) and summed in the channel kernel
@@ -647,7 +647,7 @@ Node half (B-2): numerics verbatim from pywatershed
 `_calc_istarf_release` + hourly pre/post-release, scalars at [inode] --
 incl. the ORDER-SENSITIVE `7.0*flow*24.0*60.0*60.0` weekly volumes
 (pywatershed's own warning); `m3ps_to_MCM` =
-(24/n_substeps)*3600/1e6 is a `parameter_derived` per-node broadcast
+(24/n_substeps)*3600/1e6 is a `parameter_internal` per-node broadcast
 so the njit substep reads it from `state`; epiweek 53 folds to 52 in
 `substep`. Parameters FREEZE at assembly => pywatershed's in-node
 data-prep moved OUT of the node: nan `Obs_MEANFLOW_CUMECS` <-
@@ -730,7 +730,7 @@ hooks: `initialize_type(dataset, n_substeps, io_in_cfs)` (contract
 grew again; the 4 unit-agnostic types ignore it -- muskingum/
 pass-through/obsin/source_sink are linear in flow). DESIGN: no
 branches in njit code -- the STARFIT family gets two
-parameter_derived per-node broadcasts `io_to_cms` / `cms_to_io` set
+parameter_internal per-node broadcasts `io_to_cms` / `cms_to_io` set
 to the pywatershed constants (cms_to_cfs = 35.314666721489, module
 constants in starfit_flow_node.py; its cm_to_cf == cms_to_cfs so one
 pair serves flows AND storages) in a cfs graph and to **1.0 in a cms

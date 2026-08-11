@@ -38,7 +38,7 @@ Declarations/decisions:
 - temp_units is a ('scalar',) parameter consumed in initialize() (the
   transp_tmax F conversion -- upstream's "candidate for worst code
   lines").
-- hru_cossl and transp_tmax_f are parameter_derived (space,).
+- hru_cossl and transp_tmax_f are parameter_internal (space,).
 - Southern-hemisphere domains raise NotImplementedError in
   initialize() (upstream raises inside its is_summer logic).
 
@@ -229,6 +229,7 @@ class PRMSAtmosphereBase(Process):
         dtype=np.float64,
         description="Potential shortwave on the sloped surface per Julian "
         "day [cal/cm^2] -- static table indexed by current_doy",
+        derivation="compute_soltabs(hru_slope, hru_aspect, hru_lat)",
     )
     soltab_horad_potsw = DataArrayMeta(
         kind="parameter",
@@ -236,11 +237,12 @@ class PRMSAtmosphereBase(Process):
         dtype=np.float64,
         description="Potential shortwave on a horizontal plane per Julian "
         "day [cal/cm^2] -- static table indexed by current_doy",
+        derivation="compute_soltabs(hru_slope, hru_aspect, hru_lat)",
     )
 
     # -- derived parameters (initialize(); frozen after) --
     hru_cossl = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="cos(arctan(hru_slope))",
@@ -682,7 +684,7 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
 
     # -- derived parameters (ADDED) --
     transp_tmax_f = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="transp_tmax in degF (temp_units conversion)",

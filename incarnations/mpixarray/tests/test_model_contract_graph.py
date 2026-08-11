@@ -146,7 +146,10 @@ def test_label_elision_and_params(nhm_graph):
     assert " +" in mermaid  # aggregated edge labels elide long lists
     # mermaid (the fallback) carries the one-line parameter summary
     # in the bubble; dot uses the sectioned table (test_supply_side)
-    assert "prms_snow<br/>PRMSSnow<br/>params: 21 static + 4 tv" in mermaid
+    assert (
+        "prms_snow<br/>PRMSSnow<br/>params: 21 static + 3 tv + 1 derivable"
+        in mermaid
+    )
 
 
 def test_markdown_fence(nhm_graph):
@@ -187,11 +190,13 @@ def test_supply_side(nhm_graph):
     """The contract's supply half: parameter classification, the
     initial-value seams, and the restartable state -- all sectioned
     INSIDE the process node."""
-    # classification from the declared dims
+    # classification: dims for static/tv; a declared derivation
+    # makes its own class
     atmos = nhm_graph.parameters["prms_atmosphere"]
     assert "tmax_cbh_adj" in atmos["cyclic"]  # (nmonth, space)
-    assert "soltab_potsw" in atmos["cyclic"]  # (ndoy, space)
+    assert "soltab_potsw" in atmos["derivable"]  # declared derivation
     assert "temp_units" in atmos["static"]
+    assert "hru_in_to_cf" in nhm_graph.parameters["prms_runoff"]["derivable"]
     # initial-value seams attach to their processes
     assert nhm_graph.initial_values == {
         "prms_groundwater": ["gwstor_init"],
@@ -218,8 +223,10 @@ def test_supply_side(nhm_graph):
         },
         show_params=True,
     ).to_dot()
-    assert "parameters: 17 time-varying" in full
+    assert "parameters: 15 time-varying" in full  # soltabs -> derivable
+    assert "parameters: 2 derivable" in full
     assert 'tmax_cbh_adj<BR ALIGN="LEFT"/>' in full
+    assert 'soltab_potsw<BR ALIGN="LEFT"/>' in full  # in its section
     assert "tmax_sum" in full  # restartable state, by name
 
 

@@ -27,7 +27,7 @@ Port scope (agreed with JLM, July 2026):
   millions of cubic feet); in a cms graph the factors are 1.0 --
   multiplying by 1.0 is an IEEE identity, so that path is
   byte-identical to the pre-conversion (Round B validated) kernel.
-  The factors ride as per-node parameter_derived broadcasts
+  The factors ride as per-node parameter_internal broadcasts
   (io_to_cms / cms_to_io) so the njit code reads them from state,
   branch-free.
 - `time_context = ("epiweek",)`: the seasonal release harmonics read
@@ -568,14 +568,14 @@ class StarfitFlowNode:
         ),
         # -- derived parameters (initialize_type, then frozen) --
         "m3ps_to_MCM": DataArrayMeta(
-            kind="parameter_derived",
+            kind="parameter_internal",
             dims=("space",),
             dtype=np.float64,
             description="m^3/s -> MCM per substep "
             "(nhrs_substep*3600/1e6; graph n_substeps, broadcast)",
         ),
         "io_to_cms": DataArrayMeta(
-            kind="parameter_derived",
+            kind="parameter_internal",
             dims=("space",),
             dtype=np.float64,
             description="Graph io units -> cms/MCM factor "
@@ -583,7 +583,7 @@ class StarfitFlowNode:
             "graph; graph io_in_cfs, broadcast)",
         ),
         "cms_to_io": DataArrayMeta(
-            kind="parameter_derived",
+            kind="parameter_internal",
             dims=("space",),
             dtype=np.float64,
             description="cms/MCM -> graph io units factor "

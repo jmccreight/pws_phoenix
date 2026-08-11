@@ -150,9 +150,7 @@ def _open_hru_forcing(name):
     hru grid dim. load_dataarray = open, LOAD, CLOSE: tests must not
     accumulate open netCDF handles -- past ~128 the xarray file-manager
     LRU churns reopen/evict on every access (a de-facto hang)."""
-    return xr.load_dataarray(GEN_DIR / f"{name}.nc").rename(
-        {"nhm_id": "nhru"}
-    )
+    return xr.load_dataarray(GEN_DIR / f"{name}.nc").rename({"nhm_id": "nhru"})
 
 
 @pytest.fixture(scope="module")
@@ -374,7 +372,7 @@ class TestPRMSChannelSubmodel:
                 f"[{mode}] '{nn}' final state differs"
             )
 
-    def test_derived_parameters_frozen(self, model_run):
+    def test_internal_parameters_frozen(self, model_run):
         proc = model_run["model"].model_dict["prms_channel"]
         for nn in ("c0", "c1", "c2", "ts", "tsi", "tosegment0"):
             with pytest.raises(ValueError):

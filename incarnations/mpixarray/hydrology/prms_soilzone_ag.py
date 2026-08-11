@@ -50,7 +50,7 @@ when it isn't.**
   (parameters, inputs -- just adds ``ag_frac`` --, variables, no
   removals), so ``PRMSRunoffAg(PRMSRunoff)`` is honest; its only
   wrinkle is ``hru_perv``/``hru_frac_perv`` going frozen
-  parameter_derived -> per-step variable (dynamic ``ag_frac``),
+  parameter_internal -> per-step variable (dynamic ``ag_frac``),
   handled by declaration override.
 
 - **Upstream agrees with the sibling reading**: its
@@ -120,13 +120,14 @@ from hydrology.prms_soilzone import (
 from process import DataArrayMeta, Process
 
 
-def _meta(kind, description, dtype=np.float64, restart=False):
+def _meta(kind, description, dtype=np.float64, restart=False, derivation=None):
     return DataArrayMeta(
         kind=kind,
         dims=("space",),
         dtype=dtype,
         description=description,
         restart=restart,
+        derivation=derivation,
     )
 
 
@@ -149,7 +150,9 @@ class PRMSSoilzoneAg(Process):
     )
     hru_area = _meta("parameter", "HRU area [acres]")
     hru_in_to_cf = _meta(
-        "parameter", "Conversion of inches over the HRU to cubic feet"
+        "parameter",
+        "Conversion of inches over the HRU to cubic feet",
+        derivation="hru_area * 43560.0 / 12.0",
     )
 
     # -- process parameters --
@@ -219,32 +222,34 @@ class PRMSSoilzoneAg(Process):
 
     # -- derived parameters (initialize(); STATIC, no ag_frac dep) --
     soil_rechr_max = _meta(
-        "parameter_derived", "Recharge-zone maximum storage [in] (clamped)"
+        "parameter_internal", "Recharge-zone maximum storage [in] (clamped)"
     )
     ag_soil_rechr_max = _meta(
-        "parameter_derived", "Ag recharge-zone maximum storage [in] (clamped)"
+        "parameter_internal", "Ag recharge-zone maximum storage [in] (clamped)"
     )
     _sat_threshold = _meta(
-        "parameter_derived", "sat_threshold zeroed for INACTIVE|LAKE"
+        "parameter_internal", "sat_threshold zeroed for INACTIVE|LAKE"
     )
     _pref_flow_den = _meta(
-        "parameter_derived", "pref_flow_den zeroed for non-LAND"
+        "parameter_internal", "pref_flow_den zeroed for non-LAND"
     )
     pref_flow_thrsh = _meta(
-        "parameter_derived", "Gravity storage above which flow goes pref [in]"
+        "parameter_internal", "Gravity storage above which flow goes pref [in]"
     )
     pref_flow_max = _meta(
-        "parameter_derived", "Maximum preferential-flow storage [inches]"
+        "parameter_internal", "Maximum preferential-flow storage [inches]"
     )
     soil_lower_max = _meta(
-        "parameter_derived", "Lower-zone maximum storage [inches]"
+        "parameter_internal", "Lower-zone maximum storage [inches]"
     )
     ag_soil_lower_stor_max = _meta(
-        "parameter_derived",
+        "parameter_internal",
         "Ag lower-zone maximum [in] (PRE-clamp ag_soil_rechr_max, upstream "
         "order)",
     )
-    hru_area_imperv = _meta("parameter_derived", "Impervious HRU area [acres]")
+    hru_area_imperv = _meta(
+        "parameter_internal", "Impervious HRU area [acres]"
+    )
 
     # -- inputs --
     dprst_evap_hru = _meta("input", "Depression evaporation [in over HRU]")

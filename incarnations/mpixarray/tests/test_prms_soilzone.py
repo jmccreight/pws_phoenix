@@ -12,7 +12,7 @@ comparing them here would be tautological (upstream's own comment) --
 and on drb dunnian is identically zero (sat_threshold >= 999).
 
 Static (init-only) quantities -- pref_flow_thrsh / pref_flow_max
-(parameter_derived here, upstream "variables" its kernel never
+(parameter_internal here, upstream "variables" its kernel never
 writes) -- are validated once against the answers' first timestep.
 
 Requires GENERATED pywatershed test data; skips with a reason if
@@ -135,8 +135,7 @@ def model_run(parameters, tmp_path_factory):
     """Build + run + finalize the Model once for the module."""
     out_dir = tmp_path_factory.mktemp("prms_soilzone_output")
     forcings = {
-        nn: xr.load_dataarray(GEN_DIR / f"{nn}.nc")
-        .rename({"nhm_id": "nhru"})
+        nn: xr.load_dataarray(GEN_DIR / f"{nn}.nc").rename({"nhm_id": "nhru"})
         for nn in INPUT_NAMES
     }
     process_dict = {

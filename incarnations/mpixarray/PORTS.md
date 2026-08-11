@@ -63,9 +63,9 @@ relies on Model/ModelMPI running ALL `advance()` hooks before any
 | Process | Module | Validation standard | Notes |
 |---|---|---|---|
 | PRMSGroundwater | `hydrology/prms_groundwater.py` | 1e-13 (upstream's own) | First real port; dis-first parameter sourcing |
-| PRMSChannel | `hydrology/prms_channel.py` | 1e-13; `seg_stor_change` (1e-7, 1e-4) cancellation carve-out | hru→segment aggregation externalized to Maps; muskingum coefficients = `parameter_derived` |
+| PRMSChannel | `hydrology/prms_channel.py` | 1e-13; `seg_stor_change` (1e-7, 1e-4) cancellation carve-out | hru→segment aggregation externalized to Maps; muskingum coefficients = `parameter_internal` |
 | FlowGraph (6 node types) | `flow_graph.py` + `hydrology/*_flow_node.py` | 1e-7…1e-10 per mode | Registry dispatch via `literal_unroll`; hourly + daily STARFIT; io_in_cfs |
-| PRMSRunoff | `hydrology/prms_runoff.py` | 1e-10 (upstream's own) | dprst-ACTIVE path; `basin_init`/`dprst_init` → `initialize()` + `parameter_derived` |
+| PRMSRunoff | `hydrology/prms_runoff.py` | 1e-10 (upstream's own) | dprst-ACTIVE path; `basin_init`/`dprst_init` → `initialize()` + `parameter_internal` |
 | PRMSSoilzone | `hydrology/prms_soilzone.py` | 1e-10 observed (upstream's own is 5e-6) | First `mutable_input` (`sroff`/`sroff_vol`: dunnian added in place) |
 | PRMSCanopy | `hydrology/prms_canopy.py` | 1e-12 (upstream's own) | `pptmix` = written-never-read mutable input; hru_type hardwired all-LAND upstream |
 | PRMSSnow | `hydrology/prms_snow.py` | **bit-identical** to upstream's numpy path (A/B); 1e-3 on upstream's own 5-var list vs answers | See "The snow story" below |
@@ -105,7 +105,7 @@ end in `tests/test_prms_channel{,_mpi}.py`.
   verbatim signatures, called directly (not passed as arguments).
 - **Init-time work** (`basin_init`, `_initialize_soilzone_data`,
   muskingum coefficients, solar tables) → `initialize()` +
-  `kind="parameter_derived"` (frozen after) or the factory pattern;
+  `kind="parameter_internal"` (frozen after) or the factory pattern;
   init-time numpy staging is fine there.
 - **NOT ported, everywhere**: Budget/ConservativeProcess (backlogged
   design pass), adapters, restart, `calc_method` switch (numba is THE
@@ -173,7 +173,7 @@ chain" below.
 - mpixarray cannot declare multi-dim derived buffers (its buffer
   creation decomposes EVERY declared dim) — hence per-element unit
   conversions in kernels (snow's `tmax_allsnow` F→C) and the solar
-  FACTORY pattern instead of (ndoy, space) `parameter_derived`.
+  FACTORY pattern instead of (ndoy, space) `parameter_internal`.
 - pywatershed hardcodes `dnearzero = 2.23e-16` (NOT
   `np.finfo(float64).eps`) — threshold branches differ if you get
   this wrong.

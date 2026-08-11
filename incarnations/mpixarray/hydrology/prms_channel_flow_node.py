@@ -126,31 +126,31 @@ class PRMSChannelFlowNode:
         ),
         # -- derived parameters (initialize_type, then frozen) --
         "ts": DataArrayMeta(
-            kind="parameter_derived",
+            kind="parameter_internal",
             dims=("space",),
             dtype=np.float64,
             description="Routing sub-timestep [h] (float)",
         ),
         "tsi": DataArrayMeta(
-            kind="parameter_derived",
+            kind="parameter_internal",
             dims=("space",),
             dtype=np.int64,
             description="Routing sub-timestep [h] (int; -1 = within-hour)",
         ),
         "c0": DataArrayMeta(
-            kind="parameter_derived",
+            kind="parameter_internal",
             dims=("space",),
             dtype=np.float64,
             description="Muskingum c0 coefficient",
         ),
         "c1": DataArrayMeta(
-            kind="parameter_derived",
+            kind="parameter_internal",
             dims=("space",),
             dtype=np.float64,
             description="Muskingum c1 coefficient",
         ),
         "c2": DataArrayMeta(
-            kind="parameter_derived",
+            kind="parameter_internal",
             dims=("space",),
             dtype=np.float64,
             description="Muskingum c2 coefficient",

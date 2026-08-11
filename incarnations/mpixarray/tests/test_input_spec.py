@@ -77,7 +77,23 @@ def test_stream_temp_standalone_externals():
     assert set(spec) == {"required"}
     assert set(spec["required"]) == {"nsegment"}
     seg = spec["required"]["nsegment"]
-    assert set(seg) == {"external_inputs", "parameters", "initial_values"}
+    assert set(seg) == {
+        "external_inputs",
+        "parameters",
+        "derivable_parameters",
+        "initial_values",
+        "initial_state",
+    }
+    # derivable: required, with a stated derivation (NOT the same as
+    # internal parameters, which are never supplied)
+    assert "segment_order" in seg["derivable_parameters"]
+    assert (
+        "Discretization"
+        in (seg["derivable_parameters"]["segment_order"]["derivation"])
+    )
+    assert "segment_order" not in seg["parameters"]
+    # the restartable warm-start surface
+    assert seg["initial_state"] == {"prms_stream_temp": ["seg_tave_water"]}
     # exactly what test_prms_stream_temp.py supplies from disk
     assert set(seg["external_inputs"]) == {
         "seg_outflow",
@@ -94,7 +110,7 @@ def test_stream_temp_standalone_externals():
         "seginc_ssflow",
         "seginc_gwflow",
     }
-    # derived parameters are internal, never in the supply set
+    # internal parameters (init-computed) are never in the supply set
     assert "_seg_slope" not in seg["parameters"]
 
     optional = Model.input_spec(process_dict, include_optional=True)[
@@ -102,7 +118,7 @@ def test_stream_temp_standalone_externals():
     ]["nsegment"]
     assert not optional["internal_inputs"]
     assert not optional["map_fed_inputs"]
-    assert "_seg_slope" in optional["derived_parameters"]
+    assert "_seg_slope" in optional["internal_parameters"]
 
 
 def test_full_chain_contract():
@@ -200,13 +216,44 @@ def test_full_chain_contract():
 
     # the initial= seams surface (the *_init PARAMETERS -- soilzone's
     # soil_moist_init_frac etc. -- are ordinary supplied parameters
-    # and ride the "parameters" list; restart is NOT implemented)
+    # and ride the "parameters" list)
     assert seg["initial_values"]["segment_flow_init"] == {
         "variable": "seg_outflow",
         "process": "prms_channel",
     }
     assert "gwstor_init" in hru["initial_values"]
     assert "soil_moist_init_frac" in hru["parameters"]
+
+    # derivable parameters: the solar tables (factory), hru_in_to_cf
+    # (formula) on the hru grid; segment_order (dis topology) on the
+    # segment grid -- each with its derivation, none among "parameters"
+    assert set(hru["derivable_parameters"]) == {
+        "soltab_potsw",
+        "soltab_horad_potsw",
+        "hru_in_to_cf",
+    }
+    assert (
+        "compute_soltabs"
+        in (hru["derivable_parameters"]["soltab_potsw"]["derivation"])
+    )
+    assert (
+        "43560" in (hru["derivable_parameters"]["hru_in_to_cf"]["derivation"])
+    )
+    assert set(hru["derivable_parameters"]["hru_in_to_cf"]["processes"]) == {
+        "prms_runoff",
+        "prms_soilzone",
+        "prms_groundwater",
+    }
+    assert set(seg["derivable_parameters"]) == {"segment_order"}
+    for name in ("soltab_potsw", "hru_in_to_cf"):
+        assert name not in hru["parameters"]
+
+    # the restartable warm-start surface, per process
+    assert "pkwater_equiv" in hru["initial_state"]["prms_snow"]
+    assert set(seg["initial_state"]["prms_channel"]) == {
+        "seg_inflow",
+        "outflow_ts",
+    }
 
     # the categories partition the declared input names
     for req, opt in ((hru, hru_opt), (seg, seg_opt)):

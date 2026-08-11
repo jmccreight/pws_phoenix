@@ -83,6 +83,7 @@ class PRMSGroundwaterNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Conversion of inches over the HRU to cubic feet",
+        derivation="hru_area * 43560.0 / 12.0",
     )
 
     # -- process parameters --

@@ -4,7 +4,7 @@ The MRO walk resolves ONE final declaration per field name: a subclass
 redeclaration OVERRIDES the base's declaration entirely, including its
 kind, and a redeclared name keeps the ordering position of its first
 declaration. This is the seam the additive variants stand on (e.g.
-PRMSRunoffAg turning the frozen ``parameter_derived`` pervious
+PRMSRunoffAg turning the frozen ``parameter_internal`` pervious
 geometry into a per-step ``variable`` under dynamic ``ag_frac``) --
 without resolution, a redeclared name would be listed twice (or under
 two kinds) and assembly would break.
@@ -24,7 +24,7 @@ from process import DataArrayMeta, Process
 
 class _CoreProc(Process):
     geom = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="frozen geometry in the core",
@@ -81,21 +81,21 @@ class _VariantProc(_CoreProc):
 class TestFieldResolution:
     def test_base_unaffected(self):
         assert _CoreProc.get_parameters() == ("par",)
-        assert tuple(_CoreProc.get_parameters_derived()) == ("geom",)
+        assert tuple(_CoreProc.get_parameters_internal()) == ("geom",)
         assert _CoreProc.get_inputs() == ("forc",)
         assert _CoreProc.get_var_names() == ("state",)
 
     def test_kind_override_moves_field(self):
         """geom is a variable in the variant -- and ONLY a variable."""
         assert "geom" in _VariantProc.get_var_names()
-        assert "geom" not in _VariantProc.get_parameters_derived()
+        assert "geom" not in _VariantProc.get_parameters_internal()
 
     def test_no_duplicates(self):
         names = _VariantProc.get_var_names()
         assert len(names) == len(set(names))
         all_names = (
             _VariantProc.get_parameters()
-            + tuple(_VariantProc.get_parameters_derived())
+            + tuple(_VariantProc.get_parameters_internal())
             + _VariantProc.get_inputs()
             + _VariantProc.get_mutable_inputs()
             + _VariantProc.get_var_names()

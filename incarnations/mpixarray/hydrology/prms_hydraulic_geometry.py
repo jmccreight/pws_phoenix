@@ -18,7 +18,7 @@ parameters and overwrites them with the PRMS defaults (its own
 comment: "I dont love the design"). Here the direction is fixed with
 the declaration-override seam: ``PRMSHydraulicGeometryWidthOnly`` is
 the core, declaring ``depth_alpha``/``depth_m`` as
-``parameter_derived`` filled with the strmflow_character defaults
+``parameter_internal`` filled with the strmflow_character defaults
 (0.27 / 0.39) at initialize; ``PRMSHydraulicGeometryFull`` EXTENDS it
 by overriding those two declarations to kind="parameter" (supplied)
 and no-op'ing the default fill. One shared kernel. NHM parameter
@@ -83,14 +83,14 @@ class PRMSHydraulicGeometryWidthOnly(Process):
     # -- depth relationship: DERIVED defaults in this core; the Full
     # variant overrides these declarations to supplied parameters --
     depth_alpha = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Depth power-law coefficient [m per (cms)^depth_m] "
         "(strmflow_character default 0.27 in this core)",
     )
     depth_m = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Depth power-law exponent [-] "
@@ -213,7 +213,7 @@ class PRMSHydraulicGeometryWidthOnly(Process):
 class PRMSHydraulicGeometryFull(PRMSHydraulicGeometryWidthOnly):
     """Hydraulic geometry with SUPPLIED depth parameters: the core
     plus depth_alpha/depth_m as real parameters (declaration
-    override, parameter_derived -> parameter)."""
+    override, parameter_internal -> parameter)."""
 
     depth_alpha = DataArrayMeta(
         kind="parameter",

@@ -29,12 +29,12 @@ The core never touches dprst.
 
 Initialization -> framework seams (the Stage-2 mechanisms):
 
-- **basin_init/dprst_init -> ``initialize()`` + ``parameter_derived``.**
+- **basin_init/dprst_init -> ``initialize()`` + ``parameter_internal``.**
   pywatershed computes static geometry (``hru_perv``/``hru_frac_perv``/
   ``hru_imperv``/``dprst_area_max``/``dprst_area_open_max``/
   ``dprst_area_clos_max``/``dprst_frac_clos``/``dprst_vol_open_max``/
   ``dprst_vol_clos_max``/``dprst_vol_thres_open``) at construction;
-  here they are ``parameter_derived``: written once in ``initialize()``,
+  here they are ``parameter_internal``: written once in ``initialize()``,
   then frozen. ``dprst_vol_thres_open`` is nominally a pywatershed
   "variable" but is never written by its kernel (its own autotest
   excludes it from comparison) -- derived here.
@@ -982,6 +982,7 @@ class PRMSRunoffNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Conversion of inches over the HRU to cubic feet",
+        derivation="hru_area * 43560.0 / 12.0",
     )
 
     # -- process parameters --
@@ -1030,19 +1031,19 @@ class PRMSRunoffNoDprst(Process):
 
     # -- derived parameters (initialize(); basin_init) --
     hru_perv = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Pervious HRU area [acres]",
     )
     hru_frac_perv = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Pervious fraction of HRU area [-]",
     )
     hru_imperv = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Impervious HRU area [acres]",
@@ -1571,43 +1572,43 @@ class PRMSRunoff(PRMSRunoffNoDprst):
 
     # -- derived parameters (initialize(); basin_init/dprst_init) --
     dprst_area_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Maximum surface-depression area [acres]",
     )
     dprst_area_open_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Maximum open surface-depression area [acres]",
     )
     dprst_area_clos_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Maximum closed surface-depression area [acres]",
     )
     dprst_frac_clos = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Fraction of closed surface depressions [-]",
     )
     dprst_vol_open_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Maximum open surface-depression volume [acre-inches]",
     )
     dprst_vol_clos_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Maximum closed surface-depression volume [acre-inches]",
     )
     dprst_vol_thres_open = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description=(
@@ -1722,7 +1723,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
 
     def initialize(self) -> None:
         """basin_init + dprst_init verbatim (init-time loops; perf
-        irrelevant). Derived geometry -> parameter_derived (frozen
+        irrelevant). Derived geometry -> parameter_internal (frozen
         after this); dprst initial state -> variables."""
         obj = self._obj
         nhru = obj["hru_area"].values.shape[0]
@@ -2313,7 +2314,7 @@ class PRMSRunoffAg(PRMSRunoff):
 
     # -- derived parameters (ADDED) --
     ag_soil_rechr_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Ag recharge-zone maximum storage [inches] "

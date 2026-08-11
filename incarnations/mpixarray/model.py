@@ -225,18 +225,35 @@ class Model:
           INPUTS proper: time-varying data served in model-time
           lockstep (forcings/boundary data). A shared name is
           supplied ONCE and shared structurally.
-        - "parameters": {name: [declaring processes]} -- static
-          supplied data. Where each name is PACKAGED (a grid's dis
-          dataset -- consulted first at assembly -- vs a process
-          parameters dataset) is not resolved here: that is a
-          data-preparation decision, and assembly accepts either.
-          Note PRMS initial-condition parameters (`*_init*` by its
-          own naming convention, consumed by initialize()) are in
-          this list -- they are ordinary supplied parameters.
+        - "parameters": {name: [declaring processes]} -- AUTHORED
+          static supplied data (the modeler's data/calibration).
+          Where each name is PACKAGED (a grid's dis dataset --
+          consulted first at assembly -- vs a process parameters
+          dataset) is not resolved here: that is a data-preparation
+          decision, and assembly accepts either. Note PRMS
+          initial-condition parameters (`*_init*` by its own naming
+          convention, consumed by initialize()) are in this list --
+          they are ordinary supplied parameters.
+        - "derivable_parameters": {name: {"processes",
+          "derivation"}} -- REQUIRED at assembly exactly like
+          "parameters", but obtainable by the stated derivation (a
+          factory/formula over other supplied quantities; by
+          convention the string NAMES ITS INPUTS). PATENTLY DISTINCT
+          from ``kind="parameter_internal"``: internal parameters are
+          computed by initialize() and NEVER supplied (reported under
+          optional "internal_parameters"); derivable parameters ARE
+          supplied -- you may just generate them instead of authoring
+          them. (Under future compute-if-absent semantics this
+          category may become optional-with-default.)
         - "initial_values": {init_name: {"variable", "process"}} --
           the DataArrayMeta ``initial=`` seams: OPTIONAL direct
           supplies of a state variable's starting values via a
           process_dict entry key.
+        - "initial_state": {process: [variables]} -- the RESTARTABLE
+          warm-start surface: every ``restart=True`` variable is a
+          settable initial condition, supplied all-at-once via
+          ``control["restart_read"]`` (see ``write_restart``).
+          Optional supply, but part of the contract's surface.
 
         spec["maps"] (present when maps are given) -- REQUIRED supply
         too, kept beside "required" because that dict's keys are
@@ -255,7 +272,7 @@ class Model:
           inputs satisfied on-grid by structural sharing (another
           process's variable or derived parameter, including
           prior-step back-edges; or a same-named supplied parameter).
-        - "derived_parameters": {name: [processes]} -- computed by
+        - "internal_parameters": {name: [processes]} -- computed by
           initialize(); never supplied.
         - "map_fed_inputs": {name: {"map", "source_grid",
           "source_var", "consumers"}} -- satisfied by a Map's target
@@ -296,15 +313,24 @@ class Model:
             spec["optional"] = {}
         for grid, proc_names in grid_procs.items():
             parameters: Dict[str, List[str]] = {}
-            derived: Dict[str, List[str]] = {}
+            derivable: Dict[str, Dict[str, Any]] = {}
+            internal: Dict[str, List[str]] = {}
             var_owner: Dict[str, str] = {}
             initial_values: Dict[str, Any] = {}
+            initial_state: Dict[str, List[str]] = {}
             for kk in proc_names:
                 pcls = process_dict[kk]["class"]
-                for name in pcls.get_parameters():
-                    parameters.setdefault(name, []).append(kk)
-                for name in pcls.get_parameters_derived():
-                    derived.setdefault(name, []).append(kk)
+                for name, meta in _dict_of_kind(pcls, "parameter").items():
+                    if meta.derivation is not None:
+                        entry = derivable.setdefault(
+                            name,
+                            {"processes": [], "derivation": meta.derivation},
+                        )
+                        entry["processes"].append(kk)
+                    else:
+                        parameters.setdefault(name, []).append(kk)
+                for name in pcls.get_parameters_internal():
+                    internal.setdefault(name, []).append(kk)
                 for name, meta in pcls.get_variables().items():
                     var_owner.setdefault(name, kk)
                     if meta.initial is not None:
@@ -312,6 +338,18 @@ class Model:
                             "variable": name,
                             "process": kk,
                         }
+                restartable = list(pcls.get_restart_variables())
+                if restartable:
+                    initial_state[kk] = restartable
+            # a name declared derivable by ANY process is derivable
+            # (another process may declare it plain -- the derivation
+            # knowledge counts once)
+            for name in list(parameters):
+                if name in derivable:
+                    derivable[name]["processes"] = sorted(
+                        set(derivable[name]["processes"])
+                        | set(parameters.pop(name))
+                    )
 
             consumers: Dict[str, List[str]] = {}
             for kk in proc_names:
@@ -339,9 +377,9 @@ class Model:
                         "producer": var_owner[name],
                         "consumers": cons,
                     }
-                elif name in derived:
+                elif name in internal:
                     inputs_internal[name] = {
-                        "producer": derived[name][0],
+                        "producer": internal[name][0],
                         "consumers": cons,
                     }
                 elif name in map_feed:
@@ -349,11 +387,16 @@ class Model:
                         **map_feed[name],
                         "consumers": cons,
                     }
-                elif name in parameters:
+                elif name in parameters or name in derivable:
                     # a same-named supplied parameter satisfies the input
                     # structurally (assembly adds it to the grid dataset)
+                    declarer = (
+                        parameters[name][0]
+                        if name in parameters
+                        else derivable[name]["processes"][0]
+                    )
                     inputs_internal[name] = {
-                        "producer": f"(parameter of {parameters[name][0]})",
+                        "producer": f"(parameter of {declarer})",
                         "consumers": cons,
                     }
                 else:
@@ -362,12 +405,14 @@ class Model:
             spec["required"][grid] = {
                 "external_inputs": inputs_external,
                 "parameters": parameters,
+                "derivable_parameters": derivable,
                 "initial_values": initial_values,
+                "initial_state": initial_state,
             }
             if include_optional:
                 spec["optional"][grid] = {
                     "internal_inputs": inputs_internal,
-                    "derived_parameters": derived,
+                    "internal_parameters": internal,
                     "map_fed_inputs": inputs_map_fed,
                 }
         return spec
@@ -405,7 +450,7 @@ class Model:
             self.model_dict[kk].initialize()
         for kk, proc in self.model_dict.items():
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
-            for name in proc.get_parameters_derived():
+            for name in proc.get_parameters_internal():
                 grid_ds[name].values.flags.writeable = False
 
     def _validate_inputs_resolved(self) -> None:
@@ -508,7 +553,7 @@ class Model:
         # it to this grid's real dim (the grid key; `real_dim` above).
         # Params/inputs already arrive on the real dim (inputs validated
         # above), so only these need resolving. --
-        allocated = cls.get_variables() | cls.get_parameters_derived()
+        allocated = cls.get_variables() | cls.get_parameters_internal()
         for name, meta in allocated.items():
             if name in grid_ds:
                 continue
@@ -1113,7 +1158,7 @@ class ModelMPI(Model):
         # mpixarray buffer declaration until a distributed process
         # declares one.
         for cls in mpi_classes.values():
-            for name, meta in cls.get_parameters_derived().items():
+            for name, meta in cls.get_parameters_internal().items():
                 if name not in declared:
                     dims = tuple(
                         mpi_grid if dd == "space" else dd for dd in meta.dims

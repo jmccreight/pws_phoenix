@@ -268,7 +268,7 @@ class TestFlowGraph:
         ):
             assert proc["node_sink_source"].values[-1] == 0.0
 
-    def test_derived_parameters_frozen(self, graph_run):
+    def test_internal_parameters_frozen(self, graph_run):
         proc = graph_run["model"].model_dict["flow_graph"]
         for nn in ("ts", "tsi", "c0", "c1", "c2"):
             with pytest.raises(ValueError):

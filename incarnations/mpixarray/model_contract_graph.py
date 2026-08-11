@@ -21,7 +21,7 @@ intermediate representation -- ``grids`` (cluster -> process nodes),
 
 Edge semantics:
 
-- solid, labeled: INTERNAL inputs -- a variable (or derived
+- solid, labeled: INTERNAL inputs -- a variable (or internal
   parameter, or same-named supplied parameter) produced on the grid
   and consumed by structural sharing. One edge per
   producer->consumer pair; the label lists the variables carried.
@@ -34,14 +34,16 @@ Edge semantics:
 
 The SUPPLY side of the contract is drawn in gray, INSIDE each
 process node (an HTML-like table): a white header (the process --
-computed) over gray sections for the required parameters (static |
-time-varying, classified from the declared dims), the ``initial=``
-value seams, and the RESTARTABLE INITIAL STATE (every
-``restart=True`` variable is a settable initial condition -- a warm
-start supplies all of them). Section headers always carry counts;
-``show_params=True`` expands the names. External inputs are gray
-nodes. Together with the edges, that IS the contract: gray = you
-supply it, white = the model computes it.
+computed) over gray sections for the required parameters (authored
+static | time-varying, classified from the declared dims; DERIVABLE
+-- required but obtainable by their declared derivation -- as their
+own section), the ``initial=`` value seams, and the RESTARTABLE
+INITIAL STATE (every ``restart=True`` variable is a settable
+initial condition -- a warm start supplies all of them). Section
+headers always carry counts; ``show_params=True`` expands the
+names. External inputs are gray nodes. Together with the edges,
+that IS the contract: gray = you supply it, white = the model
+computes it.
 
 Usage (e.g. in a notebook):
 
@@ -105,20 +107,29 @@ class ModelContractGraph:
             }
 
         # -- the supply side of the contract, per process: required
-        # parameters (static vs time-varying, classified from the
-        # declared dims) and the initial-value seams --
+        # parameters (authored static vs time-varying, classified
+        # from the declared dims; DERIVABLE ones -- carrying a
+        # declared derivation -- are their own class) and the
+        # initial-value seams --
         self.parameters: dict[str, dict[str, list[str]]] = {}
         for slot, entry in process_dict.items():
             static: list[str] = []
             cyclic: list[str] = []
+            derivable: list[str] = []
             for name, meta in _dict_of_kind(
                 entry["class"], "parameter"
             ).items():
-                if any(dd in _CYCLIC_DIMS for dd in meta.dims):
+                if meta.derivation is not None:
+                    derivable.append(name)
+                elif any(dd in _CYCLIC_DIMS for dd in meta.dims):
                     cyclic.append(name)
                 else:
                     static.append(name)
-            self.parameters[slot] = {"static": static, "cyclic": cyclic}
+            self.parameters[slot] = {
+                "static": static,
+                "cyclic": cyclic,
+                "derivable": derivable,
+            }
         self.initial_values: dict[str, list[str]] = {}
         for grid, gg in spec["required"].items():
             for init_name, info in gg["initial_values"].items():
@@ -166,7 +177,7 @@ class ModelContractGraph:
 
         # -- map edges: source-grid producer -> consumer, per map --
         # the producer is whichever source-grid process declares the
-        # source variable (as a variable, derived parameter, or input
+        # source variable (as a variable, internal parameter, or input
         # -- e.g. an external-forcing carrier)
         def _producer_of(grid: str, var: str) -> str:
             for slot, entry in process_dict.items():
@@ -174,7 +185,7 @@ class ModelContractGraph:
                     continue
                 cls = entry["class"]
                 if var in cls.get_var_names() or var in tuple(
-                    cls.get_parameters_derived()
+                    cls.get_parameters_internal()
                 ) + tuple(cls.get_inputs()):
                     return slot
             return f"({grid})"
@@ -201,11 +212,13 @@ class ModelContractGraph:
     def _param_counts(self, slot: str) -> str:
         """The bubble's one-line parameter summary ('' if none)."""
         pp = self.parameters[slot]
-        if not pp["static"] and not pp["cyclic"]:
+        if not any(pp.values()):
             return ""
         counts = f"params: {len(pp['static'])} static"
         if pp["cyclic"]:
             counts += f" + {len(pp['cyclic'])} tv"
+        if pp["derivable"]:
+            counts += f" + {len(pp['derivable'])} derivable"
         return counts
 
     def _dot_table(self, slot: str, cls_name: str) -> str:
@@ -242,6 +255,13 @@ class ModelContractGraph:
                 section(
                     f"parameters: {len(pp['cyclic'])} time-varying",
                     pp["cyclic"],
+                )
+            )
+        if pp["derivable"]:
+            rows.append(
+                section(
+                    f"parameters: {len(pp['derivable'])} derivable",
+                    pp["derivable"],
                 )
             )
         inits = self.initial_values.get(slot, [])

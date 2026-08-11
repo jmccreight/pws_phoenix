@@ -42,7 +42,7 @@ skips otherwise), so runoff's parity is unaffected there.
 Initialization -> framework seams:
 
 - ``_initialize_soilzone_data`` -> ``initialize()`` +
-  ``parameter_derived``: ``hru_frac_perv`` (variant hook -- see above;
+  ``parameter_internal``: ``hru_frac_perv`` (variant hook -- see above;
   the full class matches PRMSRunoff's values), ``soil_rechr_max`` (+
   its two clamps, legal here: derived, pre-freeze), ``soil_lower_max``,
   ``_sat_threshold`` (zeroed for INACTIVE|LAKE), ``_pref_flow_den``
@@ -342,6 +342,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Conversion of inches over the HRU to cubic feet",
+        derivation="hru_area * 43560.0 / 12.0",
     )
 
     # -- process parameters --
@@ -457,60 +458,60 @@ class PRMSSoilzoneNoDprst(Process):
 
     # -- derived parameters (initialize(); frozen after) --
     hru_frac_perv = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Pervious fraction of HRU area [-] (variant hook: "
         "_set_hru_frac_perv)",
     )
     soil_rechr_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Recharge-zone maximum storage [inches] (clamped)",
     )
     soil_lower_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Lower-zone maximum storage [inches]",
     )
     _sat_threshold = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="sat_threshold zeroed for INACTIVE|LAKE HRUs "
         "(upstream edited-copy parameter)",
     )
     _pref_flow_den = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="pref_flow_den zeroed for non-LAND HRUs "
         "(upstream edited-copy parameter)",
     )
     pref_flow_thrsh = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Gravity storage above which flow goes preferential "
         "[inches] (upstream 'variable', never written by its kernel)",
     )
     pref_flow_max = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
         description="Maximum preferential-flow storage [inches] "
         "(upstream 'variable', never written by its kernel)",
     )
     _pref_flow_flag = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.bool_,
         description="LAND HRU with pref_flow_den > 0",
     )
     _soil2gw_flag = DataArrayMeta(
-        kind="parameter_derived",
+        kind="parameter_internal",
         dims=("space",),
         dtype=np.bool_,
         description="soil2gw_max > 0",
@@ -843,7 +844,7 @@ class PRMSSoilzoneNoDprst(Process):
     def initialize(self) -> None:
         """Upstream ``_initialize_soilzone_data`` in its exact order
         (init-time numpy staging is fine here). Derived geometry ->
-        parameter_derived (frozen after); initial state -> variables.
+        parameter_internal (frozen after); initial state -> variables.
         The ONLY variant-dependent piece is the ``_set_hru_frac_perv``
         hook."""
         obj = self._obj

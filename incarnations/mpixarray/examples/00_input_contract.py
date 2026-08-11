@@ -22,9 +22,10 @@
 # The returned spec has two halves (required first -- the input
 # contract proper; the informational half must be asked for):
 #
-# 1. **required** -> grid -> external inputs, parameters, initial
-#    values (the `initial=` seams; supplying them is optional but
-#    they are part of the supply surface)
+# 1. **required** -> grid -> external inputs, parameters (authored
+#    vs DERIVABLE -- required either way, but derivable ones state
+#    how to generate them), initial values (the `initial=` seams),
+#    and initial state (the restartable warm-start surface)
 # 2. **maps** -> each Map in the configuration implies ONE weights
 #    matrix (required supply; kept beside "required" because that
 #    dict's keys are grids)
@@ -58,6 +59,14 @@
 #   snow's `den_init` is the density of new-fallen snow, a physics
 #   parameter, not a state IC). All other state initializes to fixed
 #   values in `initialize()`.
+# - **Three kinds of parameter, patently.** AUTHORED (your data and
+#   calibration), DERIVABLE (required at assembly like any parameter,
+#   but the contract states the factory/formula that generates them
+#   -- the solar tables, `segment_order`, `hru_in_to_cf`), and
+#   INTERNAL (`kind="parameter_internal"`: computed by
+#   `initialize()`, never supplied, reported only in the optional
+#   half). "Derivable" and "internal" are deliberately distinct
+#   words for distinct lifecycles.
 # - **Restart is the third source of initial state**, beyond the
 #   `initial=` seams and the `*_init*` parameters:
 #   `Model.write_restart(dir)` saves the prognostic state and
@@ -303,16 +312,15 @@ pprint(
 #
 # A mechanical scan of the domain's `parameters_*.nc` + the CBH
 # files: purely informational (the current packaging, not the
-# contract). Names the framework computes, and names that ride under
-# a different native-PRMS name, are annotated.
+# contract). The DERIVABLE names annotate THEMSELVES now -- their
+# declared derivations come straight from the contract -- and names
+# that ride under a different native-PRMS name are annotated by hand.
 
 # %%
-KNOWN_COMPUTED = {
-    "soltab_potsw": "computed: compute_soltabs() factory",
-    "soltab_horad_potsw": "computed: compute_soltabs() factory",
-    "segment_order": (
-        "computed: Discretization(topo_order={'segment_order': 'tosegment'})"
-    ),
+DERIVABLE = {
+    name: f"derivable: {info['derivation']}"
+    for gg in spec["required"].values()
+    for name, info in gg["derivable_parameters"].items()
 }
 KNOWN_RENAMED = {
     "humidity_hru": (
@@ -331,8 +339,8 @@ for nn in ("prcp", "tmax", "tmin"):
 
 
 def source_of(name):
-    if name in KNOWN_COMPUTED:
-        return KNOWN_COMPUTED[name]
+    if name in DERIVABLE:
+        return DERIVABLE[name]
     if name in KNOWN_RENAMED:
         return KNOWN_RENAMED[name]
     found = sources.get(name)
@@ -343,6 +351,7 @@ for grid, gg in spec["required"].items():
     supplied = (
         list(gg["external_inputs"])
         + list(gg["parameters"])
+        + list(gg["derivable_parameters"])
         + list(gg["initial_values"])
     )
     print(f"\n=== grid '{grid}' ===")
@@ -396,10 +405,15 @@ soltabs = compute_soltabs(dis_hru)
 for entry in process_dict.values():
     das = {}
     for name in entry["class"].get_parameters():
-        if name in KNOWN_COMPUTED:
-            if name.startswith("soltab_"):
-                das[name] = soltabs[name]
-            continue  # segment_order: the Discretization's topo_order
+        # derivable names route to their factories (soltabs) or the
+        # Discretization (segment_order); hru_in_to_cf, also
+        # derivable, happens to ride in this domain's dis files and
+        # loads like anything else
+        if name.startswith("soltab_"):
+            das[name] = soltabs[name]
+            continue
+        if name == "segment_order":
+            continue  # the Discretization's topo_order derives it
         das[name] = domain_ds(sources[name][0])[name]
     if das:
         entry["parameters"] = xr.Dataset(das)
