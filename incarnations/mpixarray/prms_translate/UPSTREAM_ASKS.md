@@ -3,6 +3,7 @@
 **Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
 
 - [pyPRMS upstream asks](#pyprms-upstream-asks)
+  - [0. URGENT: every MetaData() call dies under packaging 26.3](#0-urgent-every-metadata-call-dies-under-packaging-263)
   - [1. Type-F parameter text is truncated to float32 at parse](#1-type-f-parameter-text-is-truncated-to-float32-at-parse)
   - [2. `force_default` makes the dynamic-parameter pathnames unreachable](#2-force_default-makes-the-dynamic-parameter-pathnames-unreachable)
   - [3. GSFLOW agricultural (soilzone_ag) metadata is missing](#3-gsflow-agricultural-soilzone_ag-metadata-is-missing)
@@ -35,6 +36,27 @@ standards downstream. We are happy to turn any of these branches into
 a PR.
 
 ---
+
+## 0. URGENT: every MetaData() call dies under packaging 26.3
+
+**Branch:** `ask/packaging-version-none` (**fix included**, suite
+green) -- `tests/func/test_MetaData.py::test_metadata_under_packaging_26_3`
+
+packaging 26.3 (current) changed `Version(None)` to raise
+`InvalidVersion` where older releases raised `TypeError`. The
+metadata version/deprecation filter uses
+`Version(elem.attrib.get('version'))` wrapped in `except TypeError`
+as control flow for absent attributes -- so under packaging 26.3
+**every `MetaData()` call crashes** on the first entry without a
+version attribute (i.e. immediately; pyPRMS is unusable). Found
+when a fresh environment solved to packaging 26.3.
+
+The branch replaces the exception control flow with explicit None
+checks (both the `version` and `deprecated` sites); the regression
+test simulates the 26.3 behavior with a `Version` stub so it
+protects under any installed packaging. This one is worth filing
+(and merging) first -- it will hit every user as packaging 26.3
+spreads. Interim user workaround: pin `packaging<26.3`.
 
 ## 1. Type-F parameter text is truncated to float32 at parse
 

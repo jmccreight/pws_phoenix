@@ -22,12 +22,13 @@ dependencies:
   # Notebook) with edits round-tripping to the .py
   - jupyterlab
   - jupytext
-  # ---- IO-stack + numba pins (Aug 2026): these encode env surgery
-  # that previously lived ONLY in the env's conda revision history
-  # (rev 1/2, Jul 2026) and was silently undone by the jupyterlab
-  # env update's re-solve (zarr 3.3 + xarray 2026.7 incompatible;
-  # HDF5 stack churn; numpy 2.5 > numba's ceiling). Do not relax
-  # without running the full test sweep. ----
+  # ---- IO-stack + numba pins: every pin here is load-bearing and
+  # gated by the full test sweep (serial + MPI + a notebook
+  # script-run). History: the Jul/Aug 2026 pins encoded env surgery
+  # that a re-solve once silently undid; the Aug 2026 modernization
+  # pass then adopted zarr 3 + xarray 2026.7 DELIBERATELY (validated
+  # in a fresh scratch env before landing here). Do not relax or bump
+  # without the sweep. ----
   # 1.7.3 pinned (rev-2 surgery downgraded 1.7.4 -> 1.7.3); also
   # matches pyPRMS's !=1.7.4 requirement so its pip install does NOT
   # replace the conda build with a PyPI wheel (ABI mismatch with
@@ -36,9 +37,22 @@ dependencies:
   - netCDF4=1.7.3
   - libnetcdf=4.9.*
   - networkx  # Discretization.topological_order (pywatershed-identical)
-  - numpy>=2.0.0,<2.5  # numba's ceiling (also the mypy hook's pin)
+  # numba's ceiling, NOT ours: numba 0.66.0 (latest, Aug 2026) still
+  # declares numpy<2.5 (also the mypy hook's pin)
+  - numpy>=2.0.0,<2.5
   - numba
-  - xarray=2026.4.*  # 2026.7 requires zarr>=3.3 (see zarr note below)
+  # pyPRMS 0.9.10 is UNUSABLE under packaging 26.3 (Version(None)
+  # now raises InvalidVersion; pyPRMS's metadata filter catches only
+  # TypeError -> every MetaData() call dies). Fix offered upstream
+  # (pyPRMS branch ask/packaging-version-none; see
+  # prms_translate/UPSTREAM_ASKS.md item 0); drop this pin when it
+  # lands in the installed pyPRMS
+  - packaging=26.2
+  # graphviz layout for ModelContractGraph.to_dot (notebook 00;
+  # falls back to mermaid without it) -- was an ad hoc install in
+  # the old env, now on the record
+  - python-graphviz
+  - xarray=2026.7.*  # the zarr-3 era pair (zarr pin below)
   - pandas>=1.4.0
   - pip
   - mypy
@@ -58,11 +72,19 @@ dependencies:
   - sphinx-autosummary-accessors
   - sphinx-copybutton
   - tqdm
-  # zarr is deliberately NOT a conda dep: the env of record runs PIP
-  # zarr 2.18.* (see the pip section) -- conda zarr was removed at env
-  # rev 1 (Jul 2026). Listing it here is what let the jupyterlab
-  # update reinstall conda zarr 3.3.0 over the pip install (breaking
-  # xarray and mangling the pip layer).
+  # zarr 3 adopted deliberately (Aug 2026 modernization; paired with
+  # xarray 2026.7 above -- the historical breakage was the MISMATCHED
+  # pair, xarray 2026.4 + zarr 3.3). Back on conda: the old
+  # zarr-as-pip arrangement existed only to defend the v2 line
+  # against conda re-solves and is obsolete. KNOWN TWO-STEP on a
+  # fresh env create: pyPRMS 0.9.10's pip install (below, runs last)
+  # declares zarr<3 and WILL downgrade zarr to 2.18 -- restore with
+  #   conda install -n <env> zarr=3.3.* --freeze-installed
+  # (the validated build path). Harmless otherwise: pyPRMS's zarr
+  # use is an optional Cbh engine we never touch, and its
+  # development branch has already relaxed the pin -- this two-step
+  # dies when pyPRMS >0.9.10 is picked up.
+  - zarr=3.3.*
   # ---- BEGIN parallel-io ----------------------------------------
   # The MPI + parallel-HDF5/NetCDF stack (mirrors the mpix meta-repo
   # environment_parallel_io.yaml) hosting the mpixarray ecosystem
@@ -82,12 +104,6 @@ dependencies:
   # ---- END parallel-io ------------------------------------------
   - pip:
       - pytest-error-for-skips
-      # THE zarr of record (serial Output writer + test reads);
-      # deliberately pip, v2 line -- see the conda-section note.
-      # If ever reinstalling by hand: pip install --force-reinstall
-      # --no-deps (a bare force-reinstall upgraded numpy past
-      # numba's ceiling, Aug 2026)
-      - zarr==2.18.*
       # pywatershed import-chain dep for the A/B parity tests
       # (pywatershed itself is used from the mpix-root repo clone via
       # sys.path); contextily + tqdm ride in the conda section above
