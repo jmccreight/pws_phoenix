@@ -43,6 +43,11 @@ pyPRMS deficiencies worked around here (the upstream asks):
    one written in the control file is unreachable. Stripped in
    ``prms_metadata``.
 
+Issue drafts for all of these -- each demonstrated (and two FIXED) by
+a feature branch in the mpix/pyPRMS clone -- live in
+``prms_translate/UPSTREAM_ASKS.md``, together with the migration map
+of what dies here when each ask lands upstream.
+
 Dim conventions normalized here (not a pyPRMS bug): 2-D parameters
 arrive ``(nhru, nmonths)``; pws_phoenix/pywatershed store
 ``(nmonths, nhru)`` -- transposed on load. Integer parameters arrive
