@@ -86,10 +86,7 @@ def write_preprocessed(
     control_file = pl.Path(control_file)
     ctl = load_control(control_file)
     cfg = from_control(ctl, control_file)
-    param_file = (
-        control_file.parent / str(ctl.get("param_file").values)
-    ).resolve()
-    params = load_parameters(param_file)
+    params = load_parameters(cfg.param_files)
 
     out = xr.Dataset()
 

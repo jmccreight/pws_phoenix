@@ -27,6 +27,10 @@ _CBH_RENAMES = {
     "hru_ppt": "prcp",
     "tmax_hru": "tmax",
     "tmin_hru": "tmin",
+    # the OpenET observed-AET CBH (the control's AET_cbh_file) -> the
+    # PRMSSoilzoneAgObsET input; missing stays -1.0 (the kernel's own
+    # missing-value convention)
+    "actet": "aet_observed",
 }
 
 
@@ -47,10 +51,13 @@ def load_cbh(
     names = [str(nn) for nn in ds.data_vars]
     if len(names) != 1:
         raise ValueError(
-            f"CBH file {path}: expected exactly one variable, got "
-            f"{names}."
+            f"CBH file {path}: expected exactly one variable, got {names}."
         )
     da = ds[names[0]].rename(_CBH_RENAMES.get(names[0], names[0]))
+    # pyPRMS stamps a 1-based OBJECT-dtype nhru index coordinate;
+    # dropped (object coords break zarr encoding downstream, and the
+    # framework's space dims are coordinate-free)
+    da = da.drop_vars([cc for cc in da.coords if cc != "time"])
     if start_time is not None or end_time is not None:
         da = da.sel(time=slice(start_time, end_time))
     return da.astype(np.float64)

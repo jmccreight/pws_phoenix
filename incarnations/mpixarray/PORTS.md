@@ -300,13 +300,16 @@ flow-driven variables see the knife-edge cascade).
 
 ## Not ported / backlog
 
-- Ag odds and ends: an ObsET standalone MPI test (deferred -- the
-  iteration is per-element with a local exit that is provably
-  equivalent to upstream's global transp_on.any(); the analysis
-  serial test carries the iteration parity); a full 7-process ag
-  chain model; PRMSSoilzoneNoDprstAg (upstream doesn't test it
+- Ag odds and ends: PRMSSoilzoneNoDprstAg (upstream doesn't test it
   either); mixed-pref_flow_den domains under MPI (the scalar
   _pref_flow_flag local-any caveat -- see the module comment).
+  RESOLVED Aug 2026: the ObsET MPI test AND the full 7-process ag
+  chain both exist now via the translation layer --
+  tests/test_prms_translate_ag_mpi.py runs the complete fgr
+  analysis model (ObsET iteration + dynamic ag_frac/frost) 200 days
+  under mpirun, BIT-identical per rank block vs the serial
+  one-liner incl. iter_count (the local-exit-equivalence argument,
+  tested); tests/test_prms_translate_ag.py runs the serial chains.
 - Stream-temperature chain: DONE (July 2026) -- see "The
   stream-temperature chain" section. Remaining niceties are
   framework-level and already flagged: the batched multi-variable Map
@@ -451,8 +454,7 @@ flow-driven variables see the knife-edge cascade).
   nhm_stream_temp.control + myparam.param + the four .cbh ASCII
   files, contract-driven (input_spec loops), verified vs the PRMS
   answers (day-5 means match, 5e-3 elementwise, sentinel segment
-  reproduced) -- ran green on the FIRST try. NOT yet wired:
-  dynamic-parameter/ag assembly (fgr resolves loudly), sf_data
+  reproduced) -- ran green on the FIRST try. NOT yet wired: sf_data
   (obsin), yaml serialization of the assembled config (converges
   with Options/from_yaml backlog).
 
@@ -485,9 +487,51 @@ flow-driven variables see the knife-edge cascade).
   `write_preprocessed` is the opt-in cache -- artifacts stamped
   with derivation + sha256 digests of the named inputs + own
   digest, VERIFIED at `assemble_from_control(preprocessed=)`;
-  stale/tampered artifacts fail loudly. Backlog unchanged:
-  dyn/ag wiring, sf_data, kit->yaml, pyPRMS split-out (+ the two
-  upstream asks), compute-if-absent reclassification.
+  stale/tampered artifacts fail loudly.
+
+  **Ag + transp_frost + dynamic parameters wired (Aug 2026):** the
+  fgr_ag_2yr controls now one-line end-to-end. Resolution:
+  soilzone_ag -> the ag family (runoff AND soilzone move together;
+  iter_aet_flag -> ObsET; requires dprst); transp_frost -> the
+  PRMSAtmosphereTranspFrost leaf, or **PRMSAtmosphereTranspFrostDyn**
+  (new: the frost dates re-declared as time-varying INPUTS -- a pure
+  declaration override, kernel inherited) when both dyn frost flags
+  are set; any OTHER dyn_*_flag raises (three of PRMS's ~20 dyn
+  families are translated: ag_frac, springfrost, fallfrost).
+  Dynamic-parameter semantics = PRMS's: a flagged input is
+  forward-filled from its dyn file onto model time; unflagged, the
+  same-named static parameter is served time-constant (tiled --
+  spinup's ag_frac). aet_observed comes from AET_cbh_file (OpenET
+  actet; parsed float64 like pywatershed's converter -- unlike the
+  float32-parsed forcings); PET_cbh_file is deliberately NOT
+  consumed (the fgr answers prove potet stays Jensen-Haise:
+  analysis potet == spinup potet bit-for-bit). The PRMS
+  multiple-parameter-file feature works (ucb nhm_transp_frost:
+  myparam.param + partial transp_frost.param; readers synthesize the
+  partial file's missing header so parsing stays pyPRMS). pyPRMS
+  upstream asks grew to six (readers.py docstring): ag/GSFLOW
+  metadata absent (params silently DROPPED, control entries RAISE,
+  actet KeyErrors), multi-valued param_file truncates paths to one
+  char, no partial-file support, and force_default on every
+  *_dynamic entry makes the control's dyn paths unreachable.
+  Validation (tests/test_prms_translate_ag.py, 12): resolution pins,
+  metadata-injection pins, kit-vs-oracle bitwise
+  (parameters_PRMSSoilzoneAg.nc, aet_observed.nc), **transp_on EXACT
+  over the full 2 years vs the GSFLOW Fortran answers in BOTH
+  shapes** (static-param spinup and dynamic-input analysis), and
+  one-liner runs of spinup/analysis/ucb. PARALLEL:
+  tests/test_prms_translate_ag_mpi.py -- the analysis shape under
+  mpirun with NO code changes (the ag inputs ride
+  write_mpi_input_file as ordinary loose entries), 200 days into
+  the growing season with the AET iteration live, hru-local physics
+  AND iteration diagnostics bit-identical per rank block vs serial. Exploratory full-chain
+  finding (not a hard test): from-control fgr vs the Fortran answers
+  holds transp_on exact and atmosphere at 1e-5, with ~2-3% of
+  hru-days outside 1e-5 below the snow line (the drb fastmath
+  knife-edge story, Fortran-referenced); ag process physics stays
+  pinned at 1e-5 by the disk-driven ag tests. Backlog now: sf_data,
+  kit->yaml, pyPRMS split-out (+ filing the six upstream asks),
+  compute-if-absent reclassification.
 
   **How variants are done here** (deliberate stance): pywatershed
   derives these by SUBTRACTIVE subclassing — the parent is the

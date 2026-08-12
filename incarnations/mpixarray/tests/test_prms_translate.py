@@ -156,8 +156,7 @@ def test_resolve_stream_temp_leaves():
     "slot, value",
     [
         ("srunoff_module", "srunoff_carea"),
-        ("soilzone_module", "soilzone_ag"),
-        ("transp_module", "transp_frost"),
+        ("transp_module", "climate_hru"),
         ("strmflow_module", "strmflow_in_out"),
         ("et_module", "potet_pt"),
     ],

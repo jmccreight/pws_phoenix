@@ -19,10 +19,20 @@ files (``*_day``), so the control path is the ONLY required input.
 Supported ("many cases"): the NHM mainline configurations -- dprst
 on/off, stream temperature off or on in its dynamic-shade +
 CBH-humidity form (the nhm.control / nhm_stream_temp.control
-shapes). The constant-shade and per-segment-humidity stream-temp
-leaves RESOLVE (control.py) but their assembly is not wired yet and
-raises here; dynamic parameters and the ag family already raise in
-resolution. Everything unsupported fails LOUDLY, never silently.
+shapes), transp_frost (static or dynamic frost dates, incl. the
+multi-param_file controls that carry the frost parameters), and the
+agricultural family (soilzone_ag: spinup and iter_aet/ObsET analysis
+shapes, static or dynamic ag_frac). The constant-shade and
+per-segment-humidity stream-temp leaves RESOLVE (control.py) but
+their assembly is not wired yet and raises here. Everything
+unsupported fails LOUDLY, never silently.
+
+Dynamic parameters follow PRMS semantics: a translated dyn_*_flag
+serves the named input from its dynamic-parameter file
+(forward-filled onto model time); without the flag, the static
+parameter of the same name is served time-constant (tiled). PRMS's
+PET_cbh_file is deliberately not consumed (see control.py:
+CBH_ENTRY_TO_INPUT).
 """
 
 import pathlib as pl
@@ -44,6 +54,7 @@ from model import Model
 from process import DataArrayMeta, Process
 from prms_translate.cbh import load_cbh
 from prms_translate.control import PrmsRunConfig, from_control
+from prms_translate.dyn_param import forward_fill, load_dynamic_parameter
 from prms_translate.parameters import (
     SLOT_GRIDS,
     package_parameters,
@@ -113,10 +124,7 @@ def assemble_from_control(
     control_file = pl.Path(control_file)
     ctl = load_control(control_file)
     cfg = from_control(ctl, control_file)
-    param_file = (
-        control_file.parent / str(ctl.get("param_file").values)
-    ).resolve()
-    params = load_parameters(param_file)
+    params = load_parameters(cfg.param_files)
 
     artifacts: xr.Dataset | None = None
     if preprocessed is not None:
@@ -254,20 +262,48 @@ def assemble_from_control(
     packaged = package_parameters(params, cfg.classes, extra=extra)
     for slot, ds in packaged.items():
         process_dict[slot]["parameters"] = ds
+
+    # dynamic parameters -> time-varying inputs on the model window
+    # (forward-fill = PRMS semantics; load-time prep allocations)
+    times = np.arange(
+        cfg.start_time,
+        cfg.end_time + np.timedelta64(1, "D"),
+        dtype="datetime64[D]",
+    )
+    dyn_inputs = {
+        name: forward_fill(load_dynamic_parameter(path), times)
+        for name, path in cfg.dyn_param_paths.items()
+    }
+
     for grid, gg in spec["required"].items():
         for init_name, info in gg["initial_values"].items():
             process_dict[info["process"]][init_name] = params[init_name]
         for name, info in gg["external_inputs"].items():
-            if name not in cfg.cbh_paths:
-                raise KeyError(
-                    f"external input {name!r} (consumer "
-                    f"{info['consumers'][0]!r}) has no CBH file in "
-                    f"the control (*_day entries found: "
-                    f"{sorted(cfg.cbh_paths)})."
+            consumer = info["consumers"][0]
+            if name in dyn_inputs:
+                process_dict[consumer][name] = dyn_inputs[name]
+            elif name in cfg.cbh_paths:
+                process_dict[consumer][name] = load_cbh(
+                    cfg.cbh_paths[name], cfg.start_time, cfg.end_time
                 )
-            process_dict[info["consumers"][0]][name] = load_cbh(
-                cfg.cbh_paths[name], cfg.start_time, cfg.end_time
-            )
+            elif name in params and params[name].dims == ("nhru",):
+                # a time-varying INPUT declaration backed by a STATIC
+                # parameter (PRMS dynamic-parameter default: no dyn
+                # flag -> the parameter holds; e.g. ag_frac in the
+                # spinup shape): serve it time-constant
+                process_dict[consumer][name] = xr.DataArray(
+                    np.tile(params[name].values, (times.size, 1)),
+                    dims=("time", "nhru"),
+                    coords={"time": times},
+                )
+            else:
+                raise KeyError(
+                    f"external input {name!r} (consumer {consumer!r}) "
+                    "has no CBH file, dynamic-parameter file, or "
+                    "same-named static parameter in the control "
+                    f"(*_day/CBH entries found: {sorted(cfg.cbh_paths)}"
+                    f"; dynamic: {sorted(dyn_inputs)})."
+                )
 
     # -- PRMS output requests: NAMES translate, filtered to variables
     # this model actually has; where to write is ALWAYS the caller's

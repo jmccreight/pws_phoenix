@@ -50,7 +50,9 @@ upstream's PRMSAtmosphereTranspFrost REPLACES the tindex parameters
 transpiration: ``PRMSAtmosphere`` = transp_tindex state machine;
 ``PRMSAtmosphereTranspFrost`` = the stateless
 spring_frost <= jsol <= fall_frost window (jsol = solar day of year,
-Time.jsol). The transpiration section was the final, self-contained
+Time.jsol); ``PRMSAtmosphereTranspFrostDyn`` = the same window with
+the frost dates re-declared as time-varying inputs (PRMS dynamic
+parameters). The transpiration section was the final, self-contained
 piece of the kernel loop; splitting it into a second per-leaf kernel
 is arithmetic-identical.
 
@@ -844,3 +846,31 @@ class PRMSAtmosphereTranspFrost(PRMSAtmosphereBase):
             obj["fall_frost"].values,
             np.int64(time.jsol),
         )
+
+
+class PRMSAtmosphereTranspFrostDyn(PRMSAtmosphereTranspFrost):
+    """PRMSAtmosphereTranspFrost with DYNAMIC frost dates (the PRMS
+    dyn_springfrost_flag / dyn_fallfrost_flag configuration):
+    spring_frost and fall_frost become time-varying INPUTS (served per
+    step -- forward-filled from the control's PRMS dynamic-parameter
+    files by the supplier) instead of static parameters. A pure
+    declaration override: the frost-window kernel and calculate() are
+    inherited unchanged, reading the same-named buffers that are now
+    refilled each step. Validated exactly (transp_on is 0/1) against
+    the fgr_ag_2yr analysis GSFLOW answers."""
+
+    # -- process inputs (OVERRIDE: parameter -> time-varying input) --
+    spring_frost = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        description="Last spring frost [solar day of year] "
+        "(TIME-VARYING: PRMS dynamic parameter)",
+    )
+    fall_frost = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        description="First killing fall frost [solar day of year] "
+        "(TIME-VARYING: PRMS dynamic parameter)",
+    )
