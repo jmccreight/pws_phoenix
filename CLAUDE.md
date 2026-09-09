@@ -51,6 +51,12 @@ Hi Claude,
    without explicit permission.
 6. I want you to ask for permission before spawning additional and/or parallel
    agents. I want to be sure the overhead is justified before hand.
+7. Use precise, non-jargony language -- to the point of showing code rather
+   than describing it. E.g. instead of "the `indices` parameter is shadowed",
+   quote the two offending lines. Prefer plain statements over idiom:
+   "the read-driven mode is what pws_phoenix uses", not "the read-driven
+   mode is the load-bearing path for us". Spell out names ("mpix_meta",
+   not "meta-root").
 
 I'm looking forward to working with you, this will be fun. Please give a quick
 acknowledgement of these ground rules before we start. Thank you!
