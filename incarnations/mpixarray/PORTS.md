@@ -379,7 +379,7 @@ flow-driven variables see the knife-edge cascade).
   (``_restore_grid_var`` seam on Model; SPMD-uniform, no
   collectives); serial (replicated) grids restore whole on every
   rank. Resume = a LAZY TIME-SLICE of the input dataset before
-  ``parallelize``/``set_streaming`` (JLM's call; mpixarray takes the
+  ``parallelize``/``as_iterable`` (JLM's call; mpixarray takes the
   isel view without complaint), so the stream simply BEGINS at the
   resume step: the superset input file serves any restart (no
   duplicate files, no wasted reads) and the warm run's streamed

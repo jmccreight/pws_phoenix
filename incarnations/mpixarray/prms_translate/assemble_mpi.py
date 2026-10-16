@@ -65,7 +65,7 @@ def write_mpi_input_file(
                 merged[key] = val
     if n_days is not None:
         merged = merged.isel(time=slice(0, int(n_days)))
-    # real dim-coordinates for parallelize/set_streaming; ns times
+    # real dim-coordinates for parallelize/as_iterable; ns times
     merged = merged.assign_coords(
         {mpi_grid: np.arange(merged.sizes[mpi_grid])}
     )

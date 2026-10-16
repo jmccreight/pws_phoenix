@@ -11,7 +11,7 @@ These are process-agnostic and sit at the base of the import stack
 
 Output is the serial writer (one zarr store). The MPI path (ModelMPI in
 model.py) does NOT use Output -- it streams output through mpixarray
-(set_streaming + iter_time + .mpi.write).
+(as_iterable + iterate + .mpi.write).
 """
 
 import pathlib as pl
@@ -101,7 +101,7 @@ class Output:
     chunked zarr writer.
 
     Serial only. The MPI path streams output through mpixarray
-    (set_streaming + iter_time + .mpi.write) and does not use this class.
+    (as_iterable + iterate + .mpi.write) and does not use this class.
     (Append-along-time is sufficient here BECAUSE the writer is serial;
     concurrent writers would need a pre-sized store + region writes.)
     """

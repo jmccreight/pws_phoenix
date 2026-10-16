@@ -12,9 +12,10 @@ can never interrupt a collective and hang the others.
 
 One space-decomposed dataset streamed over time. `flow` is streamed to disk and
 validated over all timesteps (global); `storage_previous` (not streamed -- the
-one-`to_netcdf`-var limit) is validated from final state, gathered globally.
+one-`to_file`-var caution, see the ModelMPI note) is validated from final
+state, gathered globally.
 `param_up_1` is a cyclic-monthly time-varying parameter `(month, space)` that
-stays resident through `set_streaming` (asserted) and modulates `flow` via
+stays resident through `as_iterable` (asserted) and modulates `flow` via
 `time.month` -- so the streamed-`flow` check also validates it.
 
 Run with:
@@ -149,7 +150,7 @@ class TestRegressionMPI:
     def test_shared_flow_upper_lower(self, mpi_run):
         assert mpi_run["shared_flow"]
 
-    # -- time-varying param stays resident (month axis survives set_streaming) --
+    # -- time-varying param stays resident (month axis survives as_iterable) --
     def test_param_up_1_resident(self, mpi_run):
         assert mpi_run["param_up_1_resident"]
         assert mpi_run["param_up_1_has_month"]

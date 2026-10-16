@@ -94,7 +94,9 @@ The env of record is **`pwpx`**, built from `pws_phoenix/environment.yaml`
 parallel env: the MPI + parallel-IO stack rides in the yaml's marked
 `BEGIN/END parallel-io` block (delete the block = the serial derivation;
 CI's Windows job does this). The mpixarray ecosystem is pip-installed
-into it in dependency order (see README Installation). `pwpx` has
+into it in dependency order (see README Installation) -- **mpixarray
+branch `1.0.0`, mpix `main`** (Oct 2026; the old `pws` branch API is
+gone). `pwpx` has
 everything: pytest (+-mpi), mypy, ruff, and the pywatershed import-chain
 deps for the parity tests (pywatershed itself is used from the mpix-root
 clone via sys.path). Run tests from `incarnations/mpixarray/`:
@@ -227,9 +229,11 @@ The process holds `time` and does the lookup; `_calculate` receives raw numpy
 
 ## MPI path (`ModelMPI` in `model.py`) — single-decomposition streaming
 
-Uses the real mpixarray streaming API:
-`open_dataset → parallelize(dims=["space"]) → set_streaming("time") →
-open_writer → declare buffers → create → iter_time → write`.
+Uses the mpixarray **1.0.0** streaming API (`comm=` passed explicitly to
+every call; no `initialize_mpi` block -- its exit would also build a prng
+and write `seed.json` on rank 0):
+`open_dataset → parallelize(dims=["space"]) → as_iterable("time") →
+open_writer → declare buffers → create → iterate → write`.
 
 - ONE decomposed dataset (`ds_mpi`) carries every process's state, parameters,
   per-step input buffers, and streaming outputs. Because there is one dataset,
@@ -238,12 +242,15 @@ open_writer → declare buffers → create → iter_time → write`.
 - Processes bind directly (`cls(ds_mpi)`) and are rebound to each `step` in the
   loop. (`Process.new()` is retired entirely; the serial path also binds
   directly to its grid's shared dataset.)
-- Inputs: time-dimensioned file vars are dropped by `set_streaming` and refilled
-  each step from `step.mpi.src`; static space-only params/ICs survive on
-  `ds_mpi` (loaded into memory so their buffers are shared by reference).
+- Inputs: time-dimensioned file vars are windowed to one step by
+  `as_iterable` and shadowed by `(hru,)` buffers refilled each step from
+  `step.mpi.src`; static space-only params/ICs stay whole on `ds_mpi`
+  (loaded into memory so their buffers are shared by reference).
+- `control["progress"]` (default False) turns on mpixarray's rank-0
+  progress bar over the time loop.
 - `parallelize()` now lives in **`Discretization`** (`discretization.py`):
   `disc.decompose(ds)` does the space split (MPI) or identity (serial,
-  `comm=None`). `set_streaming` (time) stays in `ModelMPI`. The datasets:
+  `comm=None`). `as_iterable` (time) stays in `ModelMPI`. The datasets:
   `ds_mpi` (decomposed) -> `ds_mpi_stream` (streaming). Model/ModelMPI hold
   `self.discretizations` (a `dict[str, Discretization]` keyed by grid name)
   -- a 2nd grid is just another key. Step B (done): an MPI run hosts ONE
@@ -253,13 +260,14 @@ open_writer → declare buffers → create → iter_time → write`.
 
 ## Known mpixarray limits (Phase 1)
 
-- Only ONE `to_netcdf=True` streaming-output var works; a 2nd trips a
-  "cannot pickle 'module' object" deepcopy (the writer handle is stamped onto
-  shared coord attrs, and the next `from_numpy` deepcopies them). So we stream
-  `flow` to disk and validate `storage_previous` from final in-memory state.
-- `set_streaming` requires the streaming dim to be a real dim-coordinate.
+- Pre-1.0.0, a 2nd `to_file=True` streaming-output var tripped a "cannot
+  pickle 'module' object" deepcopy. 1.0.0's `file_io/writer_handle.py`
+  defines `__deepcopy__`, so the limit is probably lifted -- untested here;
+  we still stream only `flow` and validate `storage_previous` from final
+  in-memory state.
+- `as_iterable` requires the streaming dim to be a real dim-coordinate.
 - A non-`time` extra dim on a resident var (e.g. a `(month, space)` cyclic
-  time-varying parameter) is assumed to survive `set_streaming` untouched (it is
+  time-varying parameter) is assumed to survive `as_iterable` untouched (it is
   not the streaming dim) and stay space-decomposed -- the toy exercises this.
 
 ## IO is intentionally NOT apples-to-apples
@@ -282,7 +290,7 @@ The "Global" item is split into two objects with different lifetimes and reach
   `datetime64`), `.month`, `.year`; `set_index(i)` points it at a timestep.
   - _Serial:_ the Model drives the loop and calls `time.set_index(tt)`.
   - _MPI:_ mpixarray owns the time _loop_, so `Time` is **synced from** each
-    streaming `step` (`enumerate(iter_time())`). A Process reads it identically
+    streaming `step` (`enumerate(iterate())`). A Process reads it identically
     either way -- this keeps the serial/MPI fork from deepening.
 - **`Options`** (not yet a class) -- construction-time run config, consumed at
   _build_ and baked into processes; a Process never needs it at runtime. The
@@ -316,11 +324,11 @@ the `epiweeks` dep).
   (`Time` is implemented; see "Global state: `Time` + `Options`" above). The
   Model `control` dict serves as `Options` for now.
 - The full `Discretization` class: physical/topology role + multiple
-  discretizations (incl. whether `set_streaming` aligns across ≥2 of them).
+  discretizations (incl. whether `as_iterable` aligns across ≥2 of them).
 - `ModelInputs` / `input_spec()` / `resolve_inputs()` / `init_run_phase()` lazy
   lifecycle (`get_inputs()` is already classmethod-level; streaming's `create()`
   is a latent `init_run_phase`).
-- Multi-output-var streaming once the mpixarray deepcopy bug is fixed.
+- Multi-output-var streaming: try under mpixarray 1.0.0 (see Known limits).
   (Cyclic-monthly time-varying parameters are implemented -- see "Variable
   taxonomy".) Coarse-linear (e.g. per-(year,month)) time-varying params remain.
 - Deferred review minors (July 2026): generalize `Output` beyond 1-D
@@ -999,14 +1007,14 @@ object-graph shape, disc-owns-data, and structural buffer sharing.
 | backend / extent      | plain xr, full extent       | mpixarray, decomposed               |
 | `decompose()`         | identity                    | `parallelize`                       |
 | a Process's `_obj`    | `disc.dataset` (persistent) | per-step streaming window (rebound) |
-| time loop             | `for tt in range(n)`        | `for step in iter_time()`           |
+| time loop             | `for tt in range(n)`        | `for step in iterate()`           |
 | input feed            | `Input` objects → dataset   | streaming `src` refill              |
 | output / `finalize`   | zarr; keeps its data        | mpixarray NetCDF; releases the ds   |
 
 **One wrinkle -- assembly interleaves at MPI build time.** The "Disc = space,
 Model = time" split is conceptually clean but mechanically interleaved in MPI:
-mpixarray requires `set_streaming` _before_ declaring buffers, so MPI assembly is
-`decompose` (disc/space, → `ds_mpi`) → `set_streaming` (Model/time, → `ds_mpi_stream`)
+mpixarray requires `as_iterable` _before_ declaring buffers, so MPI assembly is
+`decompose` (disc/space, → `ds_mpi`) → `as_iterable` (Model/time, → `ds_mpi_stream`)
 → declare buffers on the streamed result. Serial assembly is **disc-only** (one
 plain dataset, no time-layer). So in MPI the disc and Model collaborate to build
 the dataset; in serial the disc builds it alone.
@@ -1223,8 +1231,8 @@ input grouping <-> runtime var names <-> output groups.
   logical input_ (`parameters.nc`, `forcing_0.nc`, ...) and the Model dedups
   shared files. Multi-file input already works.
 - **MPI is the kitchen sink** -- `make_toy_input(...).to_netcdf(one_file)`,
-  then `open_dataset -> parallelize -> set_streaming`. The single file is
-  forced by the _dataset-anchored_ streaming API: `set_streaming`/`iter_time`
+  then `open_dataset -> parallelize -> as_iterable`. The single file is
+  forced by the _dataset-anchored_ streaming API: `as_iterable`/`iterate`
   drive **one** time loop over **one** dataset. So the gap is MPI-only.
 
 **DataTree's honest fit:** attractive as _input packaging_ -- an on-disk
@@ -1241,7 +1249,7 @@ the mpixarray-fork problems.
   after `parallelize`, load-once. Multi-file here is ~free and keeps Phase 1's
   structural sharing.
 - _Streamed_ (time-varying forcings; time x space): the **only** hard part --
-  multiple streamed files = multiple `iter_time` loops to co-step.
+  multiple streamed files = multiple `iterate` loops to co-step.
 
 **Two strategies (the "merge or manage" framing):**
 

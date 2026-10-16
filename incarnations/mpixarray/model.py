@@ -33,6 +33,7 @@ from process import _FILL_VALUE, _dict_of_kind
 # Optional MPI support -- present when mpixarray is installed. The serial Model
 # never needs it; ModelMPI does, and fails at construction if it is absent.
 try:
+    import mpix
     from mpixarray import open_dataset as mpi_open_dataset
 
     MPI_AVAILABLE = True
@@ -866,8 +867,8 @@ class ModelMPI(Model):
     The distributed grid (``control["mpi_grid"]``, default ``"space"``)
     keeps the Phase 1 pipeline:
 
-        open_dataset -> parallelize(dims=[mpi_grid]) -> set_streaming("time")
-        -> open_writer -> declare buffers -> create -> iter_time -> write
+        open_dataset -> parallelize(dims=[mpi_grid]) -> as_iterable("time")
+        -> open_writer -> declare buffers -> create -> iterate -> write
 
     ONE decomposed dataset (``ds_mpi_stream``) carries the distributed
     grid's state, parameters, per-step input buffers, and streaming outputs
@@ -914,12 +915,11 @@ class ModelMPI(Model):
     "discretization" + their data); distributed-grid entries need only
     {"class": ...} -- their data come from input_file.
 
-    NOTE (mpixarray limitation): declaring a 2nd ``to_netcdf=True`` variable
-    currently trips the "cannot pickle 'module' object" deepcopy (the first
-    such declaration stamps the writer handle onto the shared coord attrs, and
-    the next ``from_numpy`` deepcopies them). So Phase 1 streams ONE output var
-    to disk; validate any others from final in-memory state. Revisit when that
-    mpixarray deepcopy bug is fixed.
+    NOTE: pre-1.0.0 mpixarray, declaring a 2nd ``to_file=True`` variable
+    tripped a "cannot pickle 'module' object" deepcopy. 1.0.0's writer
+    handle defines ``__deepcopy__``, so the limit is probably lifted --
+    untested here. Phase 1 still streams ONE output var to disk; validate
+    any others from final in-memory state.
 
     Usage:
         with ModelMPI(process_dict, control, maps=maps) as model:
@@ -962,6 +962,8 @@ class ModelMPI(Model):
         output_parallel_netcdf = str(control["output_parallel_netcdf"])
         out_var_names = list(control["output_var_names"])
         mpi_grid = control.get("mpi_grid", "space")
+        # rank-0 progress bar over the streamed time loop (mpixarray's)
+        self._progress = bool(control.get("progress", False))
         self._mpi_grid = mpi_grid
 
         serial_grids = {
@@ -999,7 +1001,10 @@ class ModelMPI(Model):
                     )
 
         # ---- Distributed grid: open + decompose once over mpi_grid ----
-        ds_input, comm = mpi_open_dataset(input_file)
+        # 1.0.0: open_dataset no longer returns a comm; bind the world comm
+        # here and pass it explicitly to every mpixarray call downstream.
+        comm = mpix.world_comm()
+        ds_input = mpi_open_dataset(input_file, comm=comm)
         self._ds_input = ds_input
         n_time = int(ds_input.sizes["time"])
         self._ntime = n_time
@@ -1029,7 +1034,6 @@ class ModelMPI(Model):
             ds_source = ds_input.isel(time=slice(self._start_index, None))
         else:
             ds_source = ds_input
-        n_stream = n_time - self._start_index
 
         self.discretizations = {
             mpi_grid: Discretization([mpi_grid], comm=comm)
@@ -1038,21 +1042,24 @@ class ModelMPI(Model):
         comm = self.discretizations[mpi_grid].comm  # parallelize may refine
         self._comm = comm
 
-        # ---- Stream over time. set_streaming drops the time-dimensioned
-        #      input vars (served per step via step.mpi.src) and keeps the
-        #      space-only static params + ICs as buffers on ds_mpi_stream. ----
-        ds_mpi_stream = ds_mpi.mpi.set_streaming(
-            "time", window=1, out_times=list(range(n_stream))
-        )
+        # ---- Stream over time. as_iterable windows the time-dimensioned
+        #      input vars to one step (they stay on the dataset, lazy; the
+        #      (hru,) input buffers declared below shadow them and are
+        #      refilled per step from step.mpi.src) and leaves the space-only
+        #      static params + ICs whole on ds_mpi_stream. Every step lands
+        #      on disk (no values_on_disk subset). ----
+        ds_mpi_stream = ds_mpi.mpi.as_iterable("time", chunk_size=1, comm=comm)
 
-        # Realize the static (space-only) survivors -- params + ICs -- in
-        # memory. Otherwise they stay lazy file-backed and each `.values`
-        # re-reads, so buffer sharing (param_shared_name is ...) would not
-        # hold.
+        # Realize the static (space-only) vars -- params + ICs -- in memory.
+        # Otherwise they stay lazy file-backed and each `.values` re-reads, so
+        # buffer sharing (param_shared_name is ...) would not hold. The
+        # time-windowed inputs are left lazy (see above).
         for name in list(ds_mpi_stream.data_vars):
-            ds_mpi_stream[name] = ds_mpi_stream[name].load()
+            if "time" not in ds_mpi_stream[name].dims:
+                ds_mpi_stream[name] = ds_mpi_stream[name].load()
 
-        # File-backed inputs that were dropped: refilled from src each step.
+        # File-backed inputs: shadowed below by (hru,) buffers, refilled
+        # from src each step.
         # Distributed grid only -- an input there is file-backed (vs.
         # produced upstream) if no distributed-grid process owns a variable
         # of that name. Serial-grid inputs go through Input objects instead.
@@ -1130,14 +1137,16 @@ class ModelMPI(Model):
         # ---- Open writer ----
         ds_mpi_stream.mpi.open_writer(output_parallel_netcdf, comm=comm)
 
-        # ---- Declare buffers: to_netcdf=False FIRST, to_netcdf=True LAST,
-        #      then create() (mpixarray declaration-ordering gotcha). ----
-        def _declare(name, dims, fill, to_netcdf):
+        # ---- Declare buffers: to_file=False first, to_file=True last, then
+        #      create(). (1.0.0 authors a to_file var into the open writer at
+        #      declaration, creating its dims as needed; create() then
+        #      writes attrs + coords.) ----
+        def _declare(name, dims, fill, to_file):
             ds_mpi_stream.mpi[name] = {
                 "dims": dims,
                 "dtype": f64,
                 "fill_value": f64(fill),
-                "to_netcdf": to_netcdf,
+                "to_file": to_file,
                 "comm": comm,
             }
 
@@ -1167,7 +1176,7 @@ class ModelMPI(Model):
                         "dims": dims,
                         "dtype": meta.dtype,
                         "fill_value": meta.dtype(_FILL_VALUE[meta.dtype]),
-                        "to_netcdf": False,
+                        "to_file": False,
                         "comm": comm,
                     }
                     declared.add(name)
@@ -1176,7 +1185,7 @@ class ModelMPI(Model):
             if name not in declared:
                 _declare(name, (mpi_grid,), np.nan, False)
                 declared.add(name)
-        # (c) streaming output buffers (to_netcdf=True) -- declared LAST
+        # (c) streaming output buffers (to_file=True) -- declared LAST
         output_map: dict = {}  # state var name -> on-disk output buffer name
         for name in stream_out_names:
             buf = f"{name}_out"
@@ -1184,10 +1193,10 @@ class ModelMPI(Model):
             output_map[name] = buf
         self._output_map = output_map
 
-        ds_mpi_stream.mpi.create(coords=None, data_vars=None)
+        ds_mpi_stream.mpi.create(verbose=False)
 
         # ---- Load initial conditions into state buffers. ICs are the
-        #      space-only vars that survived set_streaming (from the file). ----
+        #      space-only vars loaded above (from the file). ----
         for cls in mpi_classes.values():
             for name, meta in cls.get_variables().items():
                 if (
@@ -1300,7 +1309,7 @@ class ModelMPI(Model):
     # -- run ------------------------------------------------------------
 
     def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:
-        """Stream the time loop via iter_time(); n_steps is ignored (the
+        """Stream the time loop via iterate(); n_steps is ignored (the
         streaming source defines the count). Serial-grid inputs advance in
         lockstep with the stream; a Map is applied exactly once per step,
         immediately before its first consumer (see Model._resolve_maps).
@@ -1320,7 +1329,9 @@ class ModelMPI(Model):
         # stays GLOBALLY indexed via the offset (istep0-gated blocks
         # must not re-fire at the resume step).
         start = self._start_index
-        for tt, step in enumerate(ds_mpi_stream.mpi.iter_time()):
+        for tt, step in enumerate(
+            ds_mpi_stream.mpi.iterate(comm=self._comm, progress=self._progress)
+        ):
             gtt = tt + start
             self.current_time_index[0] = gtt
             self.time.set_index(gtt)
@@ -1345,10 +1356,11 @@ class ModelMPI(Model):
                     mm.apply(self.discretizations[mm.source_grid].dataset)
                 proc.calculate(dt, self.time)
             # Record state into the streaming output slab(s) and write.
+            # Every step lands on disk (no values_on_disk subset at
+            # as_iterable), so no output-step gate.
             for src_name, buf in self._output_map.items():
                 step[buf].values[0, :] = step[src_name].values[:]
-                if step.mpi.is_output_step:
-                    step[buf].mpi.write()
+                step[buf].mpi.write()
             # Serial-grid output: rank 0 only (collective-free branch).
             if self.output is not None:
                 self.output.collect_current_timestep(gtt)

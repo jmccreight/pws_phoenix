@@ -5,7 +5,7 @@ serial R2 suites): rank-0 gather-then-write of the distributed grid's
 flagged state (contiguous rank-ordered blocks -> a full-extent,
 SERIAL-FORMAT restart file), every-rank read + own-block restore, and
 the warm start's LAZY TIME-SLICE of the input dataset -- the stream
-begins at the resume step (fed to parallelize/set_streaming as an
+begins at the resume step (fed to parallelize/as_iterable as an
 isel view; the superset input file serves any restart) while model
 time stays globally indexed (istep0 gates must not re-fire).
 

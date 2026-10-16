@@ -25,7 +25,7 @@ Scope:
     replicate, don't improve (a dependency-free ordering is a possible
     later step, with a tolerance decision attached).
 
-Time streaming (``set_streaming``) stays with the Model/Time loop and runs
+Time streaming (``as_iterable``) stays with the Model/Time loop and runs
 on the decomposed dataset.
 
 The MPI path reaches ``parallelize`` through the ``ds.mpi`` accessor, which
@@ -99,13 +99,15 @@ class Discretization:
         """Return the space-decomposed dataset on this grid.
 
         serial (``comm is None``): identity. MPI: ``parallelize`` over
-        ``dims``, updating ``self.comm`` to the comm ``parallelize`` returns.
+        ``dims``, updating ``self.comm`` to the cartesian comm ``parallelize`` built.
         """
         if self.comm is None:
             return ds
-        ds_mpi, self.comm = ds.mpi.parallelize(
-            dims=self.dims, scheme="single", comm=self.comm
-        )
+        ds_mpi = ds.mpi.parallelize("single", dims=self.dims, comm=self.comm)
+        # 1.0.0: parallelize returns only the dataset; its cartesian comm is
+        # rebound only inside an initialize_mpi block, so rebuild it here for
+        # the collectives (writer, allgather) that follow.
+        self.comm = ds_mpi.mpi.get_cartesian_communicator(comm=self.comm)
         return ds_mpi
 
     def topological_order(

@@ -121,7 +121,7 @@ def mpi_paths():
             ],
             compat="no_conflicts",
         )
-        # mpixarray parallelize/set_streaming need real dim-coordinates
+        # mpixarray parallelize/as_iterable need real dim-coordinates
         combined = combined.assign_coords(
             nhru=np.arange(combined.sizes["nhru"])
         )

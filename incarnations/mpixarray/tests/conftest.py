@@ -9,10 +9,10 @@ intentional and explicit:
   - serial brings the input into memory (or round-trips it through per-input
     files); MPI writes ONE combined file and streams it.
   - `time` and `space` are real dim-coordinates (required by mpixarray's
-    `set_streaming`/`parallelize`; the serial path reads them the same way).
+    `as_iterable`/`parallelize`; the serial path reads them the same way).
   - both serial and MPI now use `param_up_1`, a cyclic-monthly time-varying
     parameter `(month, space)`, indexed each step via `time.month` (it stays
-    resident through `set_streaming`, since `month` is not the streaming dim).
+    resident through `as_iterable`, since `month` is not the streaming dim).
   - output backend differs (serial zarr store vs MPI streamed NetCDF).
 """
 
@@ -216,7 +216,7 @@ def make_two_grid_toy():
     Lower's on "segment" (N_SEG) -- each grid's key is its real dim;
     separate datasets. `flow` is NOT given to Lower (the Map feeds it).
     `hru` and `time` are real dim-coordinates (mpixarray's `parallelize`/
-    `set_streaming` need them on the distributed grid)."""
+    `as_iterable` need them on the distributed grid)."""
 
     def _make(dimensions: dict, seed: int = 11) -> dict:
         n_time = dimensions["n_time"]
