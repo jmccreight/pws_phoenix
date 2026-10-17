@@ -275,10 +275,14 @@ class TestStarfitFlowNode:
         at the minimum -- one reservoir drains to empty storage on the
         final day, exercising the min-storage branch. Also: the
         harvest into the graph's node_sink_source (final in-memory
-        state)."""
-        if graph_run["class"] is not StarfitSourceSinkFlowNode:
-            pytest.skip("plain starfit has no diversion")
+        state). The plain starfit node declares no diversion fields
+        and harvests exactly zero into the graph-level
+        node_sink_source."""
         proc = graph_run["model"].model_dict["flow_graph"]
+        if graph_run["class"] is not StarfitSourceSinkFlowNode:
+            assert "lake_sink_source" not in proc._obj
+            np.testing.assert_array_equal(proc["node_sink_source"].values, 0.0)
+            return
         applied = proc["lake_sink_source"].values
         # never positive, never more sink than requested (ulp slack)
         assert (applied <= 0.0).all()

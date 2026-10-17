@@ -14,10 +14,13 @@ files (extra dprst params ignored by its get_parameters()); here the
 reduced parameters_PRMS*NoDprst.nc files are used -- identical values
 for every declared parameter.
 
-SKIPS until the no-dprst answers are generated (pywatershed test-data
-generation for the nhm_no_dprst simulation). The additive-structure
-consistency is already pinned bit-for-bit without external answers in
-test_prms_no_dprst.py.
+Requires the no-dprst answers in test_data/drb_2yr/output_no_dprst/
+(pywatershed: `cd autotest; python generate_test_data.py --domain=drb_2yr
+--control_pattern=nhm_no_dprst ...`); like every data-dependent test
+here, the module-level skipif names what is missing and the sweep
+(tests/run_tests.sh, --error-for-skips) treats the skip as a failure.
+The additive-structure consistency is already pinned bit-for-bit
+without external answers in test_prms_no_dprst.py.
 """
 
 import pathlib as pl

@@ -250,10 +250,13 @@ class TestFlowGraph:
         """Cheap structural checks on the inserted node: intercepting
         types received flow, the obsin headwater emitted exactly zero,
         and the sink/source-tracking types applied no source or sink
-        (their data are NEUTRAL by construction)."""
-        if not graph_run["insert"]:
-            pytest.skip("pure-channel scenario has no inserted node")
+        (their data are NEUTRAL by construction). The pure-channel
+        scenario has no inserted node: its graph is exactly the
+        segment network, no padded row."""
         proc = graph_run["model"].model_dict["flow_graph"]
+        if not graph_run["insert"]:
+            assert proc["node_outflows"].values.shape == (graph_run["n_seg"],)
+            return
         if graph_run["insert_class"] is ObsInFlowNode:
             assert proc["node_outflows"].values[-1] == 0.0
         else:

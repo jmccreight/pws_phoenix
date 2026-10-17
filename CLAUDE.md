@@ -99,8 +99,9 @@ branch `1.0.0`, mpix `main`** (Oct 2026; the old `pws` branch API is
 gone). `pwpx` has
 everything: pytest (+-mpi), mypy, ruff, and the pywatershed import-chain
 deps for the parity tests (pywatershed itself is used from the mpix-root
-clone via sys.path). Run tests from `incarnations/mpixarray/`:
-`./tests/run_tests.sh` (serial + MPI) or `pytest tests/ -q` (serial).
+clone via sys.path). Run tests from the repo root:
+`./tests/run_tests.sh` (serial + MPI, no skips allowed) or
+`pytest tests/ -q --ignore-glob='tests/*_mpi.py'` (serial only).
 
 # python assumptions/conventions
 
@@ -507,8 +508,10 @@ kernel (full kernel bodies untouched; soilzone init varies only
 through the `_set_hru_frac_perv` hook). Pinned bit-for-bit against
 the full classes with dprst disabled by data
 (`tests/test_prms_no_dprst.py`); answer parity
-(`tests/test_prms_no_dprst_parity.py`) skips until the nhm_no_dprst
-answers are generated into `test_data/drb_2yr/output_no_dprst/`.
+(`tests/test_prms_no_dprst_parity.py`) runs against the nhm_no_dprst
+answers in `test_data/drb_2yr/output_no_dprst/` (generated Oct 2026
+with pywatershed's `generate_test_data.py --domain=drb_2yr
+--control_pattern=nhm_no_dprst`; green at each process's tolerance).
 Full story: PORTS.md "Realized for NoDprst".
 
 (10) Ag variants (July 2026, DONE): PRMSRunoffAg = additive extension
@@ -578,8 +581,15 @@ Port conventions (established by the groundwater port):
 - Validation: pywatershed's own autotest tolerance (rtol=atol=1e-13)
   against its generated answer files (`test_data/<domain>/output/`,
   produced by the autotest data-generation workflow -- not checked in).
-  Tests skip cleanly when the data are absent. The pywatershed repo
-  lives at the mpix meta-repo root.
+  Each data-dependent module carries a skipif naming the missing
+  files, but **NO SKIPS is the policy**: `tests/run_tests.sh` passes
+  `--error-for-skips` to every pytest invocation (and ignores the
+  `*_mpi.py` files in the serial run, which pytest-mpi would otherwise
+  skip wholesale), so absent data FAILS the sweep rather than quietly
+  shrinking it. In-test `pytest.skip` for a non-applicable
+  parametrization is likewise disallowed -- assert something true of
+  that case instead. The pywatershed repo lives at the mpix meta-repo
+  root.
 - **Dim-name gotcha:** pywatershed's generated output files put
   variables on the `nhm_id` dim; its parameter files use `nhru`.
   Rename to the grid dim when assembling model inputs (`.rename()`).
@@ -800,7 +810,7 @@ identically (tests/test_starfit_daily_parity.py; 15 reservoirs x 365
 d x 24 substeps, cms, 1e-10) -- validates the PORT, not the physics.
 Parity needs pywatershed IMPORTABLE: mpix-root clone via sys.path +
 deps pyPRMS (pip) / tqdm / contextily (conda) in environment.yaml;
-skips cleanly otherwise. Framework: substep contract grew to
+the importorskip fails the sweep otherwise (no-skips policy). Framework: substep contract grew to
 `substep(istep, inode, state, tctx, n_sub)` (symmetric w/ finalize;
 daily needs the last-substep test); `tctx` gained `itime_step`
 (free, always served); `initialize_starfit_type` now writes OWN-ROWS

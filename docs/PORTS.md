@@ -26,8 +26,11 @@ and MPI-distributed, with no pywatershed at runtime.
 Sources are pywatershed (PRMS 5.2.1 physics; the repo lives at the
 mpix meta-repo root). Validation compares against pywatershed's
 GENERATED drb_2yr answers (`test_data/drb_2yr/output/`, produced by
-its autotest data-generation workflow — not checked in; parity tests
-skip cleanly when absent).
+its autotest data-generation workflow — not checked in). Each parity
+module carries a skipif that names the missing files, but the sweep
+(`tests/run_tests.sh`) runs with `--error-for-skips`: NO SKIPS is the
+policy, so missing data fails the suite rather than quietly shrinking
+it.
 
 ## The chain
 
@@ -71,7 +74,7 @@ relies on Model/ModelMPI running ALL `advance()` hooks before any
 | PRMSSnow | `hydrology/prms_snow.py` | **bit-identical** to upstream's numpy path (A/B); 1e-3 on upstream's own 5-var list vs answers | See "The snow story" below |
 | PRMSSolarGeometry | `atmosphere/prms_solar_geometry.py` | 1e-10 (upstream's PRMS 5.2.1 standard) | A parameter FACTORY, not a Process (static (ndoy, nhru) tables) |
 | PRMSAtmosphere | `atmosphere/prms_atmosphere.py` | 1e-5 (upstream's own) | Per-step port of upstream's all-time-vectorized preprocessing |
-| NoDprst variants (runoff, soilzone, gw) | same modules as their full classes | bit-identical to the full class with dprst disabled by data (`tests/test_prms_no_dprst.py`); answer parity pending data (see below) | The ADDITIVE inversion of upstream's subtractive subclassing -- see "How variants are done here" |
+| NoDprst variants (runoff, soilzone, gw) | same modules as their full classes | bit-identical to the full class with dprst disabled by data (`tests/test_prms_no_dprst.py`); answer parity vs the nhm_no_dprst answers (`tests/test_prms_no_dprst_parity.py`) | The ADDITIVE inversion of upstream's subtractive subclassing -- see "How variants are done here" |
 | PRMSRunoffAg | `hydrology/prms_runoff.py` | 1e-5 + exceptions (upstream's own; GSFLOW Fortran answers, fgr_ag_2yr) | Additive extension of PRMSRunoff; dynamic ag_frac; serial + 4-rank MPI |
 | PRMSSoilzoneAg | `hydrology/prms_soilzone_ag.py` | 1e-5 + exceptions (fgr spinup) | SIBLING dual-area family core (see module docstring); serial + 4-rank MPI + live RunoffAg chain |
 | PRMSSoilzoneAgObsET | `hydrology/prms_soilzone_ag.py` | 1e-5 + exceptions (fgr analysis: obs-AET iteration + dynamic ag_frac) | Additive extension of PRMSSoilzoneAg (It0 loop + extracted irrigation-adjust kernel) |
@@ -560,8 +563,10 @@ flow-driven variables see the knife-edge cascade).
   period) against its full class run with dprst disabled by data
   (`dprst_frac = 0` / zero-dprst inputs) — no external answers
   needed. `tests/test_prms_no_dprst_parity.py` compares against
-  pywatershed's nhm_no_dprst simulation answers and SKIPS until those
-  are generated into `test_data/drb_2yr/output_no_dprst/`.
+  pywatershed's nhm_no_dprst simulation answers
+  (`test_data/drb_2yr/output_no_dprst/`, generated with
+  `generate_test_data.py --domain=drb_2yr --control_pattern=nhm_no_dprst`;
+  green at each process's own tolerance, Oct 2026).
 - Budget / ConservativeProcess: a deliberate later design pass.
 - Southern-hemisphere domains (atmosphere `is_summer`).
 - Nonzero `snowpack_init` (upstream's implementation is faulty).
