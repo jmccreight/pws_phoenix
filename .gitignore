@@ -7,5 +7,4 @@ pyrightconfig.json
 # per-notebook data directories (XX_name/ beside XX_name.py)
 examples/[0-9][0-9]_*/
 
-external_repos/landlab/landlab
-external_repos/landlab/xarray-simlab
+*.egg-info/
