@@ -590,19 +590,26 @@ Port conventions (established by the groundwater port):
 - mpixarray handles UNEVEN decomposition (drb_2yr's 765 HRUs over 4
   ranks -> 192/191/191/191) -- the toy tests' even sizes were never
   load-bearing.
-- **Upstream issue to report (mpixarray, July 2026; still present in
-  1.0.0, Oct 2026):** `mpixarray/file_io/netcdf/nc_DataArray.py:246`
-  (`h5c['fillvalue'] = np.asarray(fv, dtype=dtype).item()`; was
-  `ncxarray/nc_DataArray.py:331` before ncxarray was folded into
-  mpixarray) stamps a default `nan` fill value on EVERY written
-  variable, including a `datetime64` `time` coordinate ->
-  "invalid value encountered in cast" RuntimeWarning at write (every
-  rank) + xarray SerializationWarning ("non-conforming '_FillValue' ...
+- **Upstream issue to report (mpixarray; diagnosed with a verified
+  reproducer Oct 16, 2026):** the NetCDF writer re-emits a `_FillValue`
+  INHERITED on a coordinate. Chain: pywatershed stores `time` as
+  float32 -> xarray's `to_netcdf` adds `_FillValue = nan` to any
+  float-encoded variable, the `time` coord included -> `mpixarray.
+  open_dataset` hoists it into `time.attrs` -> in
+  `mpixarray/file_io/netcdf/nc_DataArray.py:241-246`
+  `packing.encoded_fill_value` returns it, so the coord/datetime
+  exclusion (which only guards the DEFAULT fill) is bypassed:
+  `np.asarray(nan, dtype=int64)` -> "invalid value encountered in
+  cast" RuntimeWarning at write (every rank), and `cf_pack_attrs`
+  (~L287) stamps `time:_FillValue = NaNf` on the int64 time var ->
+  xarray SerializationWarning ("non-conforming '_FillValue' ...
   dropping") at read-back (rank 0 only -- the validating reader).
-  Benign for results; surfaced by the first real datetime64-time output
-  (gw MPI test; the toy never triggered it). Fix belongs in mpixarray:
-  no fill value on coordinates (CF forbids it; xarray drops it anyway),
-  a typed one (`iinfo.min` / `NaT`) or none for non-float data vars.
+  Benign for results. Fix belongs in mpixarray: apply the
+  coord/datetime exclusion to inherited values too (CF forbids a fill
+  on coordinates; xarray drops it anyway). DECIDED Oct 16, 2026: NOT
+  worked around in pws_phoenix (a guard in `ModelMPI._build` or
+  `encoding={"time": {"_FillValue": None}}` at every `to_netcdf`
+  would do it; the fixtures all inherit it the same way).
 - Stage-2 framework part (a) is DONE (dis-owned params + init hook +
   `parameter_internal`; see the Phase-2 backlog entries above).
   Decisions taken with JLM: `segment_order` is DIS-owned (topology);
