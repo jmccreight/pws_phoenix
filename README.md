@@ -42,21 +42,20 @@ import is optional).
 
 ### The mpixarray ecosystem
 
-The MPI path needs the local packages installed in dependency order
-(the mpix meta-repo's `setup_environment.sh` does this against
-side-by-side clones):
+The MPI path needs the two local packages installed in dependency
+order (the mpix meta-repo's `setup_environment.sh` does this against
+side-by-side clones; mpixarray branch `1.0.0`, mpix `main`):
 
 ```
-pip install -e numba_stdlib
-pip install -e mpi4mpi4py
-pip install -e ncxarray
+pip install -e mpix
 pip install -e mpixarray
 ```
 
-The originals live on code.usgs.gov (`arc/py-hpc`); their
-`requirements.txt` `git+` cross-references must be commented out when
-installing from local clones (`comment_remote_deps.sh` in the
-meta-repo, or the sed in `ci_ecosystem.yaml`).
+The originals live on code.usgs.gov (`arc/py-hpc`). `mpixarray`
+requires `mpix` by plain name, so installing `mpix` first makes pip
+take the local clone. Their other requirements are listed in
+`environment.yaml` (the "ecosystem requirements" group inside the
+parallel-io block) so the editable installs pull nothing from PyPI.
 
 ### CI setup (one-time, repo admin)
 
@@ -64,13 +63,12 @@ meta-repo, or the sed in `ci_ecosystem.yaml`).
 ecosystem + MPI suite on ubuntu/macos (and the serial derivation on
 windows). It needs:
 
-1. Private GitHub mirrors of `numba_stdlib`, `mpi4mpi4py`,
-   `ncxarray`, and `mpixarray` under one org/user (e.g.
-   `jmccreight`).
+1. Private GitHub mirrors of `mpix` and `mpixarray` under one
+   org/user (e.g. `jmccreight`).
 2. `ECOSYSTEM_ORG` at the top of `ci_ecosystem.yaml` edited to that
    org/user.
 3. A fine-grained personal access token (Contents: read-only, scoped
-   to just those four repos) stored as the `ECOSYSTEM_READ_PAT`
+   to just those two repos) stored as the `ECOSYSTEM_READ_PAT`
    repository secret.
 
 Fork PRs do not receive secrets, so the ecosystem jobs run on

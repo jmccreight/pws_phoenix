@@ -41,13 +41,6 @@ dependencies:
   # declares numpy<2.5 (also the mypy hook's pin)
   - numpy>=2.0.0,<2.5
   - numba
-  # pyPRMS 0.9.10 is UNUSABLE under packaging 26.3 (Version(None)
-  # now raises InvalidVersion; pyPRMS's metadata filter catches only
-  # TypeError -> every MetaData() call dies). Fix offered upstream
-  # (pyPRMS branch ask/packaging-version-none; see
-  # prms_translate/UPSTREAM_ASKS.md item 0); drop this pin when it
-  # lands in the installed pyPRMS
-  - packaging=26.2
   # graphviz layout for ModelContractGraph.to_dot (notebook 00;
   # falls back to mermaid without it) -- was an ad hoc install in
   # the old env, now on the record
@@ -76,14 +69,10 @@ dependencies:
   # xarray 2026.7 above -- the historical breakage was the MISMATCHED
   # pair, xarray 2026.4 + zarr 3.3). Back on conda: the old
   # zarr-as-pip arrangement existed only to defend the v2 line
-  # against conda re-solves and is obsolete. KNOWN TWO-STEP on a
-  # fresh env create: pyPRMS 0.9.10's pip install (below, runs last)
-  # declares zarr<3 and WILL downgrade zarr to 2.18 -- restore with
-  #   conda install -n <env> zarr=3.3.* --freeze-installed
-  # (the validated build path). Harmless otherwise: pyPRMS's zarr
-  # use is an optional Cbh engine we never touch, and its
-  # development branch has already relaxed the pin -- this two-step
-  # dies when pyPRMS >0.9.10 is picked up.
+  # against conda re-solves and is obsolete. (pyPRMS 0.9.10's
+  # zarr<3 pin used to downgrade this on a fresh create; pyPRMS
+  # >=0.10.0 has no such pin -- verified on a from-scratch build,
+  # Oct 2026.)
   - zarr=3.3.*
   # ---- BEGIN parallel-io ----------------------------------------
   # The MPI + parallel-HDF5/NetCDF stack (mirrors the mpix meta-repo
@@ -101,10 +90,26 @@ dependencies:
   - h5py=*=mpi*
   - h5netcdf
   - pytest-mpi
+  # ecosystem requirements: the union of mpix/requirements.txt and
+  # mpixarray/requirements.txt (Oct 2026) not already listed above,
+  # floors copied from mpix, so `pip install -e` of the two clones
+  # pulls nothing from PyPI (mpix: tiff/las/gpkg file_io readers,
+  # prange; mpixarray: netcdf/zarr/tiff file_io)
+  - hdf5plugin
+  - imagecodecs>=2024.6.1
+  - progressbar2>=4.4.0
+  - pyproj>=3.7.0
+  - rasterio>=1.4.0
+  - rioxarray
+  - scipy>=1.15.3
+  - shapely>=2.0.4
+  - zstandard>=0.22.0
   # ---- END parallel-io ------------------------------------------
   - pip:
       - pytest-error-for-skips
       # pywatershed import-chain dep for the A/B parity tests
       # (pywatershed itself is used from the mpix-root repo clone via
-      # sys.path); contextily + tqdm ride in the conda section above
-      - pyPRMS
+      # sys.path); contextily + tqdm ride in the conda section above.
+      # >=0.10.0: fixes the MetaData() crash under packaging 26.3
+      # (UPSTREAM_ASKS item 0) and drops the zarr<3 pin
+      - pyPRMS>=0.10.0

@@ -39,6 +39,10 @@ a PR.
 
 ## 0. URGENT: every MetaData() call dies under packaging 26.3
 
+**RESOLVED in pyPRMS 0.10.0** (verified Oct 16, 2026: `MetaData()`
+runs under packaging 26.3; the `packaging=26.2` pin is gone from
+`environment.yaml`, which now requires `pyPRMS>=0.10.0`).
+
 **Branch:** `ask/packaging-version-none` (**fix included**, suite
 green) -- `tests/func/test_MetaData.py::test_metadata_under_packaging_26_3`
 

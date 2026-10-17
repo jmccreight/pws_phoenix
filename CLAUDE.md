@@ -590,15 +590,19 @@ Port conventions (established by the groundwater port):
 - mpixarray handles UNEVEN decomposition (drb_2yr's 765 HRUs over 4
   ranks -> 192/191/191/191) -- the toy tests' even sizes were never
   load-bearing.
-- **Upstream issue to report (ncxarray, July 2026):**
-  `ncxarray/nc_DataArray.py:331` stamps a default `nan` fill value on
-  EVERY written variable, including a `datetime64` `time` coordinate ->
-  "invalid value encountered in cast" RuntimeWarning at write + xarray
-  SerializationWarning ("non-conforming '_FillValue' ... dropping") at
-  read-back. Benign for results; surfaced by the first real
-  datetime64-time output (gw MPI test; the toy never triggered it).
-  Fix belongs in ncxarray: skip/type the fill value for coordinate and
-  non-float variables.
+- **Upstream issue to report (mpixarray, July 2026; still present in
+  1.0.0, Oct 2026):** `mpixarray/file_io/netcdf/nc_DataArray.py:246`
+  (`h5c['fillvalue'] = np.asarray(fv, dtype=dtype).item()`; was
+  `ncxarray/nc_DataArray.py:331` before ncxarray was folded into
+  mpixarray) stamps a default `nan` fill value on EVERY written
+  variable, including a `datetime64` `time` coordinate ->
+  "invalid value encountered in cast" RuntimeWarning at write (every
+  rank) + xarray SerializationWarning ("non-conforming '_FillValue' ...
+  dropping") at read-back (rank 0 only -- the validating reader).
+  Benign for results; surfaced by the first real datetime64-time output
+  (gw MPI test; the toy never triggered it). Fix belongs in mpixarray:
+  no fill value on coordinates (CF forbids it; xarray drops it anyway),
+  a typed one (`iinfo.min` / `NaT`) or none for non-float data vars.
 - Stage-2 framework part (a) is DONE (dis-owned params + init hook +
   `parameter_internal`; see the Phase-2 backlog entries above).
   Decisions taken with JLM: `segment_order` is DIS-owned (topology);

@@ -3,9 +3,10 @@
 # tests, no ecosystem):
 #
 # - ubuntu/macos: build the parallel env from environment.yaml, check
-#   out the four ecosystem repos (PRIVATE GITHUB MIRRORS of the
-#   code.usgs.gov originals) with a read-only PAT, install them in
-#   dependency order, then run the full suite -- serial + every MPI
+#   out the two ecosystem repos (PRIVATE GITHUB MIRRORS of the
+#   code.usgs.gov originals: mpix main, mpixarray 1.0.0) with a
+#   read-only PAT, install them in dependency order, then run the
+#   full suite -- serial + every MPI
 #   test file under mpirun (tests/run_tests.sh). Data-dependent
 #   suites (drb/starfit) skip cleanly: no domain data in CI.
 # - windows: DEMONSTRATE the serial derivation -- environment.yaml
@@ -14,10 +15,10 @@
 #   (mpixarray is an optional import; see model.py).
 #
 # Setup required once (see the session notes / CLAUDE.md):
-# 1. Mirror numba_stdlib, mpi4mpi4py, ncxarray, mpixarray to private
-#    GitHub repos under ECOSYSTEM_ORG (edit below).
+# 1. Mirror mpix and mpixarray to private GitHub repos under
+#    ECOSYSTEM_ORG (edit below).
 # 2. Create a fine-grained PAT, Contents: read-only, scoped to those
-#    four repos; store it as the ECOSYSTEM_READ_PAT repo secret.
+#    two repos; store it as the ECOSYSTEM_READ_PAT repo secret.
 # Note: fork PRs do not receive secrets -- the ecosystem checkout
 # fails there by design; run this workflow on push/internal PRs.
 
@@ -70,52 +71,33 @@ jobs:
           environment-file: environment_ci.yaml
           cache-environment: true
 
-      - name: Check out numba_stdlib
+      - name: Check out mpix
         if: runner.os != 'Windows'
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.ECOSYSTEM_ORG }}/numba_stdlib
+          repository: ${{ env.ECOSYSTEM_ORG }}/mpix
+          ref: main
           token: ${{ secrets.ECOSYSTEM_READ_PAT }}
-          path: numba_stdlib
-
-      - name: Check out mpi4mpi4py
-        if: runner.os != 'Windows'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ECOSYSTEM_ORG }}/mpi4mpi4py
-          token: ${{ secrets.ECOSYSTEM_READ_PAT }}
-          path: mpi4mpi4py
-
-      - name: Check out ncxarray
-        if: runner.os != 'Windows'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ECOSYSTEM_ORG }}/ncxarray
-          token: ${{ secrets.ECOSYSTEM_READ_PAT }}
-          path: ncxarray
+          path: mpix
 
       - name: Check out mpixarray
         if: runner.os != 'Windows'
         uses: actions/checkout@v4
         with:
           repository: ${{ env.ECOSYSTEM_ORG }}/mpixarray
+          ref: 1.0.0
           token: ${{ secrets.ECOSYSTEM_READ_PAT }}
           path: mpixarray
 
       - name: Install ecosystem (dependency order)
         if: runner.os != 'Windows'
         run: |
-          # comment_remote_deps.sh equivalent: fresh clones carry
-          # git+ lines pointing at code.usgs.gov (unreachable here);
-          # the side-by-side local clones supply those packages
-          sed -i.bak -E 's|^([^#].*git\+.*)$|# \1|' \
-            numba_stdlib/requirements.txt \
-            mpi4mpi4py/requirements.txt \
-            ncxarray/requirements.txt \
-            mpixarray/requirements.txt
-          pip install -e numba_stdlib
-          pip install -e mpi4mpi4py
-          pip install -e ncxarray
+          # mpixarray requires mpix by plain name: installing mpix
+          # first makes pip take the local clone. Every other
+          # requirement of both packages is already in the conda env
+          # (environment.yaml "ecosystem requirements"), so nothing
+          # is pulled from PyPI.
+          pip install -e mpix
           pip install -e mpixarray
 
       # unix: the full sweep (serial suite + each MPI test file under
