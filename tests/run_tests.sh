@@ -9,6 +9,14 @@
 #
 # MPI files run ONE PER LAUNCH (module-scoped fixtures stay isolated and
 # a failure names its file). Exit code = number of failed suites.
+#
+# NO SKIPS: every pytest invocation runs with --error-for-skips
+# (pytest-error-for-skips, environment.yaml), so a skipped test fails
+# its suite -- including the module-level skipifs of the
+# data-dependent tests (pywatershed domain data missing = failure, not
+# a quiet skip). The serial invocation ignores the *_mpi.py files
+# (pytest-mpi would skip every test in them without --with-mpi); the
+# loop below runs each of them under ${MPI_CMD}.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -37,13 +45,16 @@ else
 fi
 failures=0
 
-echo "==== serial: pytest tests/ ${pytest_opts[*]}"
-pytest tests/ "${pytest_opts[@]}" || failures=$((failures + 1))
+serial_opts=(--error-for-skips --ignore-glob='tests/*_mpi.py')
+echo "==== serial: pytest tests/ ${serial_opts[*]} ${pytest_opts[*]}"
+pytest tests/ "${serial_opts[@]}" "${pytest_opts[@]}" \
+    || failures=$((failures + 1))
 
+mpi_opts=(--with-mpi --error-for-skips)
 for ff in tests/test_*_mpi.py; do
     echo
-    echo "==== MPI: ${MPI_CMD} pytest --with-mpi ${ff} ${pytest_opts[*]}"
-    ${MPI_CMD} pytest --with-mpi "${ff}" "${pytest_opts[@]}" \
+    echo "==== MPI: ${MPI_CMD} pytest ${mpi_opts[*]} ${ff} ${pytest_opts[*]}"
+    ${MPI_CMD} pytest "${mpi_opts[@]}" "${ff}" "${pytest_opts[@]}" \
         || failures=$((failures + 1))
 done
 
