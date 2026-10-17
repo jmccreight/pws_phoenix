@@ -100,12 +100,15 @@ jobs:
           pip install -e mpix
           pip install -e mpixarray
 
+      - name: Install pws_phoenix (editable, no deps)
+        run: pip install -e pws_phoenix --no-deps
+
       # unix: the full sweep (serial suite + each MPI test file under
       # mpirun; exit code = number of failed suites)
       - name: Full test sweep (serial + MPI)
         if: runner.os != 'Windows'
         run: |
-          cd pws_phoenix/incarnations/mpixarray
+          cd pws_phoenix
           MPI_CMD="mpirun -n 4" bash tests/run_tests.sh
 
       # windows: serial only (no ecosystem; *_mpi.py files import
@@ -114,5 +117,5 @@ jobs:
       - name: Serial tests
         if: runner.os == 'Windows'
         run: |
-          cd pws_phoenix/incarnations/mpixarray
+          cd pws_phoenix
           python -m pytest tests/ -vv --ignore-glob='tests/*_mpi.py'

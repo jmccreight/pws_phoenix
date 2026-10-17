@@ -4,8 +4,8 @@ repos:
     rev: v2.1.0
     hooks:
       - id: mypy
-        name: mypy (incarnations/mpixarray)
-        args: [--check-untyped-defs, --ignore-missing-imports, incarnations/mpixarray/]
+        name: mypy (pws_phoenix)
+        args: [--check-untyped-defs, --ignore-missing-imports, pws_phoenix/, tests/, examples/]
         pass_filenames: false
         always_run: true
         # numpy pinned to the mpix conda env's version: the hook env is

@@ -43,7 +43,7 @@ how to open it, and states what the reader will do:
 
 - Cells: `# %%` (code) and `# %% [markdown]` (prose; every prose
   line starts `# `).
-- Locate the package with the dual-context pattern (script has
+- Locate the repo with the dual-context pattern (script has
   `__file__`; a Jupyter kernel starts in the notebook's directory):
 
   ```python
@@ -51,12 +51,14 @@ how to open it, and states what the reader will do:
       _here = pl.Path(__file__).parent
   except NameError:
       _here = pl.Path.cwd()
-  _pkg = _here.parent
-  assert (_pkg / "model.py").exists(), (
-      f"expected to run from .../examples, not {_here}"
+  _repo = _here.parent
+  assert (_repo / "pyproject.toml").exists(), (
+      f"expected to run from pws_phoenix/examples, not {_here}"
   )
-  sys.path.append(str(_pkg))
   ```
+
+  The package is imported normally (`pip install -e .` once per env);
+  the block only locates data relative to the repo.
 
 - Imports after that block are fine: `ruff.toml` carries a per-file
   E402 ignore for `examples/`.

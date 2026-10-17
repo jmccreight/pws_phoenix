@@ -15,7 +15,7 @@ dependencies:
   - git
   - make
   - ipython
-  # notebooks (incarnations/mpixarray/examples/); rides
+  # notebooks (examples/); rides
   # into CI/HPC builds too -- accepted (JLM Aug 2026) over a separate
   # env or the lab-from-base + ipykernel pattern. jupytext opens
   # py:percent files AS notebooks (right-click -> Open With ->

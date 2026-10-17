@@ -30,6 +30,7 @@ serial env is not maintained separately):
 ```
 conda env create -f environment.yaml   # or: conda env update -n pwpx
 conda activate pwpx
+pip install -e . --no-deps              # the pws_phoenix package itself
 ```
 
 The MPI + parallel-HDF5/NetCDF stack lives in the marked
@@ -37,7 +38,7 @@ The MPI + parallel-HDF5/NetCDF stack lives in the marked
 environment (e.g. on a platform conda cannot solve the parallel stack
 for -- Windows has no conda-forge mpich/parallel hdf5) is derived by
 deleting that block; CI's Windows job does exactly this. Serial runs
-of `incarnations/mpixarray` never need the block (the `mpixarray`
+never need the block (the `mpixarray`
 import is optional).
 
 ### The mpixarray ecosystem
@@ -78,7 +79,6 @@ tests are not available in CI; those tests skip cleanly.
 ### Running tests
 
 ```
-cd incarnations/mpixarray
 ./tests/run_tests.sh          # serial suite + each MPI file under mpirun
 pytest tests/ -q              # serial only
 ```

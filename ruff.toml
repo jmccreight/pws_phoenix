@@ -2,7 +2,7 @@
 #
 # Line length is pinned here (referenced by CLAUDE.md's python conventions).
 # Applies to all subdirectories, since ruff walks up to the nearest
-# config -- including incarnations/.
+# config.
 line-length = 79
 
 # The rule selection is pinned to ruff's CLASSIC defaults (what "ruff
