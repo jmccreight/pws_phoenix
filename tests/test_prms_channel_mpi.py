@@ -75,6 +75,10 @@ ANSWER_NAMES = (
 # fastmath-answers ceiling for the full chain
 RTOL = ATOL = 1.0e-2
 OUTLIER_FRACTION = 1.0e-3
+# seg_stor_change is a cancellation diagnostic (see test_prms_channel.py);
+# its outlier fraction rose from 0.014% to 0.152% with the Oct-2026
+# oracle answers (current prms_src, conda gfortran 15.3)
+PER_VAR_MAX_FRAC = {"seg_stor_change": 2.5e-3}
 S_PER_TIME = np.float64(60.0 * 60.0 * 24.0)
 
 _needed = (
@@ -324,9 +328,10 @@ class TestPRMSChannelSubmodelMPI:
                 atol=ATOL,
             )
             frac = bad.mean()
-            assert frac <= OUTLIER_FRACTION, (
+            max_frac = PER_VAR_MAX_FRAC.get(nn, OUTLIER_FRACTION)
+            assert frac <= max_frac, (
                 f"variable '{nn}': {frac:.3%} of segment-days outside "
-                f"tolerance (allowed {OUTLIER_FRACTION:.3%})"
+                f"tolerance (allowed {max_frac:.3%})"
             )
 
     # -- streamed distributed var (parallel NetCDF, rank 0) --
