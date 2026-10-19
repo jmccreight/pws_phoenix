@@ -31,6 +31,10 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # EDIT ME: the GitHub org/user hosting the private mirrors
   ECOSYSTEM_ORG: EDIT-ME-org
