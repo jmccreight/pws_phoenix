@@ -447,7 +447,8 @@ class Model:
     def _set_budget_options(self, control: Dict[str, Any]) -> None:
         """control["budget"]: None (default; budgets are still computed
         and written, never judged), "warn" (per-rank warnings), or
-        "error" (raise -- collectively under MPI). Tolerances
+        "error" (per-rank warnings, then raise -- collectively under
+        MPI). Tolerances
         control["budget_rtol"/"budget_atol"] default to pywatershed's."""
         mode = control.get("budget")
         if mode not in (None, "warn", "error"):
@@ -464,10 +465,12 @@ class Model:
         the result per control["budget"] (see _raise_if_imbalanced)."""
         if not proc._budgets:
             return
+        # error mode warns too: the per-rank warning carries the date,
+        # max |residual| and first indices that the raise does not.
         n_bad = proc.check_budgets(
             self._budget_rtol,
             self._budget_atol,
-            self._budget_mode == "warn",
+            self._budget_mode in ("warn", "error"),
             self.time,
         )
         if self._budget_mode == "error":

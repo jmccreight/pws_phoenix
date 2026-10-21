@@ -120,7 +120,14 @@ from pws_phoenix.hydrology.prms_soilzone import (
 from pws_phoenix.process import DataArrayMeta, Process
 
 
-def _meta(kind, description, dtype=np.float64, restart=False, derivation=None):
+def _meta(
+    kind,
+    description,
+    dtype=np.float64,
+    restart=False,
+    derivation=None,
+    units=None,
+):
     return DataArrayMeta(
         kind=kind,
         dims=("space",),
@@ -128,7 +135,14 @@ def _meta(kind, description, dtype=np.float64, restart=False, derivation=None):
         description=description,
         restart=restart,
         derivation=derivation,
+        units=units,
     )
+
+
+def _term(description):
+    """A mass-budget term: a variable in inches (units are required on
+    budget terms; all of this family's terms are plain variables)."""
+    return _meta("variable", description, units="inches")
 
 
 class PRMSSoilzoneAg(Process):
@@ -294,34 +308,32 @@ class PRMSSoilzoneAg(Process):
     # -- variables: pervious / shared --
     cap_infil_tot = _meta("variable", "Capillary infiltration [in over HRU]")
     cap_waterin = _meta("variable", "Capillary reservoir water in [inches]")
-    dunnian_flow = _meta("variable", "Dunnian surface runoff [inches]")
+    dunnian_flow = _term("Dunnian surface runoff [inches]")
     hru_actet = _meta("variable", "Actual ET [inches over the HRU]")
     perv_actet = _meta("variable", "Pervious actual ET [in over perv area]")
-    perv_actet_hru = _meta("variable", "Pervious actual ET [in over HRU]")
+    perv_actet_hru = _term("Pervious actual ET [in over HRU]")
     potet_lower = _meta("variable", "Potential ET from lower zone [inches]")
     potet_rechr = _meta("variable", "Potential ET from recharge zone [in]")
-    pref_flow = _meta("variable", "Preferential interflow [inches]")
+    pref_flow = _term("Preferential interflow [inches]")
     pref_flow_in = _meta("variable", "Preferential reservoir inflow [in]")
     pref_flow_infil = _meta("variable", "Infiltration to pref reservoir [in]")
     pref_flow_stor = _meta(
         "variable", "Preferential reservoir storage [in]", restart=True
     )
-    pref_flow_stor_change = _meta("variable", "Pref storage change [inches]")
+    pref_flow_stor_change = _term("Pref storage change [inches]")
     pref_flow_stor_prev = _meta("variable", "Pref storage, previous step")
     recharge = _meta("variable", "Recharge to groundwater [inches]")
-    slow_flow = _meta("variable", "Slow (gravity) interflow [inches]")
+    slow_flow = _term("Slow (gravity) interflow [inches]")
     slow_stor = _meta(
         "variable", "Gravity reservoir storage [inches]", restart=True
     )
-    slow_stor_change = _meta("variable", "Gravity storage change [inches]")
+    slow_stor_change = _term("Gravity storage change [inches]")
     slow_stor_prev = _meta("variable", "Gravity storage, previous step")
     soil_lower = _meta(
         "variable", "Lower capillary-zone storage [inches]", restart=True
     )
     soil_lower_change = _meta("variable", "Lower-zone storage change [in]")
-    soil_lower_change_hru = _meta(
-        "variable", "Lower-zone storage change [in over HRU]"
-    )
+    soil_lower_change_hru = _term("Lower-zone storage change [in over HRU]")
     soil_lower_prev = _meta(
         "variable", "Lower-zone storage, previous step (PRMSRunoffAg input)"
     )
@@ -336,27 +348,23 @@ class PRMSSoilzoneAg(Process):
         "variable", "Recharge-zone storage [inches]", restart=True
     )
     soil_rechr_change = _meta("variable", "Recharge-zone change [inches]")
-    soil_rechr_change_hru = _meta(
-        "variable", "Recharge-zone change [in over HRU]"
-    )
+    soil_rechr_change_hru = _term("Recharge-zone change [in over HRU]")
     soil_rechr_prev = _meta(
         "variable", "Recharge-zone storage, previous step (RunoffAg input)"
     )
     soil_saturated = _meta("variable", "Pervious soil saturated flag (0/1)")
     soil_to_gw = _meta("variable", "Capillary excess to GWR [inches]")
     soil_to_ssr = _meta("variable", "Capillary excess to gravity [inches]")
-    perv_soil_to_gw = _meta("variable", "Pervious part of soil_to_gw [in]")
+    perv_soil_to_gw = _term("Pervious part of soil_to_gw [in]")
     perv_soil_to_gvr = _meta("variable", "Pervious part of soil_to_ssr [in]")
-    ssr_to_gw = _meta("variable", "Gravity drainage to GWR [inches]")
+    ssr_to_gw = _term("Gravity drainage to GWR [inches]")
     ssres_flow = _meta("variable", "Interflow to stream network [inches]")
     ssres_flow_vol = _meta("variable", "Interflow volume [cubic feet]")
     ssres_in = _meta("variable", "Inflow to gravity+pref reservoirs [in]")
     ssres_stor = _meta("variable", "Gravity + preferential storage [inches]")
-    swale_actet = _meta("variable", "Swale ponded-water actual ET [inches]")
+    swale_actet = _term("Swale ponded-water actual ET [inches]")
     unused_potet = _meta("variable", "Unsatisfied potential ET [inches]")
-    perv_infil_hru = _meta(
-        "variable", "Pervious infiltration [inches over HRU]"
-    )
+    perv_infil_hru = _term("Pervious infiltration [inches over HRU]")
 
     # -- variables: agricultural --
     ag_cap_infil_tot = _meta("variable", "Ag infiltration [in over HRU]")
@@ -377,23 +385,19 @@ class PRMSSoilzoneAg(Process):
         "variable", "Ag recharge-zone storage, previous step (RunoffAg input)"
     )
     ag_soil_rechr_change = _meta("variable", "Ag recharge-zone change [in]")
-    ag_soil_rechr_change_hru = _meta(
-        "variable", "Ag recharge-zone change [in over HRU]"
-    )
+    ag_soil_rechr_change_hru = _term("Ag recharge-zone change [in over HRU]")
     ag_soil_lower = _meta(
         "variable", "Ag lower-zone storage [inches]", restart=True
     )
     ag_soil_lower_change = _meta("variable", "Ag lower-zone change [inches]")
-    ag_soil_lower_change_hru = _meta(
-        "variable", "Ag lower-zone change [in over HRU]"
-    )
+    ag_soil_lower_change_hru = _term("Ag lower-zone change [in over HRU]")
     ag_actet = _meta(
         "variable", "Ag actual ET [in] (canopy interception added back)"
     )
-    hru_ag_actet = _meta("variable", "Ag actual ET [inches over the HRU]")
+    hru_ag_actet = _term("Ag actual ET [inches over the HRU]")
     ag_potet_rechr = _meta("variable", "Ag potential ET, recharge zone [in]")
     ag_potet_lower = _meta("variable", "Ag potential ET, lower zone [in]")
-    ag_soil_to_gw = _meta("variable", "Ag part of soil_to_gw [inches]")
+    ag_soil_to_gw = _term("Ag part of soil_to_gw [inches]")
     ag_soil_to_gvr = _meta("variable", "Ag part of soil_to_ssr [inches]")
     ag_hortonian = _meta(
         "variable", "Ag hortonian runoff [in] (zeroed; never written upstream)"
@@ -407,7 +411,7 @@ class PRMSSoilzoneAg(Process):
         "Irrigation water added to ag area [in] (ZERO in this core; SET by "
         "the ObsET iteration)",
     )
-    ag_infil_hru = _meta("variable", "Ag infiltration [inches over HRU]")
+    ag_infil_hru = _term("Ag infiltration [inches over HRU]")
 
     # -- variables: dynamic-ag_frac redistribution tracking --
     ag_soil_moist_redistribution = _meta(
@@ -425,6 +429,35 @@ class PRMSSoilzoneAg(Process):
     slow_stor_redistribution = _meta(
         "variable", "Gravity redistribution on ag_frac change [in]"
     )
+
+    # -- budgets --
+    # pywatershed's PRMSSoilzoneAg.get_mass_budget_terms plus
+    # swale_actet as an output (the swale branch removes it from
+    # slow_stor; see prms_soilzone.py). ag_irrigation_add is zero in
+    # this core; ObsET adds it (as ag_irrigation_hru_source) to inputs.
+    _MASS_BUDGET = {
+        "inputs": ("perv_infil_hru", "ag_infil_hru"),
+        "outputs": (
+            "perv_actet_hru",
+            "hru_ag_actet",
+            "perv_soil_to_gw",
+            "ag_soil_to_gw",
+            "ssr_to_gw",
+            "slow_flow",
+            "dunnian_flow",
+            "pref_flow",
+            "swale_actet",
+        ),
+        "storage_changes": (
+            "soil_rechr_change_hru",
+            "soil_lower_change_hru",
+            "slow_stor_change",
+            "pref_flow_stor_change",
+            "ag_soil_rechr_change_hru",
+            "ag_soil_lower_change_hru",
+        ),
+    }
+    budgets = {"mass": _MASS_BUDGET}
 
     _ZERO_VARS = (
         "hru_area_perv",
@@ -1626,8 +1659,8 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
     ag_aet_external_vol = _meta(
         "variable", "Ag actual-ET volume [acre-inches]"
     )
-    ag_irrigation_hru_source = _meta(
-        "variable", "Irrigation water added [inches over the HRU]"
+    ag_irrigation_hru_source = _term(
+        "Irrigation water added [inches over the HRU]"
     )
     iter_count = _meta(
         "variable", "Iterations performed this timestep", np.int64
@@ -1638,6 +1671,19 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         "2 max-iters, 3 no-transp, -9 never)",
         np.int64,
     )
+
+    # -- budgets (REDECLARED: the iteration's irrigation water enters
+    # the ag capillary reservoir, `ag_water_maxin += ag_irrigation_add`;
+    # its whole-HRU-basis copy is the input term, as upstream) --
+    budgets = {
+        "mass": {
+            **PRMSSoilzoneAg._MASS_BUDGET,
+            "inputs": (
+                *PRMSSoilzoneAg._MASS_BUDGET["inputs"],
+                "ag_irrigation_hru_source",
+            ),
+        },
+    }
 
     _OBS_ZERO_VARS = (
         "AET_external",

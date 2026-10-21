@@ -286,8 +286,10 @@ class Process(ABC):
     # sign) to tuples of this class's declared field names, all carrying
     # the same `units`. Declaring one generates the `*_sum` / `residual`
     # / `residual_accum` variables (see _budget_fields and budget.py);
-    # the Model runs check_budgets() after each calculate() when
-    # control["budget"] is set. A variant redeclares the whole dict.
+    # the Model runs check_budgets() after each calculate() (ONLY the
+    # Model: a process driven by hand computes no budget -- run a lone
+    # process as a one-process Model). A variant redeclares the whole
+    # dict.
     budgets: dict[str, dict[str, tuple[str, ...]]] = {}
 
     def __init_subclass__(cls, **kwargs: object) -> None:

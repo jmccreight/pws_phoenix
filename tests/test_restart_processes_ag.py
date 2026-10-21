@@ -168,12 +168,16 @@ def test_flags_derivation_pin():
         "ag_soil_lower",
         "ag_area",
         "hru_area_perv",
+        # the mass budget's accumulator (restart=True by design)
+        "PRMSSoilzoneAg_mass_residual_accum",
     }
     # ObsET adds iteration diagnostics + It0 scratch only -- nothing
-    # prognostic beyond its base
-    assert set(PRMSSoilzoneAgObsET.get_restart_variables()) == set(
-        PRMSSoilzoneAg.get_restart_variables()
-    )
+    # prognostic beyond its base (its budget accumulator carries ITS
+    # class-name prefix: a redeclared budget generates its own fields)
+    assert set(PRMSSoilzoneAgObsET.get_restart_variables()) == (
+        set(PRMSSoilzoneAg.get_restart_variables())
+        - {"PRMSSoilzoneAg_mass_residual_accum"}
+    ) | {"PRMSSoilzoneAgObsET_mass_residual_accum"}
 
 
 @chain_skipif

@@ -196,7 +196,15 @@ chain" below.
   under MPI = `allreduce(MAX)` first so every rank raises together.
   Groundwater finding: pywatershed's term list omits `gwres_sink`,
   which the kernel removes from storage — its own drb answers only
-  close with the sink as an output.
+  close with the sink as an output. Soilzone (Oct 21, 2026; the
+  NoDprst/full pair and the Ag/ObsET pair): pywatershed's lists plus
+  `swale_actet` as an output (`slow_stor[hh] -= swale_actet[hh]` in
+  the swale branch; zero on LAND hrus, so invisible on the swale-free
+  test domains — a kernel-read correction, not a data-caught one);
+  ObsET adds `ag_irrigation_hru_source` to inputs as upstream does.
+  Error mode also warns per rank (date, max |residual|, first
+  indices) before the collective raise. Budgets run only under the
+  Model: drive a lone process as a one-process Model.
 
 ## drb_2yr domain facts the tests rely on
 
@@ -255,8 +263,10 @@ external comparison, relying on its mass budget instead. Mirrored
 here: `tests/test_prms_soilzone_ag_obs_et.py` (analysis) excludes the
 five; `tests/test_prms_soilzone_ag.py` (spinup, static ag_frac ->
 redistributions identically zero) still compares all five -- a
-stronger pin upstream doesn't have. When the Budget design pass lands
-(backlog), these variables get their mass-budget validation here too.
+stronger pin upstream doesn't have. Validated Oct 2026:
+`tests/test_prms_soilzone_ag_obs_et.py` runs with `control["budget"]
+= "error"` (the five enter the budget as its storage-change terms)
+and asserts the written residual < 1e-12 under dynamic `ag_frac`.
 
 Also mirrored from upstream's ag tests: the pervious-zone variable
 list compared only on non-ag HRUs (upstream's mask; note its
@@ -580,10 +590,9 @@ flow-driven variables see the knife-edge cascade).
   (`test_data/drb_2yr/output_no_dprst/`, generated with
   `generate_test_data.py --domain=drb_2yr --control_pattern=nhm_no_dprst`;
   green at each process's own tolerance, Oct 2026).
-- Budgets: declared on PRMSGroundwater{,NoDprst} only (Oct 2026);
-  the other ports' `get_mass_budget_terms` lists are still to be
-  declared (`units=` on every term) — soilzone's five Ag change
-  variables get their validation there. Not ported from pywatershed's
+- Budgets: declared on the groundwater and soilzone families (Oct
+  2026); still to declare (`units=` on every term): runoff, snow,
+  canopy, channel, FlowGraph node types. Not ported from pywatershed's
   Budget: `global` basis, per-term accumulations, `ignore_nans`.
 - Southern-hemisphere domains (atmosphere `is_summer`).
 - Nonzero `snowpack_init` (upstream's implementation is faulty).

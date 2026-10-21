@@ -159,8 +159,9 @@ def _terms(**components):
             "not a declared field",
         ),
         (
-            _terms(inputs=("inflow",), outputs=("leak_coef",),
-                   storage_changes=()),
+            _terms(
+                inputs=("inflow",), outputs=("leak_coef",), storage_changes=()
+            ),
             "every term needs units",
         ),
         (
@@ -168,8 +169,9 @@ def _terms(**components):
             "components must be",
         ),
         (
-            _terms(inputs=("inflow",), outputs=(), storage_changes=(),
-                   sinks=()),
+            _terms(
+                inputs=("inflow",), outputs=(), storage_changes=(), sinks=()
+            ),
             "components must be",
         ),
     ],
@@ -301,9 +303,12 @@ def test_leaky_warns():
 
 
 def test_leaky_errors():
+    """Error mode warns first (the per-rank detail: date, max
+    |residual|, indices), then raises."""
     with _model(_LeakyBucket, {"budget": "error"}) as model:
         with pytest.raises(ValueError, match="_LeakyBucket budget imbalanced"):
-            model.run(np.float64(1.0), np.int32(1))
+            with pytest.warns(UserWarning, match="imbalanced at 2000-01-01"):
+                model.run(np.float64(1.0), np.int32(1))
 
 
 def test_leaky_within_tolerance_passes():

@@ -6,7 +6,7 @@
 - [Environment (tests and tooling)](#environment-tests-and-tooling)
 - [python assumptions/conventions](#python-assumptionsconventions)
 - [Prime directive: memory](#prime-directive-memory)
-- [incarnations/mpixarray design notes](#incarnationsmpixarray-design-notes)
+- [pws_phoenix package design notes](#pws_phoenix-package-design-notes)
   - [Core decision: discretization = the unit of decomposition](#core-decision-discretization--the-unit-of-decomposition)
   - [Variable taxonomy: parameters vs inputs (by relationship to model time)](#variable-taxonomy-parameters-vs-inputs-by-relationship-to-model-time)
   - [Serial path (`Model` in `model.py`)](#serial-path-model-in-modelpy)
@@ -130,13 +130,15 @@ Keep the memory footprint lean and OBVIOUS. Concretely:
    np.asarray/astype on existing arrays, fancy indexing, xarray ops that
    materialize (selection on lazy datasets -- see test_ref_behaviors.py).
 
-# incarnations/mpixarray design notes
+# pws_phoenix package design notes
 
-`incarnations/mpixarray/` blends the serial xr Process framework (developed in
+The package `pws_phoenix/pws_phoenix/` (docs in `docs/`; it began life as
+`incarnations/mpixarray/`) blends the serial xr Process framework (developed in
 `incarnations/xr/`, since retired -- see git history; its design summary is
 distilled in "Prior art" below) with mpixarray's streaming MPI IO. The code is
-split into `globals.py` (`Time`), `data_io.py` (serial IO primitives),
-`discretization.py` (`Discretization`), `map.py` (`Map` + `MapMPI`),
+split into `clock.py` (`Time`; formerly `globals.py`), `data_io.py` (serial
+IO primitives), `discretization.py` (`Discretization`), `maps.py` (`Map` +
+`MapMPI`; formerly `map.py`),
 `process.py` (`DataArrayMeta` + the `Process` ABC), `model.py` (`Model`
 serial + `ModelMPI` streaming), `config.py` (minimal yaml ->
 `(process_dict, control, maps)`; a probe for the `Options` design),
@@ -145,10 +147,10 @@ serial + `ModelMPI` streaming), `config.py` (minimal yaml ->
 `hydrology/` module structure -- one process per module; see "Porting
 pywatershed processes" below).
 `model.py` is the top of the import stack (it imports `data_io`,
-`discretization`, `globals`, `process`); `config.py` sits beside it (atop
-`map` + `process`); `map.py` is foundational (numpy/xarray only; `Map`
+`discretization`, `clock`, `process`); `config.py` sits beside it (atop
+`maps` + `process`); `maps.py` is foundational (numpy/xarray only; `Map`
 objects are passed into the Model); `process.py` imports only
-`globals.py`. `Process.new()` and the `PWS` accessor were
+`clock.py`. `Process.new()` and the `PWS` accessor were
 retired (July 2026 -- see git history) when the Model took over per-grid
 dataset assembly. Phase 1 is implemented and tested (serial via pytest; MPI
 via pytest-mpi).
@@ -285,7 +287,7 @@ this decision.
 The "Global" item is split into two objects with different lifetimes and reach
 (rather than one bundled pywatershed-style `Control`):
 
-- **`Time`** (`globals.py`, implemented) -- the model clock: runtime state,
+- **`Time`** (`clock.py`, implemented) -- the model clock: runtime state,
   passed **all the way down** to a process's `calculate(dt, time)` and
   transparent for debugging. Daily, fixed, known at init. Exposes `.current` (a
   `datetime64`), `.month`, `.year`; `set_index(i)` points it at a timestep.
@@ -334,8 +336,8 @@ the `epiweeks` dep).
   taxonomy".) Coarse-linear (e.g. per-(year,month)) time-varying params remain.
 - Deferred review minors (July 2026): generalize `Output` beyond 1-D
   spatial vars (only when a real multi-dim output var exists -- it fails
-  loudly today); rename `map.py`/`globals.py` (they shadow builtins) when
-  this becomes a package.
+  loudly today). (The `map.py`/`globals.py` builtin-shadowing rename is
+  done: `maps.py`/`clock.py`.)
 - **Budgets (IMPLEMENTED Oct 2026; `budget.py` + `Process.budgets`)**
   -- pywatershed's Budget/ConservativeProcess re-expressed as DATA: a
   process declares `budgets = {"mass": {"inputs": (...), "outputs":
@@ -360,13 +362,26 @@ the `epiweeks` dep).
   others at the next collective). Tolerances `budget_rtol/atol`
   default 1e-5 (pywatershed's). NOT ported: `global` basis (sum the
   written per-unit residual offline), per-term accumulations, the
-  netCDF writer, `__repr__`, `ignore_nans`. First declared:
-  PRMSGroundwater{,NoDprst} -- with `gwres_sink` as an OUTPUT
-  (pywatershed's own term list omits it; its drb answers only close
-  with it -- `test_answers_close_with_sink`). Tests:
+  netCDF writer, `__repr__`, `ignore_nans`. Declared:
+  PRMSGroundwater{,NoDprst} (`gwres_sink` as an OUTPUT --
+  pywatershed's own term list omits it; its drb answers only close
+  with it, `test_answers_close_with_sink`); PRMSSoilzone{,NoDprst} and
+  PRMSSoilzoneAg{,ObsET} (Oct 21, 2026: pywatershed's lists plus
+  `swale_actet` as an output -- the swale branch does `slow_stor[hh]
+  -= swale_actet[hh]`; zero on LAND hrus, so invisible on the
+  swale-free test domains: a kernel-read future-proofing, not a
+  data-caught fix; ObsET adds `ag_irrigation_hru_source` to inputs
+  as upstream does). The ObsET run under dynamic `ag_frac` with
+  "error" is the validation of the five redistribution-corrected
+  change variables (they are the budget's storage-change terms).
+  Error mode ALSO warns per rank (date, max |residual|, indices)
+  before the collective raise. USER RULE: budgets are checked only by
+  the Model -- drive a lone process as a one-process Model, never by
+  hand (the pywatershed habit computes no budget here). Tests:
   `tests/test_budget.py` (synthetic, CI-able) + budget asserts in
-  `test_prms_groundwater{,_mpi}.py`. NEXT: declare budgets on the
-  other ports (soilzone's five Ag change variables are waiting on it).
+  `test_prms_{groundwater,soilzone,soilzone_ag,soilzone_ag_obs_et}
+  {,_mpi}.py`. NEXT: runoff, snow, canopy, channel, FlowGraph node
+  types.
 - **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
   `utils/separate_nhm_params.py` splits parameters into per-process
   files and DIS files (`dis_hru_vars`: hru_area, hru_in_to_cf, ...;
@@ -526,7 +541,7 @@ snow_live mode = THE FULL 7-PROCESS MODEL FROM RAW CBH (prcp/tmax/
 tmin) + live compute_soltabs, serial + 4-rank MPI green; snow_disk
 canary unchanged (no atmosphere -- its 1e-5 would break the 1e-10
 canary). **Full port inventory, conventions, the snow/fastmath story,
-and domain facts: `incarnations/mpixarray/PORTS.md`.**
+and domain facts: `docs/PORTS.md`.**
 
 (9) NoDprst variants BY ADDITION (July 2026, DONE): the hierarchy
 inversion fix -- `PRMS{Groundwater,Runoff,Soilzone}NoDprst` are the
@@ -947,8 +962,8 @@ directive. The phoenix version keeps the CONCEPT, re-expressed as data:
 - **Terminology**: keep names `FlowGraph` / `PRMSChannelFlowNode` /
   `PassThroughFlowNode` (continuity with pywatershed); say "node
   TYPE" internally, never "kind" (collides with DataArrayMeta.kind).
-- **Module homes**: `flow_graph.py` at incarnations/mpixarray root
-  (framework infra, beside map.py); node types in `hydrology/`
+- **Module homes**: `flow_graph.py` at the package root (framework
+  infra, beside maps.py); node types in `hydrology/`
   (prms_channel_flow_node.py, pass_through_flow_node.py).
 - **Stage-1 scope + validation**: channel + pass-through types only.
   Test 1 = pure-channel graph (456 nodes) vs drb seg_outflow answers;
@@ -1105,7 +1120,7 @@ Target structure -- a tree (conceptually a DataTree; see the data-model caveat):
   computations relocate to source-grid processes (ccov_hru →
   PRMSAtmosphere), leaving exactly-linear static-weights
   correspondences — derivable by basis-probing a reference
-  implementation. Full discussion: `map.py` docstring + PORTS.md
+  implementation. Full discussion: `maps.py` docstring + PORTS.md
   "The stream-temperature chain".
 
 Containment (where data/code live) -- general multi-grid example:
