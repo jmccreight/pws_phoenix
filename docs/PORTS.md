@@ -202,6 +202,13 @@ chain" below.
   the swale branch; zero on LAND hrus, so invisible on the swale-free
   test domains — a kernel-read correction, not a data-caught one);
   ObsET adds `ag_irrigation_hru_source` to inputs as upstream does.
+  Runoff (Oct 21, 2026; NoDprst/full/Ag): pywatershed's lists
+  verbatim (kernel-checked: on a swale `hru_flag == 0`, so every
+  input stays in infil / imperv_stor and the lists close there too);
+  `intcp_changeover_budget` IS ported for PRMSRunoffAg (upstream
+  verbatim: zero when `_intcp_changeover_in_net_rain`, else a copy of
+  intcp_changeover) so the static declaration stays right whichever
+  way a variant sets that flag.
   Error mode also warns per rank (date, max |residual|, first
   indices) before the collective raise. Budgets run only under the
   Model: drive a lone process as a one-process Model.
@@ -590,8 +597,8 @@ flow-driven variables see the knife-edge cascade).
   (`test_data/drb_2yr/output_no_dprst/`, generated with
   `generate_test_data.py --domain=drb_2yr --control_pattern=nhm_no_dprst`;
   green at each process's own tolerance, Oct 2026).
-- Budgets: declared on the groundwater and soilzone families (Oct
-  2026); still to declare (`units=` on every term): runoff, snow,
+- Budgets: declared on the groundwater, soilzone and runoff families
+  (Oct 2026); still to declare (`units=` on every term): snow,
   canopy, channel, FlowGraph node types. Not ported from pywatershed's
   Budget: `global` basis, per-term accumulations, `ignore_nans`.
 - Southern-hemisphere domains (atmosphere `is_summer`).

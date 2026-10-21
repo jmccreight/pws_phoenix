@@ -154,9 +154,15 @@ def _dynamic_ag_frac(template):
 
 def test_flags_derivation_pin():
     """The ag flag sets, exactly (data-free)."""
-    assert set(PRMSRunoffAg.get_restart_variables()) == set(
-        PRMSRunoff.get_restart_variables()
-    ) | {"hru_perv", "hru_frac_perv", "ag_area"}
+    assert set(PRMSRunoffAg.get_restart_variables()) == (
+        set(PRMSRunoff.get_restart_variables())
+        - {"PRMSRunoff_mass_residual_accum"}
+    ) | {
+        "hru_perv",
+        "hru_frac_perv",
+        "ag_area",
+        "PRMSRunoffAg_mass_residual_accum",
+    }
     assert set(PRMSSoilzoneAg.get_restart_variables()) == {
         "soil_moist",
         "soil_rechr",

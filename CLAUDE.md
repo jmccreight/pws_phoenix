@@ -371,7 +371,11 @@ the `epiweeks` dep).
   -= swale_actet[hh]`; zero on LAND hrus, so invisible on the
   swale-free test domains: a kernel-read future-proofing, not a
   data-caught fix; ObsET adds `ag_irrigation_hru_source` to inputs
-  as upstream does). The ObsET run under dynamic `ag_frac` with
+  as upstream does); PRMSRunoff{,NoDprst,Ag} (Oct 21, 2026:
+  pywatershed's lists verbatim, swale path kernel-checked;
+  `intcp_changeover_budget` ported for the Ag class -- zero when
+  `_intcp_changeover_in_net_rain`, so the static declaration holds
+  for either flag value). The ObsET run under dynamic `ag_frac` with
   "error" is the validation of the five redistribution-corrected
   change variables (they are the budget's storage-change terms).
   Error mode ALSO warns per rank (date, max |residual|, indices)
@@ -379,9 +383,9 @@ the `epiweeks` dep).
   the Model -- drive a lone process as a one-process Model, never by
   hand (the pywatershed habit computes no budget here). Tests:
   `tests/test_budget.py` (synthetic, CI-able) + budget asserts in
-  `test_prms_{groundwater,soilzone,soilzone_ag,soilzone_ag_obs_et}
-  {,_mpi}.py`. NEXT: runoff, snow, canopy, channel, FlowGraph node
-  types.
+  `test_prms_{groundwater,soilzone,soilzone_ag,soilzone_ag_obs_et,
+  runoff,runoff_ag}{,_mpi}.py`. NEXT: snow, canopy, channel,
+  FlowGraph node types.
 - **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
   `utils/separate_nhm_params.py` splits parameters into per-process
   files and DIS files (`dis_hru_vars`: hru_area, hru_in_to_cf, ...;
