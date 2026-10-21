@@ -336,9 +336,37 @@ the `epiweeks` dep).
   spatial vars (only when a real multi-dim output var exists -- it fails
   loudly today); rename `map.py`/`globals.py` (they shadow builtins) when
   this becomes a package.
-- **Budget / ConservativeProcess** (flagged during the PRMSGroundwater
-  port, July 2026): not ported yet; when it comes, SCRUTINIZE its design
-  first (e.g. the separation/combination of mass and energy budgets).
+- **Budgets (IMPLEMENTED Oct 2026; `budget.py` + `Process.budgets`)**
+  -- pywatershed's Budget/ConservativeProcess re-expressed as DATA: a
+  process declares `budgets = {"mass": {"inputs": (...), "outputs":
+  (...), "storage_changes": (...), ["exchanges": (...)]}}` (any number
+  of NAMED quantities -- mass and energy are separate checks, never
+  combined); every term must carry `DataArrayMeta.units` and one
+  budget's units must agree (checked at first introspection).
+  `_resolved_fields` GENERATES `{Class}_{budget}_{inputs_sum,
+  outputs_sum,storage_changes_sum,[exchanges_sum],residual,
+  residual_accum}` as ordinary variables (class-name prefix: the flat
+  grid dataset would otherwise share two budgets' `residual`;
+  `residual_accum` is `restart=True`; a variant REDECLARES the whole
+  dict, nothing inherited twice). One njit pass, zero per-step
+  allocation; balance = pywatershed's `inputs + exchanges == outputs +
+  storage_changes`, `|res| <= atol + rtol*|rhs|` (nan counts as
+  imbalanced). OWNERSHIP SPLIT (JLM): the process owns declaration,
+  fields, kernel and `check_budgets()` (local count); the Model owns
+  WHEN (right after each `calculate`) and `control["budget"]` = None
+  (computed + written, never judged) | "warn" (per-rank) | "error"
+  (`_raise_if_imbalanced`; ModelMPI first `allreduce(MAX)` of the
+  local count so every rank raises together -- a lone raise hangs the
+  others at the next collective). Tolerances `budget_rtol/atol`
+  default 1e-5 (pywatershed's). NOT ported: `global` basis (sum the
+  written per-unit residual offline), per-term accumulations, the
+  netCDF writer, `__repr__`, `ignore_nans`. First declared:
+  PRMSGroundwater{,NoDprst} -- with `gwres_sink` as an OUTPUT
+  (pywatershed's own term list omits it; its drb answers only close
+  with it -- `test_answers_close_with_sink`). Tests:
+  `tests/test_budget.py` (synthetic, CI-able) + budget asserts in
+  `test_prms_groundwater{,_mpi}.py`. NEXT: declare budgets on the
+  other ports (soilzone's five Ag change variables are waiting on it).
 - **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
   `utils/separate_nhm_params.py` splits parameters into per-process
   files and DIS files (`dis_hru_vars`: hru_area, hru_in_to_cf, ...;
@@ -569,9 +597,10 @@ Port conventions (established by the groundwater port):
 
 - Names verbatim (params/inputs/variables) -- the pathway back to
   pywatershed domains and answer files.
-- What is NOT ported: Budget/ConservativeProcess (backlogged, above),
-  adapters, restart, `calc_method` switch (numba is THE path),
-  `verbose`, unused declared params (e.g. `gwstor_min`).
+- What is NOT ported: adapters, `calc_method` switch (numba is THE
+  path), `verbose`, unused declared params (e.g. `gwstor_min`).
+  (Budget and restart WERE later ported, in pws_phoenix form -- see
+  the Phase-2 entries above.)
 - Kernels: rewrite pywatershed's allocate-and-return-tuple
   `_calculate_numpy` to the in-place out-first convention as an
   EXPLICIT element loop with scalar temporaries -- numba's expression

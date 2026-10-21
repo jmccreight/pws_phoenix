@@ -110,10 +110,11 @@ end in `tests/test_prms_channel{,_mpi}.py`.
   muskingum coefficients, solar tables) → `initialize()` +
   `kind="parameter_internal"` (frozen after) or the factory pattern;
   init-time numpy staging is fine there.
-- **NOT ported, everywhere**: Budget/ConservativeProcess (backlogged
-  design pass), adapters, restart, `calc_method` switch (numba is THE
-  path), `verbose`, `fastmath=True` (strict IEEE here — see below),
-  unused declared parameters, dead upstream code.
+- **NOT ported, everywhere**: adapters, `calc_method` switch (numba is
+  THE path), `verbose`, `fastmath=True` (strict IEEE here — see below),
+  unused declared parameters, dead upstream code. (Budget and restart
+  arrived later in pws_phoenix form — budgets Oct 2026, see "Framework
+  findings"; only groundwater declares one so far.)
 - **Upstream edits of true parameters** (runoff's clos-flag zeroing,
   soilzone's `soil_moist_max` clamp, channel's `seg_slope` clamp,
   snow's nonzero-`snowpack_init` block) are either proven no-ops and
@@ -184,6 +185,18 @@ chain" below.
   (open-load-close). Past ~128 open netCDF handles, xarray's
   file-manager LRU churns reopen/evict on every access — a de-facto
   hang at 255% CPU.
+- Budgets (Oct 2026, `budget.py`): pywatershed's Budget as DATA — a
+  process declares `budgets = {name: {inputs, outputs,
+  storage_changes, [exchanges]}}` over its own fields (all with
+  `units=`, agreeing); the `*_sum` / `residual` / `residual_accum`
+  variables are GENERATED (class-name prefixed, `residual_accum`
+  restartable) and ride the normal output/restart/MPI paths; one njit
+  pass, zero allocation. The process owns the check (local count);
+  the Model owns when, and `control["budget"]` None|warn|error — error
+  under MPI = `allreduce(MAX)` first so every rank raises together.
+  Groundwater finding: pywatershed's term list omits `gwres_sink`,
+  which the kernel removes from storage — its own drb answers only
+  close with the sink as an output.
 
 ## drb_2yr domain facts the tests rely on
 
@@ -567,7 +580,11 @@ flow-driven variables see the knife-edge cascade).
   (`test_data/drb_2yr/output_no_dprst/`, generated with
   `generate_test_data.py --domain=drb_2yr --control_pattern=nhm_no_dprst`;
   green at each process's own tolerance, Oct 2026).
-- Budget / ConservativeProcess: a deliberate later design pass.
+- Budgets: declared on PRMSGroundwater{,NoDprst} only (Oct 2026);
+  the other ports' `get_mass_budget_terms` lists are still to be
+  declared (`units=` on every term) — soilzone's five Ag change
+  variables get their validation there. Not ported from pywatershed's
+  Budget: `global` basis, per-term accumulations, `ignore_nans`.
 - Southern-hemisphere domains (atmosphere `is_summer`).
 - Nonzero `snowpack_init` (upstream's implementation is faulty).
 - Annual (1-month) CBH-adjustment parameter variants.

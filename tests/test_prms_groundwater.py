@@ -35,6 +35,11 @@ ANSWER_NAMES = (
 )
 # pywatershed's own autotest comparison standard
 RTOL = ATOL = 1.0e-13
+# generated mass-budget variables (process.py _budget_fields naming)
+RESIDUAL_NAME = "PRMSGroundwater_mass_residual"
+RESIDUAL_ACCUM_NAME = "PRMSGroundwater_mass_residual_accum"
+# roundoff on inches-scale terms
+BUDGET_TOL = 1.0e-12
 
 _needed = [
     DOMAIN_DIR / "parameters_PRMSGroundwater.nc",
@@ -83,9 +88,11 @@ def model_run(parameters, tmp_path_factory):
         },
     }
     control = {
-        "output_var_names": list(ANSWER_NAMES),
+        "output_var_names": list(ANSWER_NAMES) + [RESIDUAL_NAME],
         "output_serial_zarr": out_dir / "prms_groundwater.zarr",
         "time_chunk_size": 61,
+        # the mass budget is judged every step; an imbalance raises
+        "budget": "error",
     }
     discretizations = {
         "nhru": Discretization(
@@ -126,3 +133,36 @@ class TestPRMSGroundwater:
                 rtol=RTOL,
                 atol=ATOL,
             )
+
+    def test_mass_budget(self, model_run):
+        """The written residual is roundoff every step (the run itself
+        already passed control["budget"] = "error" at pywatershed's
+        1e-5); the accumulator equals the residual's time sum."""
+        output_ds = xr.open_zarr(
+            model_run["control"]["output_serial_zarr"], consolidated=False
+        )
+        residual = output_ds[RESIDUAL_NAME].values
+        assert np.all(np.abs(residual) < BUDGET_TOL)
+        proc = model_run["model"].model_dict["prms_groundwater"]
+        np.testing.assert_allclose(
+            proc[RESIDUAL_ACCUM_NAME].values,
+            residual.sum(axis=0),
+            rtol=0.0,
+            atol=BUDGET_TOL,
+        )
+        assert proc[RESIDUAL_NAME].attrs["units"] == "inches"
+
+    def test_answers_close_with_sink(self, answers):
+        """Cross-check on pywatershed's OWN answers: the budget needs
+        gwres_sink as an output (pywatershed's term list omits it)."""
+        forcings = {
+            nn: xr.load_dataarray(GEN_DIR / f"{nn}.nc").values
+            for nn in INPUT_NAMES
+        }
+        lhs = sum(forcings.values())
+        rhs = (
+            answers["gwres_flow"].values
+            + answers["gwres_sink"].values
+            + answers["gwres_stor_change"].values
+        )
+        assert np.all(np.abs(lhs - rhs) < BUDGET_TOL)
