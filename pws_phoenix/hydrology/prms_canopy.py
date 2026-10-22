@@ -28,6 +28,9 @@ Quirks preserved / decisions:
   unconditionally written per element).
 - ``intcp_transp_on`` state initializes to 0 = OFF (upstream
   get_init_values), flipping on the first summer transition.
+- **Mass budget** declared (Oct 2026): pywatershed's term list
+  verbatim; closes to roundoff on drb_2yr (comment at ``_MASS_BUDGET``
+  for the two dead branches that would not).
 - ``epan_coef`` hardwired 1.0 (pan ET not ported upstream either).
 - upstream njits with fastmath=True; we keep strict IEEE (validated at
   upstream's own 1e-12 canopy standard).
@@ -164,12 +167,14 @@ class PRMSCanopy(Process):
         dims=("space",),
         dtype=np.float64,
         description="Rain on the HRU [inches]",
+        units="inches",
     )
     hru_snow = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
         description="Snow on the HRU [inches]",
+        units="inches",
     )
     potet = DataArrayMeta(
         kind="input",
@@ -199,12 +204,14 @@ class PRMSCanopy(Process):
         dims=("space",),
         dtype=np.float64,
         description="Rain through the canopy [inches]",
+        units="inches",
     )
     net_snow = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Snow through the canopy [inches]",
+        units="inches",
     )
     intcp_changeover = DataArrayMeta(
         kind="variable",
@@ -212,6 +219,7 @@ class PRMSCanopy(Process):
         dtype=np.float64,
         description="Canopy throughfall from cover-density changeover "
         "+ bare-soil excess [inches]",
+        units="inches",
     )
     intcp_evap = DataArrayMeta(
         kind="variable",
@@ -244,6 +252,7 @@ class PRMSCanopy(Process):
         dims=("space",),
         dtype=np.float64,
         description="Canopy evaporation [inches over the HRU]",
+        units="inches",
     )
     hru_intcpstor = DataArrayMeta(
         kind="variable",
@@ -257,6 +266,7 @@ class PRMSCanopy(Process):
         dims=("space",),
         dtype=np.float64,
         description="Interception storage change [inches over the HRU]",
+        units="inches",
     )
     hru_intcpstor_old = DataArrayMeta(
         kind="variable",
@@ -264,6 +274,32 @@ class PRMSCanopy(Process):
         dtype=np.float64,
         description="Interception storage, previous timestep",
     )
+
+    # -- budgets --
+    # pywatershed's PRMSCanopy.get_mass_budget_terms verbatim. Checked
+    # against the kernel at HRU scale (store * cov): intercept, the
+    # trace-snow-to-rain move, evaporation + its potet cap and all
+    # three changeover branches close exactly, so the residual is
+    # roundoff. Upstream's "?? always zero" on intcp_changeover is
+    # wrong -- it is nonzero on season-flip days when covden_sum !=
+    # covden_win. TWO branches break the accounting, both dead here:
+    # a BARESOIL hru with stored water books `extra_water =
+    # intcp_stor[ii]` (per-canopy, not * cov) as output while the
+    # store loses intcpstor * cov -- unreachable, bare soil never
+    # intercepts so its store never leaves zero; a LAKE hru zeroes
+    # the store with no output term -- hru_type is hardwired LAND.
+    # docs/MAINTENANCE.md records both.
+    _MASS_BUDGET = {
+        "inputs": ("hru_rain", "hru_snow"),
+        "outputs": (
+            "net_rain",
+            "net_snow",
+            "hru_intcpevap",
+            "intcp_changeover",
+        ),
+        "storage_changes": ("hru_intcpstor_change",),
+    }
+    budgets = {"mass": _MASS_BUDGET}
 
     # ------------------------------------------------------------------
     # Initialization

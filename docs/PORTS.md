@@ -70,7 +70,7 @@ relies on Model/ModelMPI running ALL `advance()` hooks before any
 | FlowGraph (6 node types) | `flow_graph.py` + `hydrology/*_flow_node.py` | 1e-7…1e-10 per mode | Registry dispatch via `literal_unroll`; hourly + daily STARFIT; io_in_cfs |
 | PRMSRunoff | `hydrology/prms_runoff.py` | 1e-10 (upstream's own) | dprst-ACTIVE path; `basin_init`/`dprst_init` → `initialize()` + `parameter_internal` |
 | PRMSSoilzone | `hydrology/prms_soilzone.py` | 1e-10 observed (upstream's own is 5e-6) | First `mutable_input` (`sroff`/`sroff_vol`: dunnian added in place) |
-| PRMSCanopy | `hydrology/prms_canopy.py` | 1e-12 (upstream's own) | `pptmix` = written-never-read mutable input; hru_type hardwired all-LAND upstream |
+| PRMSCanopy | `hydrology/prms_canopy.py` | 1e-12 (upstream's own); mass budget 1e-12 | `pptmix` = written-never-read mutable input; hru_type hardwired all-LAND upstream |
 | PRMSSnow | `hydrology/prms_snow.py` | **bit-identical** to upstream's numpy path (A/B) except on the 9 hrus of the one deliberate departure (freeh2o accumulated, not overwritten, on rain into a cold pack); 1e-3 on upstream's own 5-var list vs answers; mass budget 1e-12 | See "The snow story" below |
 | PRMSSolarGeometry | `atmosphere/prms_solar_geometry.py` | 1e-10 (upstream's PRMS 5.2.1 standard) | A parameter FACTORY, not a Process (static (ndoy, nhru) tables) |
 | PRMSAtmosphere | `atmosphere/prms_atmosphere.py` | 1e-5 (upstream's own) | Per-step port of upstream's all-time-vectorized preprocessing |
@@ -239,6 +239,16 @@ chain" below.
   mass into `pkwater_equiv` but not `pk_ice`/`freeh2o` — dead under
   valid parameters, kept verbatim, the budget is its detector
   (`docs/MAINTENANCE.md`).
+  Canopy (Oct 22, 2026): pywatershed's list verbatim (its "?? always
+  zero" on `intcp_changeover` is wrong — nonzero on season-flip days
+  when `covden_sum != covden_win`); closes to roundoff at HRU scale
+  through intercept, the trace-snow-to-rain move, evaporation + its
+  potet cap and all three changeover branches. Two dead branches
+  would open it — a BARESOIL hru with stored water books
+  `extra_water = intcp_stor[ii]` per-canopy (not `* cov`), a LAKE hru
+  zeroes the store with no output term — unreachable on nhm (bare
+  soil never intercepts; hru_type hardwired LAND), kept verbatim,
+  logged in `docs/MAINTENANCE.md`. Green first run serial + MPI.
   Error mode also warns per rank (date, max |residual|, first
   indices) before the collective raise. Budgets run only under the
   Model: drive a lone process as a one-process Model.
@@ -627,9 +637,9 @@ flow-driven variables see the knife-edge cascade).
   (`test_data/drb_2yr/output_no_dprst/`, generated with
   `generate_test_data.py --domain=drb_2yr --control_pattern=nhm_no_dprst`;
   green at each process's own tolerance, Oct 2026).
-- Budgets: declared on the groundwater, soilzone and runoff families
-  and snow (Oct 2026); still to declare (`units=` on every term):
-  canopy, channel, FlowGraph node types. Not ported from pywatershed's
+- Budgets: declared on the groundwater, soilzone and runoff families,
+  snow and canopy (Oct 2026); still to declare (`units=` on every
+  term): channel, FlowGraph node types. Not ported from pywatershed's
   Budget: `global` basis, per-term accumulations, `ignore_nans`.
 - Southern-hemisphere domains (atmosphere `is_summer`).
 - Nonzero `snowpack_init` (upstream's implementation is faulty).

@@ -383,7 +383,13 @@ the `epiweeks` dep).
   9 drb hrus excluded from the bit-identical A/B by a data-located
   trigger; floor 1.1e-7 -> 8e-15, pinned 1e-12; the `avail_et < 0`
   tail of `calc_snowevap` is a like hazard kept verbatim, dead under
-  valid params, logged in `docs/MAINTENANCE.md`). The ObsET run under
+  valid params, logged in `docs/MAINTENANCE.md`); PRMSCanopy (Oct 22,
+  2026: pywatershed's list verbatim, kernel-checked at HRU scale
+  (store * cov), closes to roundoff; upstream's "?? always zero" on
+  `intcp_changeover` is wrong -- nonzero on season-flip days; the
+  BARESOIL `extra_water = intcp_stor[ii]` (per-canopy, not * cov)
+  and LAKE store-zeroing branches would open it but are dead on nhm,
+  logged in `docs/MAINTENANCE.md`). The ObsET run under
   dynamic `ag_frac` with
   "error" is the validation of the five redistribution-corrected
   change variables (they are the budget's storage-change terms).
@@ -393,7 +399,7 @@ the `epiweeks` dep).
   hand (the pywatershed habit computes no budget here). Tests:
   `tests/test_budget.py` (synthetic, CI-able) + budget asserts in
   `test_prms_{groundwater,soilzone,soilzone_ag,soilzone_ag_obs_et,
-  runoff,runoff_ag,snow}{,_mpi}.py`. NEXT: canopy, channel,
+  runoff,runoff_ag,snow,canopy}{,_mpi}.py`. NEXT: channel,
   FlowGraph node types.
 - **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
   `utils/separate_nhm_params.py` splits parameters into per-process
