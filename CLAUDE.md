@@ -375,7 +375,16 @@ the `epiweeks` dep).
   pywatershed's lists verbatim, swale path kernel-checked;
   `intcp_changeover_budget` ported for the Ag class -- zero when
   `_intcp_changeover_in_net_rain`, so the static declaration holds
-  for either flag value). The ObsET run under dynamic `ag_frac` with
+  for either flag value); PRMSSnow (Oct 22, 2026: pywatershed's list
+  verbatim; the budget CAUGHT a real leak -- `freeh2o = net_rain -
+  pndz` in `calc_ppt_to_pack` 1.1.3 dropped a cold pack's trace free
+  water from `pk_ice + freeh2o` while `pkwater_equiv` kept it; FIXED
+  to accumulate = the ONE deliberate departure from PRMS/pywatershed,
+  9 drb hrus excluded from the bit-identical A/B by a data-located
+  trigger; floor 1.1e-7 -> 8e-15, pinned 1e-12; the `avail_et < 0`
+  tail of `calc_snowevap` is a like hazard kept verbatim, dead under
+  valid params, logged in `docs/MAINTENANCE.md`). The ObsET run under
+  dynamic `ag_frac` with
   "error" is the validation of the five redistribution-corrected
   change variables (they are the budget's storage-change terms).
   Error mode ALSO warns per rank (date, max |residual|, indices)
@@ -384,7 +393,7 @@ the `epiweeks` dep).
   hand (the pywatershed habit computes no budget here). Tests:
   `tests/test_budget.py` (synthetic, CI-able) + budget asserts in
   `test_prms_{groundwater,soilzone,soilzone_ag,soilzone_ag_obs_et,
-  runoff,runoff_ag}{,_mpi}.py`. NEXT: snow, canopy, channel,
+  runoff,runoff_ag,snow}{,_mpi}.py`. NEXT: canopy, channel,
   FlowGraph node types.
 - **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
   `utils/separate_nhm_params.py` splits parameters into per-process
