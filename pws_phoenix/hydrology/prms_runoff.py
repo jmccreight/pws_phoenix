@@ -1091,6 +1091,7 @@ class PRMSRunoffNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Snowmelt from the snowpack [inches]",
+        units="inches",
     )
     snow_evap = DataArrayMeta(
         kind="input",
@@ -1121,6 +1122,7 @@ class PRMSRunoffNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Rain that passes through snow [inches]",
+        units="inches",
     )
     hru_intcpevap = DataArrayMeta(
         kind="input",
@@ -1133,6 +1135,7 @@ class PRMSRunoffNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Canopy throughfall from winter->summer density change",
+        units="inches",
     )
 
     # -- variables --
@@ -1154,6 +1157,7 @@ class PRMSRunoffNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Infiltration [inches over the HRU]",
+        units="inches",
     )
     sroff = DataArrayMeta(
         kind="variable",
@@ -1172,12 +1176,14 @@ class PRMSRunoffNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Pervious surface runoff [inches over the HRU]",
+        units="inches",
     )
     hru_sroffi = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Impervious surface runoff [inches over the HRU]",
+        units="inches",
     )
     imperv_stor = DataArrayMeta(
         kind="variable",
@@ -1197,6 +1203,7 @@ class PRMSRunoffNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Impervious area evaporation [inches over the HRU]",
+        units="inches",
     )
     hru_impervstor = DataArrayMeta(
         kind="variable",
@@ -1216,7 +1223,29 @@ class PRMSRunoffNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Impervious retention storage change [inches]",
+        units="inches",
     )
+
+    # -- budgets --
+    # pywatershed's PRMSRunoffNoDprst.get_mass_budget_terms verbatim.
+    # Checked against the kernel: on a swale (hru_flag == 0) no
+    # runoff is generated, every input stays in infil -> infil_hru
+    # and the impervious share in imperv_stor -> hru_impervstor_change,
+    # so the list closes there too. intcp_changeover is a direct
+    # input because _INTCP_CHANGEOVER_IN_NET_RAIN is False (module
+    # constant) -- it is NOT inside net_rain/through_rain here.
+    _MASS_BUDGET = {
+        "inputs": ("through_rain", "snowmelt", "intcp_changeover"),
+        "outputs": (
+            # sroff = hru_sroffi + hru_sroffp
+            "hru_sroffi",
+            "hru_sroffp",
+            "infil_hru",
+            "hru_impervevap",
+        ),
+        "storage_changes": ("hru_impervstor_change",),
+    }
+    budgets = {"mass": _MASS_BUDGET}
 
     # ------------------------------------------------------------------
     # Initialization (basin_init, no-dprst path)
@@ -1672,18 +1701,21 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         dims=("space",),
         dtype=np.float64,
         description="Open-depression surface runoff [inches over the HRU]",
+        units="inches",
     )
     dprst_seep_hru = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Depression seepage to groundwater [inches over the HRU]",
+        units="inches",
     )
     dprst_evap_hru = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Depression evaporation [inches over the HRU]",
+        units="inches",
     )
     dprst_insroff_hru = DataArrayMeta(
         kind="variable",
@@ -1709,6 +1741,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         dims=("space",),
         dtype=np.float64,
         description="Depression storage change [inches over the HRU]",
+        units="inches",
     )
     dprst_in = DataArrayMeta(
         kind="variable",
@@ -1716,6 +1749,26 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         dtype=np.float64,
         description="New water to depressions [inches over the HRU]",
     )
+
+    # -- budgets (REDECLARED: + the depression terms, as upstream) --
+    _MASS_BUDGET = {
+        "inputs": PRMSRunoffNoDprst._MASS_BUDGET["inputs"],
+        "outputs": (
+            # sroff = hru_sroffi + hru_sroffp + dprst_sroff_hru
+            "hru_sroffi",
+            "hru_sroffp",
+            "dprst_sroff_hru",
+            "infil_hru",
+            "hru_impervevap",
+            "dprst_seep_hru",
+            "dprst_evap_hru",
+        ),
+        "storage_changes": (
+            "hru_impervstor_change",
+            "dprst_stor_hru_change",
+        ),
+    }
+    budgets = {"mass": _MASS_BUDGET}
 
     # ------------------------------------------------------------------
     # Initialization (basin_init + dprst_init, no-restart path)
@@ -2261,8 +2314,7 @@ class PRMSRunoffAg(PRMSRunoff):
     when ``ag_frac`` has been fed.
 
     Deliberately NOT ported: ``sat_threshold`` (declared upstream,
-    never used by its kernel); ``intcp_changeover_budget`` (Budget
-    machinery only); the unused ``_calculate_infil_ag`` method (dead
+    never used by its kernel); the unused ``_calculate_infil_ag`` method (dead
     alternate path); the dprst_flag switch (this port is dprst-ACTIVE,
     like PRMSRunoff -- fgr_ag_2yr runs dprst on).
     """
@@ -2364,19 +2416,59 @@ class PRMSRunoffAg(PRMSRunoff):
         dims=("space",),
         dtype=np.float64,
         description="Ag infiltration [inches over the HRU]",
+        units="inches",
     )
     infil_perv_hru = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Pervious-only infiltration [inches over the HRU]",
+        units="inches",
     )
     hru_sroff_ag = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Agricultural surface runoff [inches over the HRU]",
+        units="inches",
     )
+    intcp_changeover_budget = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        description=(
+            "Canopy changeover water as a budget INPUT: intcp_changeover "
+            "when it arrives separately, 0 when it already rides in "
+            "net_rain (_intcp_changeover_in_net_rain) [inches]"
+        ),
+        units="inches",
+    )
+
+    # -- budgets (REDECLARED: pywatershed's PRMSRunoffAg list; infil
+    # and sroff split into pervious / ag parts; the changeover input
+    # goes through intcp_changeover_budget so the declaration stays
+    # correct whichever way a variant sets the flag) --
+    _MASS_BUDGET = {
+        "inputs": ("through_rain", "snowmelt", "intcp_changeover_budget"),
+        "outputs": (
+            # sroff = hru_sroffi + hru_sroffp + hru_sroff_ag
+            # + dprst_sroff_hru
+            "hru_sroffi",
+            "hru_sroffp",
+            "hru_sroff_ag",
+            "dprst_sroff_hru",
+            "infil_perv_hru",
+            "infil_ag_hru",
+            "hru_impervevap",
+            "dprst_seep_hru",
+            "dprst_evap_hru",
+        ),
+        "storage_changes": (
+            "hru_impervstor_change",
+            "dprst_stor_hru_change",
+        ),
+    }
+    budgets = {"mass": _MASS_BUDGET}
 
     # ------------------------------------------------------------------
     # Initialization
@@ -2751,6 +2843,15 @@ class PRMSRunoffAg(PRMSRunoff):
                 obj["hru_area"].values,
                 out=obj["hru_frac_perv"].values,
             )
+
+        # the budget's changeover input (upstream verbatim): zero when
+        # the changeover already rides in net_rain
+        if self._intcp_changeover_in_net_rain:
+            obj["intcp_changeover_budget"].values[:] = 0.0
+        else:
+            obj["intcp_changeover_budget"].values[:] = obj[
+                "intcp_changeover"
+            ].values
 
         self._calculate(
             obj["contrib_fraction"].values,

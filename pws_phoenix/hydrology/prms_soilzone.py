@@ -535,6 +535,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Infiltration [inches over the HRU]",
+        units="inches",
     )
     potet = DataArrayMeta(
         kind="input",
@@ -595,6 +596,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Dunnian surface runoff [inches]",
+        units="inches",
     )
     hru_actet = DataArrayMeta(
         kind="variable",
@@ -613,6 +615,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Pervious actual ET [inches over the HRU]",
+        units="inches",
     )
     potet_lower = DataArrayMeta(
         kind="variable",
@@ -631,6 +634,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Preferential interflow [inches]",
+        units="inches",
     )
     pref_flow_in = DataArrayMeta(
         kind="variable",
@@ -656,6 +660,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Preferential storage change [inches]",
+        units="inches",
     )
     pref_flow_stor_prev = DataArrayMeta(
         kind="variable",
@@ -674,6 +679,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Slow (gravity) interflow [inches]",
+        units="inches",
     )
     slow_stor = DataArrayMeta(
         kind="variable",
@@ -687,6 +693,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Gravity storage change [inches]",
+        units="inches",
     )
     slow_stor_prev = DataArrayMeta(
         kind="variable",
@@ -712,6 +719,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Lower-zone storage change [inches over the HRU]",
+        units="inches",
     )
     soil_lower_prev = DataArrayMeta(
         kind="variable",
@@ -756,6 +764,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Recharge-zone storage change [inches over the HRU]",
+        units="inches",
     )
     soil_rechr_prev = DataArrayMeta(
         kind="variable",
@@ -770,6 +779,7 @@ class PRMSSoilzoneNoDprst(Process):
         dtype=np.float64,
         description="Capillary excess to the GWR [inches] "
         "(PRMSGroundwater input)",
+        units="inches",
     )
     soil_to_ssr = DataArrayMeta(
         kind="variable",
@@ -783,6 +793,7 @@ class PRMSSoilzoneNoDprst(Process):
         dtype=np.float64,
         description="Gravity drainage to the GWR [inches] "
         "(PRMSGroundwater input)",
+        units="inches",
     )
     ssres_flow = DataArrayMeta(
         kind="variable",
@@ -813,6 +824,7 @@ class PRMSSoilzoneNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Swale ponded-water actual ET [inches]",
+        units="inches",
     )
     unused_potet = DataArrayMeta(
         kind="variable",
@@ -820,6 +832,31 @@ class PRMSSoilzoneNoDprst(Process):
         dtype=np.float64,
         description="Unsatisfied potential ET [inches]",
     )
+
+    # -- budgets --
+    # pywatershed's get_mass_budget_terms plus swale_actet as an output:
+    # the swale branch removes it from storage (`slow_stor[hh] =
+    # slow_stor[hh] - swale_actet[hh]`); zero on LAND hrus, so the
+    # omission upstream is invisible on domains without swales.
+    _MASS_BUDGET = {
+        "inputs": ("infil_hru",),
+        "outputs": (
+            "perv_actet_hru",
+            "soil_to_gw",
+            "ssr_to_gw",
+            "slow_flow",
+            "dunnian_flow",
+            "pref_flow",
+            "swale_actet",
+        ),
+        "storage_changes": (
+            "soil_rechr_change_hru",
+            "soil_lower_change_hru",
+            "slow_stor_change",
+            "pref_flow_stor_change",
+        ),
+    }
+    budgets = {"mass": _MASS_BUDGET}
 
     # ------------------------------------------------------------------
     # Initialization (_initialize_soilzone_data, no-restart path)
@@ -1448,6 +1485,11 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
         dtype=np.float64,
         description="Depression seepage to groundwater [inches over the HRU]",
     )
+
+    # -- budgets (REDECLARED; same terms: the dprst inputs enter only
+    # the hru_actet seed and the `recharge` diagnostic, never soil
+    # zone storage) --
+    budgets = {"mass": PRMSSoilzoneNoDprst._MASS_BUDGET}
 
     # ------------------------------------------------------------------
     # Initialization

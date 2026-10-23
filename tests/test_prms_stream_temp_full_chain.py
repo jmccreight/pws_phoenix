@@ -303,6 +303,7 @@ def model_run(tmp_path_factory):
         "output_var_names": list(ST_ANSWER_NAMES),
         "output_serial_zarr": out_dir / "stream_temp_full_chain.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     with Model(
         process_dict,

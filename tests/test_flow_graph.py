@@ -215,6 +215,7 @@ def graph_run(
         "output_var_names": ["node_outflows"],
         "output_serial_zarr": out_dir / "flow_graph.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     with Model(
         process_dict, control, discretizations=discretizations

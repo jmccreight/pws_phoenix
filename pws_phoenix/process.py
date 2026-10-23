@@ -41,6 +41,7 @@ from typing import Literal
 import numpy as np
 import xarray as xr
 
+from pws_phoenix import budget
 from pws_phoenix.clock import Time
 
 # ---------------------------------------------------------------------------
@@ -99,6 +100,11 @@ class DataArrayMeta:
     #    contract's required half. "Internal" and "derivable" are
     #    deliberately distinct words for distinct lifecycles.
     derivation: str | None = None
+    # Physical units, free text (e.g. "inches", "cubic feet"). Optional
+    # in general; REQUIRED on every term of a declared budget, and all
+    # terms of one budget must agree (checked when the class's fields
+    # are first resolved). Descriptions may still spell units in prose.
+    units: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +139,65 @@ def _resolved_fields(cls: type) -> dict[str, DataArrayMeta]:
         for name, val in vars(cc).items():
             if isinstance(val, DataArrayMeta):
                 fields[name] = val
+    fields.update(_budget_fields(cls, fields))
     return fields
+
+
+def _budget_fields(
+    cls: type, fields: dict[str, DataArrayMeta]
+) -> dict[str, DataArrayMeta]:
+    """Generated variables for the class's declared ``budgets``: per
+    budget, a ``*_sum`` per present component plus ``residual`` and
+    ``residual_accum`` (``restart=True``). Derived from the FINAL
+    class's ``budgets`` (a variant redeclaring ``budgets`` replaces the
+    base's; nothing is inherited twice). Validates here -- at first
+    introspection, before assembly -- that every term is a declared
+    field with units, and that one budget's units agree."""
+    generated: dict[str, DataArrayMeta] = {}
+    for bname, terms in cls.budgets.items():
+        unknown = set(terms) - set(budget.COMPONENTS)
+        missing = set(budget.REQUIRED_COMPONENTS) - set(terms)
+        if unknown or missing:
+            raise ValueError(
+                f"{cls.__name__}.budgets['{bname}']: components must be "
+                f"{budget.REQUIRED_COMPONENTS} (+ optional 'exchanges'); "
+                f"unknown {sorted(unknown)}, missing {sorted(missing)}."
+            )
+        units: set[str | None] = set()
+        for cc, names in terms.items():
+            for name in names:
+                if name not in fields:
+                    raise ValueError(
+                        f"{cls.__name__}.budgets['{bname}'] {cc} term "
+                        f"'{name}' is not a declared field."
+                    )
+                units.add(fields[name].units)
+        if None in units or len(units) != 1:
+            raise ValueError(
+                f"{cls.__name__}.budgets['{bname}']: every term needs "
+                f"units and they must agree; found {sorted(map(str, units))}."
+            )
+        (unit,) = units
+        bb = budget.Budget(cls.__name__, bname, terms)
+        prefix = budget.field_name(cls.__name__, bname, "")
+        for name in bb.field_names:
+            if name in fields:
+                raise ValueError(
+                    f"{cls.__name__}: generated budget field '{name}' "
+                    "collides with a declared field."
+                )
+            generated[name] = DataArrayMeta(
+                kind="variable",
+                dims=("space",),
+                dtype=np.float64,
+                description=(
+                    f"{bname} budget {name.removeprefix(prefix)} "
+                    f"of {cls.__name__}"
+                ),
+                restart=name == bb.residual_accum_name,
+                units=unit,
+            )
+    return generated
 
 
 def _keys_of_kind(cls: type, kind: str) -> tuple[str, ...]:
@@ -215,12 +279,48 @@ class Process(ABC):
     # subclass may set a default, a process_dict entry can override it.
     discretization: str | None = None
 
+    # Conservation budgets, by name (pywatershed's get_mass_budget_terms,
+    # generalized to any number of named quantities -- "mass", "energy",
+    # ...). Each value maps the components "inputs" / "outputs" /
+    # "storage_changes" (+ optional "exchanges", for fluxes of either
+    # sign) to tuples of this class's declared field names, all carrying
+    # the same `units`. Declaring one generates the `*_sum` / `residual`
+    # / `residual_accum` variables (see _budget_fields and budget.py);
+    # the Model runs check_budgets() after each calculate() (ONLY the
+    # Model: a process driven by hand computes no budget -- run a lone
+    # process as a one-process Model). A variant redeclares the whole
+    # dict.
+    budgets: dict[str, dict[str, tuple[str, ...]]] = {}
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         Process._registry[cls.__name__] = cls
 
     def __init__(self, xarray_obj: xr.Dataset) -> None:
         self._obj = xarray_obj
+        cls = type(self)
+        self._budgets = {
+            bname: budget.Budget(cls.__name__, bname, terms)
+            for bname, terms in cls.budgets.items()
+        }
+
+    def initialize_budgets(self) -> None:
+        """Zero the budget accumulators. Called by the Model with the
+        initialize() hooks, before any restart restore."""
+        for bb in self._budgets.values():
+            bb.initialize(self._obj)
+
+    def check_budgets(
+        self, rtol: float, atol: float, warn: bool, time: Time
+    ) -> int:
+        """Evaluate every declared budget for the step just calculated;
+        returns the LOCAL number of imbalanced locations summed over the
+        budgets (0 when none declared). Warns per budget when ``warn``;
+        raising is the Model's call (collective under MPI)."""
+        n_bad = 0
+        for bb in self._budgets.values():
+            n_bad += bb.calculate(self._obj, rtol, atol, warn, time)
+        return n_bad
 
     def __getitem__(self, key: str) -> xr.DataArray:
         """Subscript delegates to the bound dataset (a process is a view of its

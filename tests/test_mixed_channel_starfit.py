@@ -88,6 +88,9 @@ OUTPUT_VARS = [
     "lake_release",
     "lake_spill",
 ]
+# per-node mass budget (cfs terms, 24 substeps): error mode at
+# pywatershed's 1e-5; the written residual is pinned at roundoff
+BUDGET_TOL = 1.0e-8
 
 _needed = [GRAND_PARAM_FILE, *pyws_domain_files(DOMAIN)]
 _missing = [str(ff) for ff in _needed if not ff.exists()]
@@ -270,10 +273,16 @@ def graph_run(request, pyws_domain, big_sandy, tmp_path_factory):
             **node_inputs,
         },
     }
+    budget_prefix = f"{graph_class.__name__}_mass"
     control = {
-        "output_var_names": OUTPUT_VARS,
+        "output_var_names": [
+            *OUTPUT_VARS,
+            f"{budget_prefix}_residual",
+            f"{budget_prefix}_storage_changes_sum",
+        ],
         "output_serial_zarr": out_dir / "mixed_graph.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     with Model(
         process_dict, control, discretizations=discretizations
@@ -291,6 +300,7 @@ def graph_run(request, pyws_domain, big_sandy, tmp_path_factory):
         "i_pt3": i_pt3,
         "tosegment0": dis_seg_ds["tosegment"].values.astype(np.int64) - 1,
         "answers": ucb["seg_outflow"],
+        "budget_prefix": budget_prefix,
     }
 
 
@@ -302,6 +312,19 @@ def output_ds(graph_run):
 
 
 class TestMixedChannelStarfit:
+    def test_mass_budget(self, graph_run, output_ds):
+        """Per-node residual is roundoff every day on all three node
+        types (the run already passed error mode); the reservoir row
+        carries a nonzero storage term (the hourly node's state delta;
+        the daily node's flux-defined change) -- the budget sees the
+        reservoir, the channel/pass-through rows are identities."""
+        prefix = graph_run["budget_prefix"]
+        residual = output_ds[f"{prefix}_residual"].values
+        assert np.all(np.abs(residual) < BUDGET_TOL)
+        dstor = output_ds[f"{prefix}_storage_changes_sum"].values
+        assert (dstor[:, graph_run["i_starfit"]] != 0.0).any()
+        assert np.all(dstor[:, graph_run["i_pt2"]] == 0.0)
+
     def test_unaffected_segments_match(self, graph_run, output_ds):
         """Every segment NOT downstream of the reservoir splice matches
         the PRMSChannel answers over the full run (pywatershed's

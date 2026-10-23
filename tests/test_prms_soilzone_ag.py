@@ -123,6 +123,11 @@ NOT_AG_ONLY_NAMES = (
 )
 # pywatershed's own ag autotest standard + its exception dict
 RTOL = ATOL = 1.0e-5
+
+# generated mass-budget variables; roundoff on inches-scale terms
+RESIDUAL_NAME = "PRMSSoilzoneAg_mass_residual"
+RESIDUAL_ACCUM_NAME = "PRMSSoilzoneAg_mass_residual_accum"
+BUDGET_TOL = 1.0e-12
 PER_VAR_TOL = {  # (rtol, atol)
     "ssres_flow_vol": (1.0e-2, 2.0),
     "soil_lower_ratio": (1.0e-5, 1.0e-4),
@@ -205,7 +210,8 @@ def model_run(parameters, tmp_path_factory):
         },
     }
     control = {
-        "output_var_names": list(ANSWER_NAMES),
+        "output_var_names": list(ANSWER_NAMES) + [RESIDUAL_NAME],
+        "budget": "error",
         "output_serial_zarr": out_dir / "prms_soilzone_ag.zarr",
         "time_chunk_size": 61,
     }
@@ -275,3 +281,23 @@ class TestPRMSSoilzoneAg:
                 atol=atol,
                 err_msg=f"final '{nn}' differs",
             )
+
+    def test_mass_budget(self, model_run):
+        """The written residual is roundoff every step (the run itself
+        already passed control["budget"] = "error" at pywatershed's
+        1e-5); the accumulator equals the residual's time sum."""
+        output_ds = xr.load_dataset(
+            model_run["control"]["output_serial_zarr"],
+            engine="zarr",
+            consolidated=False,
+        )
+        residual = output_ds[RESIDUAL_NAME].values
+        assert np.all(np.abs(residual) < BUDGET_TOL)
+        proc = model_run["model"].model_dict["prms_soilzone_ag"]
+        np.testing.assert_allclose(
+            proc[RESIDUAL_ACCUM_NAME].values,
+            residual.sum(axis=0),
+            rtol=0.0,
+            atol=BUDGET_TOL,
+        )
+        assert proc[RESIDUAL_NAME].attrs["units"] == "inches"

@@ -199,7 +199,11 @@ def test_supply_side(nhm_graph):
     }
     # every restart=True variable is a settable initial condition
     assert "pkwater_equiv" in nhm_graph.restart_vars["prms_snow"]
-    assert nhm_graph.restart_vars["prms_groundwater"] == ["gwres_stor"]
+    # ... including the generated budget accumulator (restart=True)
+    assert nhm_graph.restart_vars["prms_groundwater"] == [
+        "gwres_stor",
+        "PRMSGroundwater_mass_residual_accum",
+    ]
     # default: sectioned counts, no names
     dot = nhm_graph.to_dot()
     assert "<B>prms_snow</B>" in dot

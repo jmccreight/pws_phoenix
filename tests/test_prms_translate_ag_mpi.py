@@ -90,7 +90,9 @@ def mpi_run():
     if comm.rank == 0:
         kit = assemble_from_control(CONTROL_FILE)
         write_mpi_input_file(kit, input_file, n_days=N_DAYS)
-        with model_from_control(CONTROL_FILE) as serial_model:
+        with model_from_control(
+            CONTROL_FILE, control={"budget": "error"}
+        ) as serial_model:
             serial_model.run(DT, np.int32(N_DAYS))
             soilzone = serial_model.model_dict["prms_soilzone"]
             atmosphere = serial_model.model_dict["prms_atmosphere"]
@@ -110,6 +112,7 @@ def mpi_run():
             "output_parallel_netcdf": data_dir / "mpi_output.nc",
             "output_var_names": ["sroff"],
             "mpi_grid": "nhru",
+            "budget": "error",
         },
     )
     model.run(DT)

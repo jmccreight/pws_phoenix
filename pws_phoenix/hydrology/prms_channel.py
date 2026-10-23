@@ -31,15 +31,64 @@ SEPARATED along framework seams (design decisions w/ JLM):
 
 dt is SECONDS (s_per_time = dt = 86400.0 for daily PRMS).
 
+**Mass budget: deliberately NOT declared (decided Oct 23, 2026).**
+pywatershed's is the one ``basis="global"`` budget (inputs on nhru,
+outputs/storage on nsegment; only the basin sums compare)::
+
+    inputs:          channel_sroff_vol, channel_ssres_flow_vol,
+                     channel_gwres_flow_vol
+    outputs:         channel_outflow_vol
+    storage_changes: seg_stor_change
+
+Muskingum has no storage state; ``seg_stor_change = (seg_inflow -
+seg_outflow) * s_per_time`` is DEFINED as the imbalance, so no budget
+here can test the routing arithmetic -- only accounting. The
+per-segment form our framework would check (the mapped volumes are
+already on this grid; the within-network hand-off would be the first
+use of the ``exchanges`` slot) is written out here and left off::
+
+    # _MASS_BUDGET = {
+    #     "inputs": ("seg_sroff_vol", "seg_ssres_flow_vol",
+    #                "seg_gwres_flow_vol"),
+    #     "outputs": ("channel_outflow_vol",),
+    #     "storage_changes": ("seg_stor_change",),
+    #     "exchanges": ("seg_routed_vol",),   # NEW (nsegment,) variable:
+    # }                                       # up*s - out*s*(1 - O)
+    # budgets = {"mass": _MASS_BUDGET}
+
+With ``s = s_per_time``, ``lat`` = the three mapped volumes [cf],
+``up = seg_upstream_inflow``, ``out = seg_outflow`` (daily-mean cfs),
+``O = 1`` at an outlet else 0, and the kernel's ``seg_inflow = lat/s +
+up``::
+
+    lhs = inputs + exchanges        = lat + up*s - out*s + out*s*O
+    rhs = outputs + storage_changes = out*s*O + lat + up*s - out*s
+
+identical term by term: the per-segment residual is roundoff by
+construction and can only report the kernel's three accumulators
+(``seg_inflow``, ``seg_current_sum``, ``seg_outflow``) or the
+``tosegment0 < 0`` outlet test disagreeing with each other. The ONE
+check pywatershed's global sum carries -- routing telescopes, ``sum_j
+seg_routed_vol_j == 0`` iff every non-outlet ``tosegment`` lands --
+is already fatal or definitional before a budget could speak
+(``Discretization.topological_order`` rejects an index that does not
+land; ``tosegment0 < 0`` defines an outlet) and is pinned by the
+1e-13 ``seg_outflow`` parity (tests/test_prms_channel{,_mpi}.py). A
+global basis in budget.py would cost no communication (this grid is
+replicated under MPI) but a 0-d per-step residual ``Output`` cannot
+write; revisit only if a consumer with content appears. The FlowGraph
+node types are where ``exchanges`` earns its keep (obsin /
+source-sink nodes are non-conservative per node).
+
 Deliberately NOT ported (each documented in place or in CLAUDE.md):
-- Budget / ConservativeProcess (backlogged); adapters; restart;
+- Budget / ConservativeProcess (see above); adapters; restart;
   calc_method switch; verbose.
 - ``hru_area`` (declared upstream, never used in its kernel),
   ``tosegment_nhm``, ``obsin_segment``/``obsout_segment`` (unimplemented
   todos upstream).
 - The ``channel_*_vol`` per-HRU diagnostics + the ``hru_segment < 1``
-  mass-discard bookkeeping (deferred with the Budget discussion; the
-  discard itself IS the zero weight columns).
+  mass-discard bookkeeping (upstream zeroes them so its global budget
+  closes; the discard itself IS the zero weight columns).
 - The in-place ``seg_slope`` clamp/edit: pywatershed computes velocity
   BEFORE clamping, so the edit affects nothing downstream in channel
   init -- we do NOT edit the read-only dis variable. A deliberate

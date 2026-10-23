@@ -108,12 +108,14 @@ class PRMSGroundwaterNoDprst(Process):
         description=(
             "Portion of excess capillary flow that drains to the GWR"
         ),
+        units="inches",
     )
     ssr_to_gw = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
         description="Drainage from the gravity reservoir to the GWR",
+        units="inches",
     )
 
     # -- variables --
@@ -137,18 +139,21 @@ class PRMSGroundwaterNoDprst(Process):
         dims=("space",),
         dtype=np.float64,
         description="Groundwater discharge to the stream network [inches]",
+        units="inches",
     )
     gwres_sink = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Groundwater loss to the sink (leaves the model) [inches]",
+        units="inches",
     )
     gwres_stor_change = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
         description="Change in groundwater storage over the timestep [inches]",
+        units="inches",
     )
     gwres_flow_vol = DataArrayMeta(
         kind="variable",
@@ -156,6 +161,19 @@ class PRMSGroundwaterNoDprst(Process):
         dtype=np.float64,
         description="Groundwater discharge volume [cubic feet]",
     )
+
+    # -- budgets --
+    # pywatershed's get_mass_budget_terms lists only gwres_flow as an
+    # output; the kernel also removes gwres_sink from storage
+    # (`_gwres_stor -= _gwres_sink`), so it is an output here -- the
+    # budget closes to roundoff regardless of gwsink_coef.
+    budgets = {
+        "mass": {
+            "inputs": ("soil_to_gw", "ssr_to_gw"),
+            "outputs": ("gwres_flow", "gwres_sink"),
+            "storage_changes": ("gwres_stor_change",),
+        },
+    }
 
     # ------------------------------------------------------------------
     # Computation
@@ -231,7 +249,17 @@ class PRMSGroundwater(PRMSGroundwaterNoDprst):
         dims=("space",),
         dtype=np.float64,
         description=("Seepage from surface-depression storage to the GWR"),
+        units="inches",
     )
+
+    # The whole dict is redeclared (a variant replaces, never extends).
+    budgets = {
+        "mass": {
+            "inputs": ("soil_to_gw", "ssr_to_gw", "dprst_seep_hru"),
+            "outputs": ("gwres_flow", "gwres_sink"),
+            "storage_changes": ("gwres_stor_change",),
+        },
+    }
 
     @staticmethod
     @numba.njit

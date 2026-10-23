@@ -112,6 +112,7 @@ class Model:
             self._load_all = control.get("load_all", False)
         else:
             self._load_all = load_all
+        self._set_budget_options(control)
 
         self._load_paths_to_data()
 
@@ -443,12 +444,57 @@ class Model:
         self._run_initialize_hooks()
         self._resolve_maps()
 
+    def _set_budget_options(self, control: Dict[str, Any]) -> None:
+        """control["budget"]: None (default; budgets are still computed
+        and written, never judged), "warn" (per-rank warnings), or
+        "error" (per-rank warnings, then raise -- collectively under
+        MPI). Tolerances
+        control["budget_rtol"/"budget_atol"] default to pywatershed's."""
+        mode = control.get("budget")
+        if mode not in (None, "warn", "error"):
+            raise ValueError(
+                f"control['budget'] must be None, 'warn' or 'error'; "
+                f"got {mode!r}."
+            )
+        self._budget_mode = mode
+        self._budget_rtol = float(control.get("budget_rtol", 1e-5))
+        self._budget_atol = float(control.get("budget_atol", 1e-5))
+
+    def _check_budgets(self, proc: Any) -> None:
+        """Run a process's budgets for the step just calculated; judge
+        the result per control["budget"] (see _raise_if_imbalanced)."""
+        if not proc._budgets:
+            return
+        # error mode warns too: the per-rank warning carries the date,
+        # max |residual| and first indices that the raise does not.
+        n_bad = proc.check_budgets(
+            self._budget_rtol,
+            self._budget_atol,
+            self._budget_mode in ("warn", "error"),
+            self.time,
+        )
+        if self._budget_mode == "error":
+            self._raise_if_imbalanced(n_bad, proc)
+
+    def _raise_if_imbalanced(self, n_bad: int, proc: Any) -> None:
+        """Serial: raise on a local imbalance. ModelMPI overrides to agree
+        across ranks first (a lone raising rank would hang the others at
+        the next collective)."""
+        if n_bad > 0:
+            raise ValueError(
+                f"{type(proc).__name__} budget imbalanced at "
+                f"{self.time.current}: {n_bad} location(s) outside "
+                f"rtol={self._budget_rtol}, atol={self._budget_atol}."
+            )
+
     def _run_initialize_hooks(self) -> None:
         """Call each process's initialize() (author order), then freeze
         derived parameters -- read-only once ALL hooks have run (a shared
-        derived name is written by its owner before the freeze)."""
+        derived name is written by its owner before the freeze). Budget
+        accumulators are zeroed here too (before any restart restore)."""
         for kk in self.model_dict:
             self.model_dict[kk].initialize()
+            self.model_dict[kk].initialize_budgets()
         for kk, proc in self.model_dict.items():
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             for name in proc.get_parameters_internal():
@@ -560,12 +606,23 @@ class Model:
                 continue
             dims = tuple(real_dim if dd == "space" else dd for dd in meta.dims)
             shape = tuple(grid_ds.sizes[dd] for dd in dims)
+            attrs = {"description": meta.description}
+            if meta.units is not None:
+                attrs["units"] = meta.units
             da = xr.DataArray(
                 np.full(shape, _FILL_VALUE[meta.dtype], dtype=meta.dtype),
                 dims=dims,
-                attrs={"description": meta.description},
+                attrs=attrs,
             )
-            if meta.initial is not None and meta.initial in init_dict:
+            # a declared initial= name is REQUIRED (also under restart_read):
+            # filling silently would start the state as nan
+            if meta.initial is not None:
+                if meta.initial not in init_dict:
+                    raise ValueError(
+                        f"{cls.__name__}.{name} declares "
+                        f"initial={meta.initial!r} but "
+                        f"process_dict[{proc_name!r}] does not supply it."
+                    )
                 da[:] = init_dict[meta.initial]
             grid_ds[name] = da
 
@@ -698,6 +755,7 @@ class Model:
             for mm in self._proc_maps[proc_name]:
                 mm.apply(self.discretizations[mm.source_grid].dataset)
             vv.calculate(dt, self.time)
+            self._check_budgets(vv)
 
     def run(self, dt: np.float64, n_steps: np.int32) -> None:
         """Run simulation for n_steps time steps (from the restart
@@ -951,6 +1009,7 @@ class ModelMPI(Model):
         self.inputs_dict: Dict[str, Input] = {}
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._load_all = True  # serial-grid data are small; keep in memory
+        self._set_budget_options(control)
         self._build()
 
     # -- construction ---------------------------------------------------
@@ -1197,15 +1256,21 @@ class ModelMPI(Model):
 
         # ---- Load initial conditions into state buffers. ICs are the
         #      space-only vars loaded above (from the file). ----
+        #      A declared initial= name is REQUIRED (also under
+        #      restart_read): filling silently would start the state as nan.
         for cls in mpi_classes.values():
             for name, meta in cls.get_variables().items():
-                if (
-                    meta.initial is not None
-                    and meta.initial in ds_mpi_stream.data_vars
-                ):
-                    ds_mpi_stream[name].values[:] = ds_mpi_stream[
-                        meta.initial
-                    ].values
+                if meta.initial is None:
+                    continue
+                if meta.initial not in ds_mpi_stream.data_vars:
+                    raise ValueError(
+                        f"{cls.__name__}.{name} declares "
+                        f"initial={meta.initial!r} but the MPI input file "
+                        f"does not carry it."
+                    )
+                ds_mpi_stream[name].values[:] = ds_mpi_stream[
+                    meta.initial
+                ].values
 
         self._ds_mpi_stream = ds_mpi_stream
         self.discretizations[mpi_grid].dataset = ds_mpi_stream
@@ -1355,6 +1420,7 @@ class ModelMPI(Model):
                 for mm in self._proc_maps[proc_name]:
                     mm.apply(self.discretizations[mm.source_grid].dataset)
                 proc.calculate(dt, self.time)
+                self._check_budgets(proc)
             # Record state into the streaming output slab(s) and write.
             # Every step lands on disk (no values_on_disk subset at
             # as_iterable), so no output-step gate.
@@ -1364,6 +1430,16 @@ class ModelMPI(Model):
             # Serial-grid output: rank 0 only (collective-free branch).
             if self.output is not None:
                 self.output.collect_current_timestep(gtt)
+
+    def _raise_if_imbalanced(self, n_bad: int, proc: Any) -> None:
+        """Agree across ranks before raising: one scalar Allreduce(MAX) of
+        the local count, so every rank raises together (the budget check
+        itself is local; a lone raising rank would hang the others at the
+        next collective). Only runs in control["budget"] == "error"."""
+        from mpi4py import MPI
+
+        n_bad = self._comm.allreduce(int(n_bad), op=MPI.MAX)
+        super()._raise_if_imbalanced(n_bad, proc)
 
     # -- restart ---------------------------------------------------------
 

@@ -74,6 +74,9 @@ ANSWER_FILE = STARFIT_DIR / "starfit_mean_output_1995-2001.nc"
 OUTPUT_VARS = ["lake_storage", "lake_release", "lake_spill"]
 # pywatershed's own autotest tolerance for this comparison
 RTOL = ATOL = 1.0e-7
+# per-node mass budget (cms/cfs flow terms): the run is in error mode
+# at pywatershed's 1e-5; the written residual is pinned at roundoff
+BUDGET_TOL = 1.0e-9
 S_PER_TIME = np.float64(60.0 * 60.0 * 24.0)
 
 _needed = [PARAM_FILE, INFLOW_FILE, ANSWER_FILE]
@@ -222,10 +225,12 @@ def graph_run(request, graph_params, inflow_da, tmp_path_factory):
             **extra_inputs,
         },
     }
+    budget_prefix = f"{graph_class.__name__}_mass"
     control = {
-        "output_var_names": OUTPUT_VARS,
+        "output_var_names": [*OUTPUT_VARS, f"{budget_prefix}_residual"],
         "output_serial_zarr": out_dir / "starfit_graph.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     with Model(
         process_dict, control, discretizations=discretizations
@@ -236,6 +241,7 @@ def graph_run(request, graph_params, inflow_da, tmp_path_factory):
         "control": control,
         "class": node_class,
         "io_factor": io_factor,
+        "budget_prefix": budget_prefix,
     }
 
 
@@ -258,6 +264,27 @@ class TestStarfitFlowNode:
                 atol=ATOL,
                 err_msg=var,
             )
+
+    def test_mass_budget(self, graph_run):
+        """The per-node residual is roundoff every day (the run already
+        passed error mode); the storage term is the STATE delta, so
+        this is a real check on the hourly family; the combined node's
+        applied diversion enters as the exchanges term."""
+        prefix = graph_run["budget_prefix"]
+        output_ds = xr.open_zarr(
+            graph_run["control"]["output_serial_zarr"],
+            consolidated=False,
+        )
+        residual = output_ds[f"{prefix}_residual"].values
+        assert np.all(np.abs(residual) < BUDGET_TOL)
+        proc = graph_run["model"].model_dict["flow_graph"]
+        assert proc[f"{prefix}_residual"].attrs["units"] in ("cms", "cfs")
+        np.testing.assert_array_equal(
+            proc[f"{prefix}_exchanges_sum"].values,
+            proc["node_sink_source"].values,
+        )
+        if graph_run["class"] is StarfitSourceSinkFlowNode:
+            assert (proc[f"{prefix}_exchanges_sum"].values < 0.0).any()
 
     def test_outflow_is_release_plus_spill(self, graph_run):
         """Structural: the graph outflow harvest equals release +

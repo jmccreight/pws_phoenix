@@ -397,9 +397,18 @@ def calc_ppt_to_pack(
                     pk_def = 0.0
                     pk_temp = 0.0
                     pk_ice = pk_ice + pndz
-                    # the rest becomes free water (no prior freeh2o:
-                    # the pack had a heat deficit)
-                    freeh2o = net_rain - pndz
+                    # the rest becomes free water. DELIBERATE DEPARTURE
+                    # from PRMS/pywatershed (`freeh2o = net_rain -
+                    # pndz`, which assumes a pack with a heat deficit
+                    # holds no free water): a cold pack CAN carry a
+                    # trace of freeh2o (drb: 9 hru-days over 2 years,
+                    # <= 1.2e-7 inches), and the overwrite dropped it
+                    # from pk_ice + freeh2o while pkwater_equiv (+=
+                    # net_rain above) kept it -- the mass budget opened
+                    # by exactly freeh2o until the pack died and
+                    # `snowmelt += pkwater_equiv` refunded it. Found by
+                    # the budget check (Oct 2026); see PORTS.md.
+                    freeh2o = freeh2o + net_rain - pndz
                     # excess heat from the extra rain
                     calpr = train * (net_rain - pndz) * _INCH2CM  # [cal/cm^2]
                     (
@@ -1280,6 +1289,15 @@ def calc_snowevap(
         pkwater_equiv = pkwater_equiv - ez
         snow_evap = ez
 
+    # MASS-ACCOUNTING HAZARD (PRMS snowcomp.f90 verbatim, via
+    # pywatershed): the two corrections below hand mass back to
+    # pkwater_equiv WITHOUT touching pk_ice / freeh2o, so the three no
+    # longer agree and the mass budget (storage = pk_ice + freeh2o)
+    # opens by |avail_et|. Dead under valid parameters: ez <= potet -
+    # hru_intcpevap whenever potet_sublim * snowcov_area <= 1 (and
+    # canopy gives hru_intcpevap <= potet), so avail_et >= 0. Kept
+    # verbatim for parity; control["budget"] = "error" catches it if
+    # some input ever reaches it. Watch item: docs/MAINTENANCE.md.
     if snow_evap < 0.0:
         pkwater_equiv = pkwater_equiv - snow_evap
         if pkwater_equiv < 0.0:
@@ -1516,12 +1534,14 @@ class PRMSSnow(Process):
         dims=("space",),
         dtype=np.float64,
         description="Rain through the canopy [inches]",
+        units="inches",
     )
     net_snow = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
         description="Snow through the canopy [inches]",
+        units="inches",
     )
     orad_hru = DataArrayMeta(
         kind="input",
@@ -1612,6 +1632,7 @@ class PRMSSnow(Process):
         dims=("space",),
         dtype=np.float64,
         description="Free-water change over the timestep [inches]",
+        units="inches",
     )
     freeh2o_prev = DataArrayMeta(
         kind="variable",
@@ -1700,6 +1721,7 @@ class PRMSSnow(Process):
         dims=("space",),
         dtype=np.float64,
         description="Pack-ice change over the timestep [inches]",
+        units="inches",
     )
     pk_ice_prev = DataArrayMeta(
         kind="variable",
@@ -1783,6 +1805,7 @@ class PRMSSnow(Process):
         dims=("space",),
         dtype=np.float64,
         description="Snowpack evaporation/sublimation [inches]",
+        units="inches",
     )
     snowcov_area = DataArrayMeta(
         kind="variable",
@@ -1803,6 +1826,7 @@ class PRMSSnow(Process):
         dims=("space",),
         dtype=np.float64,
         description="Snowmelt from the snowpack [inches]",
+        units="inches",
     )
     snsv = DataArrayMeta(
         kind="variable",
@@ -1823,7 +1847,28 @@ class PRMSSnow(Process):
         dtype=np.float64,
         description="Rain that passes through snow [inches] "
         "(PRMSRunoff input)",
+        units="inches",
     )
+
+    # -- budgets --
+    # pywatershed's PRMSSnow.get_mass_budget_terms verbatim. Checked
+    # against the kernel: the storage terms are pk_ice + freeh2o, but
+    # the kernel sizes its fluxes from pkwater_equiv, which it tracks
+    # SEPARATELY (calc_snowevap: `pkwater_equiv = pkwater_equiv - ez`
+    # beside `pk_ice = pk_ice - ez`; calc_calin 3.1: `snowmelt +=
+    # pkwater_equiv` then pk_ice = freeh2o = 0), so the residual is
+    # the drift between the two trackers -- roundoff (< 1e-14 on drb)
+    # now that the calc_ppt_to_pack 1.1.3 freeh2o overwrite is fixed
+    # (the one departure from PRMS; comment there). ONE branch still
+    # breaks the accounting -- the avail_et < 0 correction at the end
+    # of calc_snowevap (comment there; docs/MAINTENANCE.md); dead
+    # under valid parameters, and the budget check is the detector.
+    _MASS_BUDGET = {
+        "inputs": ("net_rain", "net_snow"),
+        "outputs": ("snow_evap", "snowmelt", "through_rain"),
+        "storage_changes": ("freeh2o_change", "pk_ice_change"),
+    }
+    budgets = {"mass": _MASS_BUDGET}
 
     # ------------------------------------------------------------------
     # Initialization

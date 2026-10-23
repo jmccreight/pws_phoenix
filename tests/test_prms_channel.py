@@ -311,6 +311,7 @@ def model_run(request, channel_parameters, weights, tmp_path_factory):
         "output_var_names": list(ANSWER_NAMES),
         "output_serial_zarr": out_dir / "prms_channel.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     with Model(
         process_dict,

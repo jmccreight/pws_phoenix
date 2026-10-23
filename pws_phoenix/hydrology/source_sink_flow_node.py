@@ -24,6 +24,16 @@ Port notes:
 - pywatershed's per-substep running mean `_sink_source_sum/(isubstep
   + 1)` is only harvested after the LAST substep, so it is computed
   once in `finalize` (identical value, fewer writes).
+- **Departure (Oct 2026, found by the mass budget):** pywatershed
+  harvests `outflow` as the LAST substep's `_seg_outflow`, beside a
+  graph-level `node_upstream_inflows` that is the substep MEAN -- the
+  only node type whose outflow varies within the day yet reports the
+  last value (pass-through reports the mean; obsin's is constant in a
+  day). Spliced into a muskingum network the daily harvest then
+  fails `lat + up + ss == out` by the last-minus-mean difference
+  (4.5 cfs on drb day 1). Here `node_outflows` is the substep MEAN
+  (`source_sink_outflow_sum / n_sub`); routing is untouched (the
+  per-substep value is what flows downstream). Report upstream.
 """
 
 import numba
@@ -37,6 +47,7 @@ def _prepare(inode, state):
     # pywatershed reads its series by date here (+ missing-data
     # handling); the framework has already served the current slice
     state.source_sink_sum[inode] = 0.0
+    state.source_sink_outflow_sum[inode] = 0.0
 
 
 @numba.njit
@@ -68,14 +79,15 @@ def _substep(istep, inode, state, tctx, n_sub):
 
     state.node_outflow_substep[inode] = outflow
     state.source_sink_sum[inode] += source_sink
+    state.source_sink_outflow_sum[inode] += outflow
 
 
 @numba.njit
 def _finalize(inode, n_sub, state):
-    # harvest: outflow = the LAST substep's outflow (not a mean --
-    # pywatershed node semantics); sink_source = substep mean of the
-    # APPLIED source/sink
-    state.node_outflows[inode] = state.node_outflow_substep[inode]
+    # harvest: outflow AND the applied source/sink as substep MEANS
+    # (pywatershed takes the last substep's outflow -- the departure
+    # in the module docstring)
+    state.node_outflows[inode] = state.source_sink_outflow_sum[inode] / n_sub
     state.node_storage_changes[inode] = 0.0
     state.node_storages[inode] = np.nan
     state.node_sink_source[inode] = state.source_sink_sum[inode] / n_sub
@@ -108,6 +120,13 @@ class SourceSinkFlowNode:
             dtype=np.float64,
             description="Applied source/sink substep accumulator [io flow units]",
         ),
+        "source_sink_outflow_sum": DataArrayMeta(
+            kind="variable",
+            dims=("space",),
+            dtype=np.float64,
+            description="Outflow substep accumulator [io flow units] "
+            "(the daily harvest is the mean; see module docstring)",
+        ),
     }
 
     # njit node contract (Dispatchers; dispatched by the graph kernel)
@@ -121,6 +140,7 @@ class SourceSinkFlowNode:
         # unused (requests, flow_min, and flows share the graph's
         # units, whatever they are)
         dataset["source_sink_sum"].values[:] = 0.0
+        dataset["source_sink_outflow_sum"].values[:] = 0.0
 
     @staticmethod
     def advance_type(dataset) -> None:
