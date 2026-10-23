@@ -249,6 +249,13 @@ chain" below.
   zeroes the store with no output term — unreachable on nhm (bare
   soil never intercepts; hru_type hardwired LAND), kept verbatim,
   logged in `docs/MAINTENANCE.md`. Green first run serial + MPI.
+  Channel (Oct 23, 2026): NOT declared, by decision. pywatershed's is
+  the one `basis="global"` budget; muskingum has no storage state and
+  `seg_stor_change` is defined as the imbalance, so the per-segment
+  form (written out, with its `exchanges` term and the algebra, in the
+  `prms_channel.py` docstring) is an identity, and the global content
+  (routing telescopes) is fatal or definitional before a budget runs
+  and pinned by the 1e-13 `seg_outflow` parity.
   Error mode also warns per rank (date, max |residual|, first
   indices) before the collective raise. Budgets run only under the
   Model: drive a lone process as a one-process Model.
@@ -638,8 +645,9 @@ flow-driven variables see the knife-edge cascade).
   `generate_test_data.py --domain=drb_2yr --control_pattern=nhm_no_dprst`;
   green at each process's own tolerance, Oct 2026).
 - Budgets: declared on the groundwater, soilzone and runoff families,
-  snow and canopy (Oct 2026); still to declare (`units=` on every
-  term): channel, FlowGraph node types. Not ported from pywatershed's
+  snow and canopy (Oct 2026); channel deliberately not (identity --
+  `prms_channel.py` docstring); still to declare (`units=` on every
+  term): FlowGraph node types. Not ported from pywatershed's
   Budget: `global` basis, per-term accumulations, `ignore_nans`.
 - Southern-hemisphere domains (atmosphere `is_summer`).
 - Nonzero `snowpack_init` (upstream's implementation is faulty).

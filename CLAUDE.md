@@ -389,7 +389,13 @@ the `epiweeks` dep).
   `intcp_changeover` is wrong -- nonzero on season-flip days; the
   BARESOIL `extra_water = intcp_stor[ii]` (per-canopy, not * cov)
   and LAKE store-zeroing branches would open it but are dead on nhm,
-  logged in `docs/MAINTENANCE.md`). The ObsET run under
+  logged in `docs/MAINTENANCE.md`); PRMSChannel NOT declared (Oct 23,
+  2026: pywatershed's is `basis="global"`; muskingum has no storage
+  state, `seg_stor_change` is DEFINED as the imbalance, so the
+  per-segment form is an identity and the global content (routing
+  telescopes) is covered by `topological_order` + parity -- the
+  would-be declaration with its `exchanges` term and the algebra are
+  in the module docstring). The ObsET run under
   dynamic `ag_frac` with
   "error" is the validation of the five redistribution-corrected
   change variables (they are the budget's storage-change terms).
@@ -399,8 +405,8 @@ the `epiweeks` dep).
   hand (the pywatershed habit computes no budget here). Tests:
   `tests/test_budget.py` (synthetic, CI-able) + budget asserts in
   `test_prms_{groundwater,soilzone,soilzone_ag,soilzone_ag_obs_et,
-  runoff,runoff_ag,snow,canopy}{,_mpi}.py`. NEXT: channel,
-  FlowGraph node types.
+  runoff,runoff_ag,snow,canopy}{,_mpi}.py`. NEXT: FlowGraph node
+  types (`exchanges` for obsin / source-sink).
 - **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
   `utils/separate_nhm_params.py` splits parameters into per-process
   files and DIS files (`dis_hru_vars`: hru_area, hru_in_to_cf, ...;
