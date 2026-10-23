@@ -81,6 +81,14 @@ class _LeakyBucket(_Bucket):
         return 0.1
 
 
+class _NanBucket(_Bucket):
+    """A nan written into one term at one location."""
+
+    def calculate(self, dt: np.float64, time: Time) -> None:
+        super().calculate(dt, time)
+        self._obj["outflow"].values[0] = np.nan
+
+
 class _ExchangeBucket(_Bucket):
     """Adds a signed exchange term (either direction) to the balance."""
 
@@ -308,6 +316,15 @@ def test_leaky_errors():
     with _model(_LeakyBucket, {"budget": "error"}) as model:
         with pytest.raises(ValueError, match="_LeakyBucket budget imbalanced"):
             with pytest.warns(UserWarning, match="imbalanced at 2000-01-01"):
+                model.run(np.float64(1.0), np.int32(1))
+
+
+def test_nan_residual_is_imbalanced():
+    """nan counts as imbalanced (``not (nan <= tol)``) and is reported
+    as nan, not 0, in the warning."""
+    with _model(_NanBucket, {"budget": "error"}) as model:
+        with pytest.raises(ValueError, match="1 location"):
+            with pytest.warns(UserWarning, match=r"max \|residual\| = nan"):
                 model.run(np.float64(1.0), np.int32(1))
 
 
