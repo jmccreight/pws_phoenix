@@ -395,7 +395,15 @@ the `epiweeks` dep).
   per-segment form is an identity and the global content (routing
   telescopes) is covered by `topological_order` + parity -- the
   would-be declaration with its `exchanges` term and the algebra are
-  in the module docstring). The ObsET run under
+  in the module docstring); every composed FlowGraph (Oct 23, 2026:
+  pywatershed's global list PER NODE -- `node_sink_source` is the
+  first real `exchanges` term; units "cfs"/"cms" stamped from
+  `io_in_cfs` at composition; content on the hourly STARFIT family
+  whose storage term is pywatershed's own STATE delta; the budget
+  CAUGHT departure #2 -- SourceSinkFlowNode harvested the LAST
+  substep's outflow beside mean inputs, now the substep mean,
+  routing untouched; obsin kept verbatim, constant within a day).
+  DECLARATION SWEEP COMPLETE. The ObsET run under
   dynamic `ag_frac` with
   "error" is the validation of the five redistribution-corrected
   change variables (they are the budget's storage-change terms).
@@ -405,8 +413,9 @@ the `epiweeks` dep).
   hand (the pywatershed habit computes no budget here). Tests:
   `tests/test_budget.py` (synthetic, CI-able) + budget asserts in
   `test_prms_{groundwater,soilzone,soilzone_ag,soilzone_ag_obs_et,
-  runoff,runoff_ag,snow,canopy}{,_mpi}.py`. NEXT: FlowGraph node
-  types (`exchanges` for obsin / source-sink).
+  runoff,runoff_ag,snow,canopy}{,_mpi}.py` + error mode in the
+  five FlowGraph tests (residual pins in test_starfit_flow_node /
+  test_mixed_channel_starfit).
 - **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
   `utils/separate_nhm_params.py` splits parameters into per-process
   files and DIS files (`dis_hru_vars`: hru_area, hru_in_to_cf, ...;

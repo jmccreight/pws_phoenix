@@ -210,6 +210,7 @@ def phoenix_run(inflow_da, tmp_path_factory):
         "output_var_names": [*COMPARE_VARS, "node_outflows"],
         "output_serial_zarr": out_dir / "graph.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     with Model(
         process_dict, control, discretizations=discretizations

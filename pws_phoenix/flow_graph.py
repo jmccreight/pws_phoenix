@@ -52,12 +52,39 @@ FlowGraph-specific MPI code. Topology (``to_graph_index``: 0-based,
 (``Discretization(topo_order=..., topo_one_based=False)``) are
 dis-owned.
 
-NOT ported (see CLAUDE.md): Budget/sink_source machinery (sink_source
-is still HARVESTED per node type -- reservoirs source/sink mass -- but
-no budget consumes it yet), plot()/pyvis, initialize_netcdf,
+**Mass budget (Oct 2026).** pywatershed's FlowGraph budget is
+``basis="global"`` (inputs = the lateral ``inflows``, outputs = the
+outlet-masked ``outflows``, storage_changes = ``node_storage_changes``
++ ``node_negative_sink_source``). Here it is PER NODE; every composed
+class declares, in the graph's flow units (``units`` stamped
+``"cfs"``/``"cms"`` from ``io_in_cfs`` at composition)::
+
+    inputs:          node_lateral_inflow, node_upstream_inflows
+    outputs:         node_outflows
+    storage_changes: node_storage_changes
+    exchanges:       node_sink_source      (the slot's first real use)
+
+i.e. ``lat + up + ss == out + dstor`` at each node. The upstream
+hand-off is an INPUT per node, so no outlet mask is needed; the global
+telescoping check (sum of ``up`` == sum of non-outlet ``out``) is
+topology, fatal or definitional before a budget runs (see
+prms_channel.py). Where the per-node check has CONTENT: the HOURLY
+STARFIT family, whose ``node_storage_changes`` is pywatershed's own
+STATE delta (``lake_storage_sub - lake_storage_old_sub`` per substep,
+redefined after the march in ``post_release_calculations``) -- the
+storage floor ``max(..., 0.0)`` on an overdraw, and nan, are what it
+would catch. Identities by definition: channel (``seg_inflow -
+seg_outflow``), pass-through, obsin and source_sink
+(``node_sink_source`` IS ``out - in`` / the applied request -- obsin's
+non-conservation appears as a nonzero exchange, never a residual) and
+the DAILY STARFIT node (flux-defined ``lake_storage += change``,
+verbatim).
+
+NOT ported (see CLAUDE.md): plot()/pyvis, initialize_netcdf,
 InflowExchange, type_check_nodes, allow_disconnected_nodes knob.
 """
 
+import dataclasses
 import warnings
 from abc import ABCMeta
 from collections import namedtuple
@@ -175,8 +202,8 @@ _GRAPH_FIELDS = {
         kind="variable",
         dims=("space",),
         dtype=np.float64,
-        description="Node sink/source (reservoirs; harvested but no "
-        "Budget consumer yet)",
+        description="Node sink/source [io flow units] (sink negative; "
+        "the mass budget's exchanges term)",
     ),
     "outflows": DataArrayMeta(
         kind="variable",
@@ -204,6 +231,22 @@ _GRAPH_FIELDS = {
         description="Sub-timestep outflow per node (kernel work buffer)",
     ),
 }
+
+
+# pywatershed FlowGraph.get_mass_budget_terms, re-expressed PER NODE
+# (module docstring "Mass budget"): the upstream hand-off is an input,
+# node_sink_source is the exchanges term (pywatershed negates it into
+# storage_changes). Declared on every composed class; the terms carry
+# the graph's flow units, stamped at composition.
+_MASS_BUDGET = {
+    "inputs": ("node_lateral_inflow", "node_upstream_inflows"),
+    "outputs": ("node_outflows",),
+    "storage_changes": ("node_storage_changes",),
+    "exchanges": ("node_sink_source",),
+}
+_FLOW_UNIT_FIELDS = tuple(
+    nn for terms in _MASS_BUDGET.values() for nn in terms
+)
 
 
 def _build_graph_kernel(prepare_fns, substep_fns, finalize_fns):
@@ -355,7 +398,12 @@ def make_flow_graph(
         raise ValueError(f"duplicate node type names: {type_names}")
 
     class_attrs: dict = {}
+    flow_units = "cfs" if io_in_cfs else "cms"
     for name, meta in _GRAPH_FIELDS.items():
+        if name in _FLOW_UNIT_FIELDS:
+            # the budget terms carry THIS graph's flow units: a
+            # per-composition copy (the module declarations are shared)
+            meta = dataclasses.replace(meta, units=flow_units)
         class_attrs[name] = meta
     for tt_class in node_types:
         for name, meta in tt_class.fields.items():
@@ -432,6 +480,7 @@ def make_flow_graph(
     class_attrs["_field_names"] = field_names
     class_attrs["_n_substeps"] = n_substeps
     class_attrs["_io_in_cfs"] = io_in_cfs
+    class_attrs["budgets"] = {"mass": _MASS_BUDGET}
     class_attrs["initialize"] = initialize
     class_attrs["advance"] = advance
     class_attrs["calculate"] = calculate

@@ -67,6 +67,32 @@ the HRU-day it runs.
 - **Not fixed** for the same reason as the snow entry: verbatim
   lines, no data reach them.
 
+## Report upstream (pywatershed): SourceSinkFlowNode harvests the last substep's outflow
+
+`pywatershed/hydrology/source_sink_flow_node.py:118,134`:
+
+```python
+        self._seg_outflow = outflow          # per substep
+    ...
+    def outflow(self) -> np.float64:
+        return self._seg_outflow             # harvested after the last
+```
+
+while `FlowGraph.node_upstream_inflows` is the substep MEAN and
+`sink_source` is `_sink_source_sum / nsubsteps`. PassThroughFlowNode
+reports the mean (`_accum_inflow / (isubstep + 1)`); obsin's outflow
+is constant within a day so last == mean. For a source_sink node
+spliced into a muskingum network, the daily `node_outflows` therefore
+disagrees with `node_upstream_inflows + inflows + node_sink_source`
+by the last-minus-mean difference (4.5 cfs on drb day 1). Routing is
+unaffected (the substep value is what flows downstream); only the
+harvested daily variable is off. Fixed here (departure #2,
+`source_sink_flow_node.py` docstring); pywatershed's own global
+budget would see it for a source_sink node at an outlet.
+
+- **Detector:** `control["budget"] = "error"` on any composed graph.
+- **Status:** not yet reported.
+
 ## Idea (later): one-off unit check of a whole configuration with `pint`
 
 Every budget term now carries `DataArrayMeta.units` (free text), and

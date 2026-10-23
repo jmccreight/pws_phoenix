@@ -67,7 +67,7 @@ relies on Model/ModelMPI running ALL `advance()` hooks before any
 |---|---|---|---|
 | PRMSGroundwater | `hydrology/prms_groundwater.py` | 1e-13 (upstream's own) | First real port; dis-first parameter sourcing |
 | PRMSChannel | `hydrology/prms_channel.py` | 1e-13; `seg_stor_change` (1e-7, 1e-4) cancellation carve-out | hru→segment aggregation externalized to Maps; muskingum coefficients = `parameter_internal` |
-| FlowGraph (6 node types) | `flow_graph.py` + `hydrology/*_flow_node.py` | 1e-7…1e-10 per mode | Registry dispatch via `literal_unroll`; hourly + daily STARFIT; io_in_cfs |
+| FlowGraph (6 node types) | `flow_graph.py` + `hydrology/*_flow_node.py` | 1e-7…1e-10 per mode; per-node mass budget 1e-8/1e-9 | Registry dispatch via `literal_unroll`; hourly + daily STARFIT; io_in_cfs |
 | PRMSRunoff | `hydrology/prms_runoff.py` | 1e-10 (upstream's own) | dprst-ACTIVE path; `basin_init`/`dprst_init` → `initialize()` + `parameter_internal` |
 | PRMSSoilzone | `hydrology/prms_soilzone.py` | 1e-10 observed (upstream's own is 5e-6) | First `mutable_input` (`sroff`/`sroff_vol`: dunnian added in place) |
 | PRMSCanopy | `hydrology/prms_canopy.py` | 1e-12 (upstream's own); mass budget 1e-12 | `pptmix` = written-never-read mutable input; hru_type hardwired all-LAND upstream |
@@ -256,6 +256,26 @@ chain" below.
   `prms_channel.py` docstring) is an identity, and the global content
   (routing telescopes) is fatal or definitional before a budget runs
   and pinned by the 1e-13 `seg_outflow` parity.
+  FlowGraph (Oct 23, 2026): pywatershed's global-basis list
+  re-expressed PER NODE on every composed class -- inputs
+  `node_lateral_inflow` + `node_upstream_inflows`, output
+  `node_outflows`, storage `node_storage_changes`, and
+  `node_sink_source` as the first real `exchanges` term (pywatershed
+  negates it into storage_changes); units stamped `"cfs"`/`"cms"`
+  from `io_in_cfs` at composition. Content: the HOURLY STARFIT
+  family, whose `node_storage_changes` is pywatershed's own STATE
+  delta (`lake_storage_sub - lake_storage_old_sub`, redefined after
+  the march); channel, pass-through, obsin, source_sink and the daily
+  STARFIT node are identities by definition. It CAUGHT the second
+  departure: pywatershed's SourceSinkFlowNode harvests `outflow` as
+  the LAST substep's value beside mean inputs -- the one type whose
+  outflow varies within a day yet reports the last (4.5 cfs residual
+  on drb day 1 when spliced into muskingum); fixed to the substep
+  mean (`source_sink_outflow_sum`), routing untouched. Obsin's
+  last-substep harvest is kept verbatim (constant within a day, so
+  last == mean). All five graph tests run in error mode; residual
+  pinned 1e-9 (STARFIT cms/cfs matrix) and 1e-8 (mixed ucb graph,
+  cfs x 24 substeps).
   Error mode also warns per rank (date, max |residual|, first
   indices) before the collective raise. Budgets run only under the
   Model: drive a lone process as a one-process Model.
@@ -645,9 +665,9 @@ flow-driven variables see the knife-edge cascade).
   `generate_test_data.py --domain=drb_2yr --control_pattern=nhm_no_dprst`;
   green at each process's own tolerance, Oct 2026).
 - Budgets: declared on the groundwater, soilzone and runoff families,
-  snow and canopy (Oct 2026); channel deliberately not (identity --
-  `prms_channel.py` docstring); still to declare (`units=` on every
-  term): FlowGraph node types. Not ported from pywatershed's
+  snow, canopy and every composed FlowGraph (Oct 2026); channel
+  deliberately not (identity -- `prms_channel.py` docstring). The
+  declaration sweep is COMPLETE. Not ported from pywatershed's
   Budget: `global` basis, per-term accumulations, `ignore_nans`.
 - Southern-hemisphere domains (atmosphere `is_summer`).
 - Nonzero `snowpack_init` (upstream's implementation is faulty).
