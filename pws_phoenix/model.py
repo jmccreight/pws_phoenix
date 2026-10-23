@@ -614,7 +614,15 @@ class Model:
                 dims=dims,
                 attrs=attrs,
             )
-            if meta.initial is not None and meta.initial in init_dict:
+            # a declared initial= name is REQUIRED (also under restart_read):
+            # filling silently would start the state as nan
+            if meta.initial is not None:
+                if meta.initial not in init_dict:
+                    raise ValueError(
+                        f"{cls.__name__}.{name} declares "
+                        f"initial={meta.initial!r} but "
+                        f"process_dict[{proc_name!r}] does not supply it."
+                    )
                 da[:] = init_dict[meta.initial]
             grid_ds[name] = da
 
@@ -1248,15 +1256,21 @@ class ModelMPI(Model):
 
         # ---- Load initial conditions into state buffers. ICs are the
         #      space-only vars loaded above (from the file). ----
+        #      A declared initial= name is REQUIRED (also under
+        #      restart_read): filling silently would start the state as nan.
         for cls in mpi_classes.values():
             for name, meta in cls.get_variables().items():
-                if (
-                    meta.initial is not None
-                    and meta.initial in ds_mpi_stream.data_vars
-                ):
-                    ds_mpi_stream[name].values[:] = ds_mpi_stream[
-                        meta.initial
-                    ].values
+                if meta.initial is None:
+                    continue
+                if meta.initial not in ds_mpi_stream.data_vars:
+                    raise ValueError(
+                        f"{cls.__name__}.{name} declares "
+                        f"initial={meta.initial!r} but the MPI input file "
+                        f"does not carry it."
+                    )
+                ds_mpi_stream[name].values[:] = ds_mpi_stream[
+                    meta.initial
+                ].values
 
         self._ds_mpi_stream = ds_mpi_stream
         self.discretizations[mpi_grid].dataset = ds_mpi_stream

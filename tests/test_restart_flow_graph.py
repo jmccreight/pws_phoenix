@@ -101,6 +101,7 @@ def test_flags_derivation_pin():
         "lake_storage",
         "lake_storage_sub",
         "lake_outflow_sub_next",
+        "AllTypesRestartPinGraph_mass_residual_accum",
     }
 
 

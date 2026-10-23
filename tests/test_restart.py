@@ -131,6 +131,21 @@ def test_restart_empty_dir_fails_loudly(toy_ds, tmp_path):
         _make_model(toy_ds, {"restart_read": empty})
 
 
+def test_missing_initial_fails_loudly(toy_ds):
+    """An absent initial= name raises at assembly rather than starting
+    the state as nan (nan == nan passes assert_array_equal, so a
+    silent nan state can hide behind a green test)."""
+    process_dict = {
+        "upper": {
+            "class": Upper,
+            "forcing_up": toy_ds["forcing_up"],
+            "parameters": toy_ds[PARAM_NAMES],
+        },
+    }
+    with pytest.raises(ValueError, match="initial='flow_initial'"):
+        Model(process_dict, {})
+
+
 def test_flags_are_variables_only():
     """Guard: restart flags only make sense on kind='variable' --
     every flagged field in the registry is a variable."""

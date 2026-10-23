@@ -197,6 +197,7 @@ def _run_one(proc_name, proc_class, parameters, forcings, out_names, out_dir):
         "output_var_names": list(out_names),
         "output_serial_zarr": out_dir / f"{proc_class.__name__}.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     discretizations = {
         "nhru": Discretization(
@@ -335,8 +336,13 @@ def groundwater_pair(tmp_path_factory):
     forcings = _load_forcings(GW_INPUT_NAMES)
 
     params_full = xr.load_dataset(DOMAIN_DIR / "parameters_PRMSGroundwater.nc")
-    forcings_full = dict(forcings) | _zero_forcings(
-        ("dprst_seep_hru",), forcings["soil_to_gw"]
+    # gwstor_init must be supplied: an absent initial= name fills the
+    # state with nan silently (model.py), and nan == nan passes
+    # assert_array_equal -- the budget caught this test running on nan.
+    forcings_full = (
+        dict(forcings)
+        | _zero_forcings(("dprst_seep_hru",), forcings["soil_to_gw"])
+        | {"gwstor_init": params_full["gwstor_init"]}
     )
     full = _run_one(
         "prms_groundwater",
@@ -354,7 +360,7 @@ def groundwater_pair(tmp_path_factory):
         "prms_groundwater",
         PRMSGroundwaterNoDprst,
         params_nodprst,
-        forcings,
+        forcings | {"gwstor_init": params_nodprst["gwstor_init"]},
         GW_COMPARE_NAMES,
         out_dir,
     )

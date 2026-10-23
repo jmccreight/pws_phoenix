@@ -188,6 +188,7 @@ def case_run(request, tmp_path_factory):
         "output_var_names": list(case["answers"]),
         "output_serial_zarr": out_dir / "proc.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     discretizations = {
         "nhru": Discretization(

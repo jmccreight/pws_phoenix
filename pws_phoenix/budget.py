@@ -91,7 +91,7 @@ def _balance(
         diff = abs(res)
         if not (diff <= atol + rtol * abs(rhs)):
             n_bad += 1
-        if diff > max_abs:
+        if not (diff <= max_abs):  # a nan residual reports as nan
             max_abs = diff
     return n_bad, max_abs
 

@@ -351,7 +351,9 @@ def test_assemble_no_stream_temp_kit():
 def test_model_from_control_runs():
     """The one-liner builds the complete stream-temp model and a
     short run produces the expected finite field."""
-    model = model_from_control(DRB_DIR / "nhm_stream_temp.control")
+    model = model_from_control(
+        DRB_DIR / "nhm_stream_temp.control", control={"budget": "error"}
+    )
     model.run(np.float64(86400.0), np.int32(3))
     seg_tave = model.model_dict["prms_stream_temp"]["seg_tave_water"]
     finite = np.isfinite(seg_tave.values)
@@ -379,6 +381,7 @@ def test_output_var_names_translation(tmp_path):
         control={
             "output_serial_zarr": tmp_path / "run.zarr",
             "time_chunk_size": 61,
+            "budget": "error",
         },
     )
     kept = kit.control["output_var_names"]
@@ -396,6 +399,7 @@ def test_output_var_names_translation(tmp_path):
             "output_serial_zarr": tmp_path / "run2.zarr",
             "output_var_names": ["seg_outflow"],
             "time_chunk_size": 61,
+            "budget": "error",
         },
     )
     assert kit.control["output_var_names"] == ["seg_outflow"]
@@ -404,7 +408,11 @@ def test_output_var_names_translation(tmp_path):
     store = tmp_path / "run3.zarr"
     with model_from_control(
         path,
-        control={"output_serial_zarr": store, "time_chunk_size": 61},
+        control={
+            "output_serial_zarr": store,
+            "time_chunk_size": 61,
+            "budget": "error",
+        },
     ) as model:
         model.run(np.float64(86400.0), np.int32(2))
     with xr.open_zarr(store, consolidated=False) as ds_out:
