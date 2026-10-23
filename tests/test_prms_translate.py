@@ -8,7 +8,6 @@ parameter forward-fill) -- pywatershed appears here ONLY as the test
 oracle, never as a prms_translate dependency.
 """
 
-import pathlib as pl
 import sys
 
 import numpy as np
@@ -17,6 +16,7 @@ import xarray as xr
 
 pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
 
+from conftest import PWS_TEST_DATA, PYWS_ROOT
 from pws_phoenix.prms_translate import (  # noqa: E402
     assemble_from_control,
     from_control,
@@ -31,10 +31,8 @@ from pws_phoenix.prms_translate import (  # noqa: E402
 )
 from pws_phoenix.prms_translate.dyn_param import forward_fill  # noqa: E402
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-PYWS_ROOT = MPIX_ROOT / "pywatershed"
-DRB_DIR = PYWS_ROOT / "test_data" / "drb_2yr"
-FGR_DIR = PYWS_ROOT / "test_data" / "fgr_ag_2yr"
+DRB_DIR = PWS_TEST_DATA / "drb_2yr"
+FGR_DIR = PWS_TEST_DATA / "fgr_ag_2yr"
 
 # ctl.modules as pyPRMS normalizes the drb NHM control
 NHM_MODULES = {

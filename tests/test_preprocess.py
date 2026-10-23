@@ -5,14 +5,13 @@ in-chain derivations (so a preprocessed assembly is the same model);
 verification passes on aligned inputs and raises loudly on a drifted
 input (staleness) or a tampered artifact (self-digest)."""
 
-import pathlib as pl
-
 import numpy as np
 import pytest
 import xarray as xr
 
 pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
 
+from conftest import PWS_TEST_DATA
 from pws_phoenix.prms_translate import (  # noqa: E402
     assemble_from_control,
     load_parameters,
@@ -20,8 +19,7 @@ from pws_phoenix.prms_translate import (  # noqa: E402
     write_preprocessed,
 )
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DRB_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DRB_DIR = PWS_TEST_DATA / "drb_2yr"
 CONTROL_FILE = DRB_DIR / "nhm_stream_temp.control"
 
 _needed = [

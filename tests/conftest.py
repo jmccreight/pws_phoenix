@@ -16,7 +16,11 @@ intentional and explicit:
   - output backend differs (serial zarr store vs MPI streamed NetCDF).
 """
 
+import os
 import pathlib as pl
+import platform
+import sys
+import tomllib
 
 import numpy as np
 import pytest
@@ -27,7 +31,15 @@ import xarray as xr
 # [ucb_2yr]). GENERATED pywatershed test data; consumer modules carry
 # their own skipifs via pyws_domain_files(). ----
 MPIX_ROOT = pl.Path(__file__).parents[2]
-PYWS_TEST_DATA = MPIX_ROOT / "pywatershed" / "test_data"
+# the pywatershed source clone (parity tests import it via sys.path)
+PYWS_ROOT = MPIX_ROOT / "pywatershed"
+# A pywatershed test_data tree populated from the pws-prms-oracle AND
+# derived (pywatershed test_data/generate/oracle_populate.py); starfit/
+# is pywatershed-tracked data in the same tree. Default: the sibling
+# clone's; PWS_TEST_DATA overrides (e.g. a fetched copy in CI).
+PWS_TEST_DATA = pl.Path(
+    os.environ.get("PWS_TEST_DATA", PYWS_ROOT / "test_data")
+)
 PYWS_INPUT_VOL_NAMES = ("sroff_vol", "ssres_flow_vol", "gwres_flow_vol")
 
 # the pywatershed STARFIT autotest reservoir subset (its comment says
@@ -49,10 +61,83 @@ STARFIT_INDS_TEST = [
 # fmt: on
 
 
+def pytest_report_header(config):
+    state = "found" if PWS_TEST_DATA.is_dir() else "MISSING"
+    return f"PWS_TEST_DATA: {PWS_TEST_DATA} ({state})"
+
+
+# ---- oracle answer pins (tests/prms_oracle.toml) ----
+ORACLE_PINS = pl.Path(__file__).parent / "prms_oracle.toml"
+
+
+def oracle_platform_tag() -> str:
+    """The oracle's platform tag (prms_oracle/build.py platform_tag,
+    replicated -- the oracle is not a dependency): linux-x86_64 /
+    macos-arm64 / windows-x86_64."""
+    system = {"linux": "linux", "darwin": "macos", "win32": "windows"}[
+        sys.platform
+    ]
+    machine = platform.machine().lower()
+    arch = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "arm64"}.get(
+        machine, machine
+    )
+    return f"{system}-{arch}"
+
+
+def _marker(path: pl.Path) -> str | None:
+    return path.read_text().strip() if path.exists() else None
+
+
+def check_oracle_pins(root: pl.Path = PWS_TEST_DATA) -> list[str]:
+    """Mismatches between the pinned keys and the markers in root: a
+    domain's .oracle_ikey, each pinned answer directory's .oracle_okey
+    (this platform's pin), and its .derived_okey (pywatershed's
+    oracle_populate.py derived the variables from THESE answers). A
+    pinned directory that does not exist is not a mismatch -- the test
+    modules' own skipifs report missing data."""
+    pins = tomllib.loads(ORACLE_PINS.read_text())
+    tag = oracle_platform_tag()
+    problems = []
+    for domain, ikey in pins["inputs"].items():
+        found = _marker(root / domain / ".oracle_ikey")
+        if found is not None and found != ikey:
+            problems.append(f"{domain}/.oracle_ikey is {found}, pin {ikey}")
+    for dir_name, by_platform in pins["outputs"].items():
+        out_dir = root / dir_name
+        okey = _marker(out_dir / ".oracle_okey")
+        if okey is None:
+            continue
+        if tag not in by_platform:
+            problems.append(f"{dir_name}: no pin for platform {tag}")
+            continue
+        if okey != by_platform[tag]:
+            problems.append(
+                f"{dir_name}/.oracle_okey is {okey}, pin {by_platform[tag]}"
+            )
+        derived = _marker(out_dir / ".derived_okey")
+        if derived != okey:
+            problems.append(
+                f"{dir_name}: derived variables are from {derived}, "
+                f"the answers are {okey} (rerun oracle_populate.py)"
+            )
+    return problems
+
+
+def pytest_sessionstart(session):
+    if not PWS_TEST_DATA.is_dir():
+        return
+    problems = check_oracle_pins()
+    if problems:
+        raise pytest.UsageError(
+            f"oracle answers in {PWS_TEST_DATA} do not match the pins in "
+            f"{ORACLE_PINS}:\n  " + "\n  ".join(problems)
+        )
+
+
 def pyws_domain_files(domain):
     """The files a channel FlowGraph test needs from a GENERATED
     pywatershed domain (for module-level skipifs)."""
-    ddir = PYWS_TEST_DATA / domain
+    ddir = PWS_TEST_DATA / domain
     gen_dir = ddir / "output"
     return [
         ddir / "parameters_PRMSChannel.nc",
@@ -72,7 +157,7 @@ def pyws_domain():
     def _get(domain):
         if domain in cache:
             return cache[domain]
-        ddir = PYWS_TEST_DATA / domain
+        ddir = PWS_TEST_DATA / domain
         gen_dir = ddir / "output"
         channel_params = xr.load_dataset(ddir / "parameters_PRMSChannel.nc")
         dis_seg = xr.load_dataset(ddir / "parameters_dis_seg.nc")

@@ -23,13 +23,12 @@ import pathlib as pl
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA
 from pws_phoenix.atmosphere.prms_atmosphere import PRMSAtmosphereTranspFrost
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-PYWS_ROOT = MPIX_ROOT / "pywatershed"
-DOMAIN_DIR = PYWS_ROOT / "test_data" / "ucb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "ucb_2yr"
 GEN_DIR = DOMAIN_DIR / "output_transp_frost"
 
 CBH_NAMES = ("prcp", "tmax", "tmin")

@@ -29,14 +29,14 @@ import sys
 import numpy as np
 import pytest
 import xarray as xr
-from conftest import MPIX_ROOT
+from conftest import PWS_TEST_DATA, PYWS_ROOT
 from conftest import STARFIT_INDS_TEST as FULL_INDS
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.flow_graph import make_flow_graph
 from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from pws_phoenix.model import Model
 
-STARFIT_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "starfit"
+STARFIT_DIR = PWS_TEST_DATA / "starfit"
 PARAM_FILE = STARFIT_DIR / "starfit_original_parameters.nc"
 INFLOW_FILE = STARFIT_DIR / "lake_inflow.nc"
 
@@ -54,7 +54,7 @@ STARFIT_INDS_TEST = FULL_INDS[:N_RESERVOIRS]
 
 _missing = [str(ff) for ff in (PARAM_FILE, INFLOW_FILE) if not ff.exists()]
 try:
-    sys.path.insert(0, str(MPIX_ROOT / "pywatershed"))
+    sys.path.insert(0, str(PYWS_ROOT))
     from pywatershed.base.control import Control
     from pywatershed.hydrology.starfit import StarfitFlowNodeMaker
     from pywatershed.parameters import Parameters, StarfitParameters

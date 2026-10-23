@@ -26,6 +26,7 @@ import pytest
 import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent))
+from conftest import PWS_TEST_DATA, PYWS_ROOT
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.hydrology.prms_runoff import PRMSRunoff, PRMSRunoffAg
 from pws_phoenix.hydrology.prms_soilzone_ag import (
@@ -35,9 +36,7 @@ from pws_phoenix.hydrology.prms_soilzone_ag import (
 from pws_phoenix.model import Model
 from test_restart_processes import perfect_restart
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-PYWS_ROOT = MPIX_ROOT / "pywatershed"
-DOMAIN_DIR = PYWS_ROOT / "test_data" / "fgr_ag_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "fgr_ag_2yr"
 GEN_SPINUP = DOMAIN_DIR / "output_spinup"
 GEN_ANALYSIS = DOMAIN_DIR / "output_analysis"
 

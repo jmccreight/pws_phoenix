@@ -17,11 +17,10 @@ Requires drb_2yr with GENERATED nhm_stream_temp answers
 (output_stream_temp/); skips with a clear reason if absent.
 """
 
-import pathlib as pl
-
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.hydrology.prms_hydraulic_geometry import (
     PRMSHydraulicGeometryFull,
@@ -29,8 +28,7 @@ from pws_phoenix.hydrology.prms_hydraulic_geometry import (
 )
 from pws_phoenix.model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output_stream_temp"
 
 ANSWER_NAMES = (

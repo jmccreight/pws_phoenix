@@ -13,15 +13,13 @@ Requires GENERATED pywatershed test data; skips with a reason if
 absent.
 """
 
-import pathlib as pl
-
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA
 from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
 
 TABLE_NAMES = ("soltab_potsw", "soltab_horad_potsw", "soltab_sunhrs")

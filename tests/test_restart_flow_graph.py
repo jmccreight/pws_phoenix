@@ -34,7 +34,11 @@ import pytest
 import xarray as xr
 
 sys.path.append(str(pl.Path(__file__).parent))
-from conftest import STARFIT_INDS_TEST, pyws_domain_files
+from conftest import (
+    PWS_TEST_DATA,
+    STARFIT_INDS_TEST,
+    pyws_domain_files,
+)
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.flow_graph import make_flow_graph
 from pws_phoenix.hydrology.obsin_flow_node import ObsInFlowNode
@@ -49,8 +53,7 @@ from pws_phoenix.hydrology.starfit_source_sink_flow_node import (
 from pws_phoenix.model import Model
 from test_restart_processes import perfect_restart
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-STARFIT_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "starfit"
+STARFIT_DIR = PWS_TEST_DATA / "starfit"
 PARAM_FILE = STARFIT_DIR / "starfit_original_parameters.nc"
 INFLOW_FILE = STARFIT_DIR / "lake_inflow.nc"
 

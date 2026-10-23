@@ -21,18 +21,17 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-# ---- env-of-record check: WARN (never fail) if the active conda env
-# is not the one pws_phoenix/environment.yaml defines (see CLAUDE.md
-# "Environment"). Name-only comparison; HPC/CI contexts may
-# legitimately differ, and an unset CONDA_DEFAULT_ENV skips the check.
-expected_env=$(grep "^name:" environment.yaml 2>/dev/null |
-    head -n 1 | awk '{print $2}')
+# ---- env check: WARN (never fail) unless the active env's pws_phoenix
+# imports from THIS clone (its editable install). The former name check
+# against environment.yaml's `name:` broke with a second env per clone
+# (pwpx2); HPC/CI contexts may legitimately differ.
+installed=$(python -c "import pathlib, pws_phoenix; \
+print(pathlib.Path(pws_phoenix.__file__).resolve().parents[1])" 2>/dev/null)
 env_warning=""
-if [ -n "${CONDA_DEFAULT_ENV:-}" ] && [ -n "${expected_env}" ] &&
-    [ "${CONDA_DEFAULT_ENV}" != "${expected_env}" ]; then
-    env_warning="WARNING: active env '${CONDA_DEFAULT_ENV}' is not the \
-env of record '${expected_env}' (pws_phoenix/environment.yaml) -- \
-suggest: conda activate ${expected_env}"
+if [ "${installed}" != "$(pwd -P)" ]; then
+    env_warning="WARNING: active env '${CONDA_DEFAULT_ENV:-?}' imports \
+pws_phoenix from '${installed:-<not importable>}', not this clone \
+$(pwd -P) -- suggest: pip install -e . --no-deps in the right env"
     echo "${env_warning}"
     echo
 fi

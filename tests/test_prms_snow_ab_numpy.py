@@ -24,15 +24,15 @@ import tempfile
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA, PYWS_ROOT
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.hydrology.prms_snow import PRMSSnow
 from pws_phoenix.model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
 # pywatershed is used from the mpix-root repo clone (parity-test
 # convention; see test_starfit_daily_parity.py)
-sys.path.insert(0, str(MPIX_ROOT / "pywatershed"))
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+sys.path.insert(0, str(PYWS_ROOT))
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
 
 N_STEPS = 120
