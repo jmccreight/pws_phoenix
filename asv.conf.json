@@ -8,7 +8,7 @@
     "project": "pws_phoenix",
     "project_url": "https://github.com/EC-USGS/pws_phoenix",
     "repo": ".",
-    "branches": ["main"],
+    "branches": ["develop"],
     "dvcs": "git",
     "environment_type": "existing",
     "benchmark_dir": "benchmarks",

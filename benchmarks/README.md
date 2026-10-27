@@ -477,7 +477,7 @@ Row-1 numbers unchanged (chain step 9.54 ms, build 430 ms, zarr
     "project": "pws_phoenix",
     "project_url": "https://github.com/EC-USGS/pws_phoenix",
     "repo": ".",
-    "branches": ["main"],
+    "branches": ["develop"],
     "dvcs": "git",
     "environment_type": "existing",
     "benchmark_dir": "benchmarks",
