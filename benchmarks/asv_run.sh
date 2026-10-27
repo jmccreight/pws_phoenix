@@ -47,10 +47,16 @@ restore() { git checkout -q "$orig"; }
 trap restore EXIT
 
 mkdir -p .asv/env_lists
+# Resolve EVERY name before the first checkout: a relative name (HEAD,
+# a branch) resolved inside the loop would point at the hash checked
+# out by the previous iteration.
 full=()
 for hh in "${hashes[@]}"; do
-    hash=$(git rev-parse --verify "${hh}^{commit}")
-    full+=("$hash")
+    full+=("$(git rev-parse --verify "${hh}^{commit}")")
+done
+for ii in "${!hashes[@]}"; do
+    hh=${hashes[$ii]}
+    hash=${full[$ii]}
     echo "==> $hh ($hash)"
     git checkout -q "$hash"
     # ${arr[@]+"${arr[@]}"}: an EMPTY array is "unbound" under set -u
@@ -61,5 +67,6 @@ for hh in "${hashes[@]}"; do
 done
 
 if [[ ${#full[@]} -ge 2 ]]; then
-    asv compare --factor 1.1 "${full[0]}" "${full[-1]}"
+    # ${full[-1]} is a bash-4 negative subscript; 3.2 (macOS) rejects it
+    asv compare --factor 1.1 "${full[0]}" "${full[$(( ${#full[@]} - 1 ))]}"
 fi
