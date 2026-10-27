@@ -135,6 +135,13 @@ Keep the memory footprint lean and OBVIOUS. Concretely:
 3. Watch for hidden copies and call them out in review: deepcopy,
    np.asarray/astype on existing arrays, fancy indexing, xarray ops that
    materialize (selection on lazy datasets -- see test_ref_behaviors.py).
+4. The same principle in TIME: a process holds its fields' ndarray
+   references and never does `self._obj[name].values` inside a step
+   (`xr.Dataset.__getitem__` builds a DataArray per call, ~8-20 us; the
+   lookups were measured at 82-99% of every process step). Decided Oct
+   2026, not yet implemented -- `DEVELOPER.md` "Per-step data access"
+   has the numbers, the one-ndarray-per-name invariant (serial and MPI)
+   and the rules it imposes.
 
 # incarnations/mpixarray design notes
 

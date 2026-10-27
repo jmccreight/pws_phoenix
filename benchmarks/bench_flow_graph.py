@@ -5,6 +5,12 @@ the `flow_graph` process of each graph in `_flow_graph.GRAPHS`:
                          ProcessLifecycle.time_calculate(prms_channel)
                          = the per-node dispatch cost of the graph
                          kernel over the array muskingum
+    ucb_graph_channel    control: ucb's 1942 segments, one-type graph
+                         (network size alone)
+    drb_graph_all_types_class
+                         control: the seven-type class on the plain
+                         drb network, every node a channel
+                         (class composition alone)
     ucb_graph_all_types  1942 segments + 11 inserted nodes, all seven
                          node types in one 24-substep cfs graph
 

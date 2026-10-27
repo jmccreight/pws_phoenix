@@ -100,6 +100,10 @@ with the pins, so a regenerated oracle shows up as a reviewed key bump.
 See CLAUDE.md for design notes and discussion (incl. the xarray-simlab /
 Landlab comparisons distilled from the retired xr design summary).
 
+Decided designs, with their evidence and the invariants they impose on a
+`Process`, are written up in `DEVELOPER.md` (first entry: per-step data
+access -- hold the ndarray, not the Dataset lookup).
+
 1. Within process parallelism (over space): embarassing parallel; DAG ordered parallelism
 2. Use xarray accessor pattern (?)
 3. Define chunking in control, particularly time chunking (handle time buffering internally on in put and output classes)

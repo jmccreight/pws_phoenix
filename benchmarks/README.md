@@ -261,7 +261,7 @@ benchmark. Ledger (first cut = row 1; later rows are the plan):
 | fgr_ag_2yr `spinup.control` (`fgr_spinup`)                        | PRMSRunoffAg, PRMSSoilzoneAg, PRMSAtmosphereTranspFrost                          |
 | fgr_ag_2yr `analysis.control` (`fgr_analysis`)                    | PRMSSoilzoneAgObsET, PRMSAtmosphereTranspFrostDyn (dyn_springfrost_flag)         |
 | hand-built drb segment grid (`_common.HAND_BUILT`: `drb_seg_hg_full` = HydraulicGeometryFull -> ConstantShade with live `seg_flow_width`; `drb_seg_humid`), fed the `output_stream_temp/` answers as disk forcings -- `model_from_control` cannot build them (`resolve_classes` never picks HydraulicGeometryFull, no control sets `stream_temp_shade_flag=1`, `assemble_from_control` refuses the SegHumidity leaf) | PRMSHydraulicGeometryFull, PRMSStreamTempConstantShade, PRMSStreamTempSegHumidity |
-| FlowGraphs (`_flow_graph.GRAPHS`): `drb_graph_channel` = the drb network as a pure channel graph; `ucb_graph_all_types` = the ucb network (1942 segments) with the mixed test's Big Sandy chain + a daily-STARFIT chain + a STARFIT-source-sink chain + a neutral source_sink splice + an obsin headwater (11 inserted nodes, one 24-substep cfs graph) | all seven node types: PRMSChannelFlowNode, PassThroughFlowNode, StarfitFlowNode, StarfitDailyFlowNode, StarfitSourceSinkFlowNode, ObsInFlowNode, SourceSinkFlowNode |
+| FlowGraphs (`_flow_graph.GRAPHS`): `drb_graph_channel` = the drb network as a pure channel graph; two controls for the per-node-substep attribution (Oct 27 findings, below): `ucb_graph_channel` = the ucb network as the same one-type graph (size alone), `drb_graph_all_types_class` = the seven-type class on the plain drb network, every node a channel (composition alone); `ucb_graph_all_types` = the ucb network (1942 segments) with the mixed test's Big Sandy chain + a daily-STARFIT chain + a STARFIT-source-sink chain + a neutral source_sink splice + an obsin headwater (11 inserted nodes, one 24-substep cfs graph) | all seven node types: PRMSChannelFlowNode, PassThroughFlowNode, StarfitFlowNode, StarfitDailyFlowNode, StarfitSourceSinkFlowNode, ObsInFlowNode, SourceSinkFlowNode |
 
 Rows 2-5 are `bench_process.ProcessVariants` (Oct 27, 2026): the
 same four timings as `ProcessLifecycle`, `params = _common.VARIANT_ROWS`
@@ -289,23 +289,33 @@ compile; tune after the first run), `timeout = 900`.
 ### `benchmarks/_common.py` (no benchmarks)
 
 ```python
-PWS_TEST_DATA = pl.Path(os.environ.get("PWS_TEST_DATA", MPIX_ROOT / "pywatershed" / "test_data"))
+PWS_TEST_DATA = pl.Path(
+    os.environ.get("PWS_TEST_DATA", MPIX_ROOT / "pywatershed" / "test_data")
+)
 DRB = PWS_TEST_DATA / "drb_2yr"
 FGR = PWS_TEST_DATA / "fgr_ag_2yr"
 CONTROL = DRB / "nhm_stream_temp.control"
-CONTROLS = {"drb_stream_temp": CONTROL, "drb_no_dprst": ..., "fgr_spinup": ..., "fgr_analysis": ...}
+CONTROLS = {
+    "drb_stream_temp": CONTROL,
+    "drb_no_dprst": ...,
+    "fgr_spinup": ...,
+    "fgr_analysis": ...,
+}
 DT = np.float64(86400.0)
-PROCESS_NAMES = [...]            # the 9 keys above
-VARIANT_ROWS = ["drb_no_dprst/prms_runoff", ...]   # section 4 ledger rows 2-4
+PROCESS_NAMES = [...]  # the 9 keys above
+VARIANT_ROWS = ["drb_no_dprst/prms_runoff", ...]  # section 4 ledger rows 2-4
+
 
 def build_model(label="drb_stream_temp", control=None) -> Model:
     return model_from_control(CONTROLS[label], control)
 
-def get_model(label="drb_stream_temp") -> Model:   # built + warmed once per subprocess per control
+
+# built + warmed once per subprocess per control
+def get_model(label="drb_stream_temp") -> Model:
     if label not in _MODELS:
         model = build_model(label)
         model.run(DT, np.int32(1))
-        _unfreeze_parameters_internal(model)   # see time_initialize
+        _unfreeze_parameters_internal(model)  # see time_initialize
         _MODELS[label] = model
     return _MODELS[label]
 ```
@@ -337,6 +347,29 @@ Build cost of a process = `time_init + time_initialize`; per-step
 cost = `time_advance + time_calculate`. Dataset assembly
 (`Model._add_process_fields`) and Map resolution are Model-side and
 appear only in the whole-model numbers below.
+
+`ProcessKernel.time_kernel` (`params = KERNEL_ROWS`, "control/process",
+Oct 27, 2026): the bare njit call below `calculate()`,
+`kernel(*args)`, so `time_calculate - time_kernel` is the
+Python/xarray share of a step (the `self._obj[name].values` lookups
+and scalar prep). No per-process plumbing: `_common.capture_kernel`
+records the arguments of ONE `calculate()` -- `_calculate` is a
+`@staticmethod` on the class, so an instance attribute of the same
+name shadows it for that call -- and `get_kernel(row)` keeps
+`(kernel, args)` per subprocess. The args are the model's own buffers,
+so replays drift the state exactly as `time_calculate` does. Rows =
+the processes whose `calculate()` is lookups + one `self._calculate`
+call (the capture raises on any other count): the seven drb
+single-kernel processes, the three NoDprst variants,
+HydraulicGeometryFull. Not rows -- their step is several njit calls
+stitched in Python: `prms_atmosphere` (base + ccov + transpiration
+kernels), the stream-temperature family (five module kernels + the
+shade hook), `PRMSRunoffAg` (`_calculate` + `_post_areas`),
+`PRMSSoilzoneAg`/`AgObsET` (pre/calculate/post, the obs-ET loop in
+Python). Each could be ONE njit `_calculate` per leaf (njit-to-njit
+calls are free; the obs-ET iteration can move into numba) -- agreed
+Oct 27 as a later redesign, after which the spy applies unchanged and
+they join `KERNEL_ROWS`.
 
 ### `benchmarks/bench_model.py` -- whole-model numbers
 
@@ -396,12 +429,10 @@ timed: the whole MPI path is outside the first cut (below).
 
 (The coverage ledger of section 4 is complete as of Oct 27, 2026.)
 
-- `time_kernel_<process>`: the bare `_calculate` njit call, below the
-  `.values` extraction -- kernel vs Python/xarray overhead per
-  process. Needs per-process argument plumbing. **Now the next item**:
-  the Oct 27 numbers show the overhead matters (the channel graph
-  beats PRMSChannel 4x; see below) and it is what would confirm the
-  ag soilzone kernel's per-HRU cost.
+- `time_kernel` for the multi-kernel processes (atmosphere, stream
+  temperature, RunoffAg, SoilzoneAg/AgObsET): waits on the
+  one-njit-`_calculate`-per-leaf redesign (see `ProcessKernel` above).
+  The ag soilzone per-HRU cost is the number waiting on it.
 - Individual Maps (`time_map_apply` per Map, incl. the MapMPI
   Allreduce under MPI) and Inputs (`Input.advance` / `set_index`).
 - MPI: ASV runs its subprocess under plain `python`, not `mpirun`. An
@@ -433,7 +464,7 @@ Row-1 numbers unchanged (chain step 9.54 ms, build 430 ms, zarr
 | what | value | reading |
 | ---- | ----- | ------- |
 | `drb_graph_channel/time_calculate` vs `prms_channel` | 43.8 µs vs 185 µs | the GRAPH beats the array channel 4x on the same 456 segments and inflows: ~11k node-substeps in 44 µs (~4 ns each), so PRMSChannel's 185 µs is mostly not muskingum arithmetic -- likely the per-call `self._obj[name].values` lookups and the lateral-inflow sum. `time_kernel_<process>` would settle it. |
-| `ucb_graph_all_types/time_calculate` | 839 µs = 1953 nodes x 24 substeps, ~18 ns each | 4.5x the one-type graph's per-node cost -- NOT yet attributable: the network is 4.3x larger (cache) and the class composes 7 types (the `literal_unroll` if-chain; channel is code 0, first). Control rows to add: ucb as a pure channel graph (size alone) and the 7-type class on the plain drb network with every node a channel (composition alone). Even if all dispatch: 0.8 ms/step on ucb, ~0.15 ms on drb, vs a ~10 ms chain step -- not worth a design change (node order is topological and must stay order-exact; a function-pointer table is the only lever and gains little). |
+| `ucb_graph_all_types/time_calculate` | 839 µs = 1953 nodes x 24 substeps, ~18 ns each | 4.5x the one-type graph's per-node cost. ATTRIBUTED by the two control rows (dry run, same session): per node-substep `drb_graph_channel` 4.0 ns, `ucb_graph_channel` 5.5 ns (size alone: 1.4x), `drb_graph_all_types_class` 15.6 ns (composition alone: 3.9x), `ucb_graph_all_types` 18.7 ns (= 4.0 x 1.4 x 3.9 within 10%). So the seven-type CLASS costs ~12 ns per node-substep even when every node is a channel (code 0, first in the `literal_unroll` chain) -- more than seven compares; the composed kernel is a bigger function over a wider state namedtuple, so inlining/register allocation of the substep body likely changes, not just the branch. Not pursued: 0.13 ms/step on drb, 0.6 ms on ucb, vs a ~10 ms chain step (node order is topological and must stay order-exact; a function-pointer table is the only lever and gains little). |
 | ag soilzone per HRU | drb PRMSSoilzone 1.65 ms/765 = 2.2 µs; fgr SoilzoneAg 4.40 ms/612 = 7.2 µs; SoilzoneAgObsET 5.52 ms/612 = 9.0 µs | the dual-area kernel is ~3.3x per HRU BEFORE the obs-ET iteration (+25%): the shared-kernel superset design runs both area paths on every ag HRU. Confirm with the kernel-only timing. |
 | NoDprst variants | runoff 781 µs vs 1.63 ms; soilzone 1.36 vs 1.65 ms; gw 230 vs 291 µs | cheaper, as expected |
 | `time_initialize` of every stream-temp leaf | ~21 ms | the topology resolution, independent of leaf |

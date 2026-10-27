@@ -117,6 +117,31 @@ VARIANT_ROWS = [
 ]
 
 
+# "label/process" rows of bench_process.ProcessKernel: the processes
+# whose calculate() is `.values` lookups + ONE `self._calculate(...)`
+# njit call (the kernel the spy in capture_kernel can record). NOT
+# rows, by the same test: prms_atmosphere (base kernel + ccov +
+# transpiration kernels), prms_stream_temp and its variants (five
+# module-level kernels + the shade hook), fgr's PRMSRunoffAg
+# (_calculate + _post_areas) and PRMSSoilzoneAg/AgObsET (pre/
+# calculate/post kernels, the obs-ET iteration in Python) -- each
+# gets a row once it has one njit entry (README "Not in the first
+# cut").
+KERNEL_ROWS = [
+    "drb_stream_temp/prms_canopy",
+    "drb_stream_temp/prms_snow",
+    "drb_stream_temp/prms_runoff",
+    "drb_stream_temp/prms_soilzone",
+    "drb_stream_temp/prms_groundwater",
+    "drb_stream_temp/prms_channel",
+    "drb_stream_temp/prms_hydraulic_geometry",
+    "drb_no_dprst/prms_runoff",
+    "drb_no_dprst/prms_soilzone",
+    "drb_no_dprst/prms_groundwater",
+    "drb_seg_hg_full/prms_hydraulic_geometry",
+]
+
+
 def split_row(row: str) -> tuple[str, str]:
     """A "label/process" row -> (CONTROLS key, process_dict key)."""
     label, name = row.split("/")
@@ -269,6 +294,47 @@ def get_model(label: str = "drb_stream_temp") -> Model:
         _unfreeze_parameters_internal(model)
         _MODELS[label] = model
     return _MODELS[label]
+
+
+def capture_kernel(proc, time) -> tuple:
+    """Record what one calculate() hands its njit kernel: `_calculate`
+    is a staticmethod on the class, so an instance attribute of the
+    same name shadows it for one call. Returns (kernel, args); the
+    args are the model's own buffers and the scalars of `time`, so
+    replaying `kernel(*args)` is exactly the kernel's share of
+    calculate() -- and drifts the state the same way time_calculate
+    does. The recording call advances the state by one kernel step."""
+    kernel = type(proc)._calculate
+    calls = []
+
+    def spy(*args):
+        calls.append(args)
+        kernel(*args)
+
+    proc._calculate = spy
+    try:
+        proc.calculate(DT, time)
+    finally:
+        del proc._calculate
+    if len(calls) != 1:
+        raise RuntimeError(
+            f"{type(proc).__name__}.calculate called _calculate "
+            f"{len(calls)} times; not a single-kernel process"
+        )
+    return kernel, calls[0]
+
+
+_KERNELS: dict[str, tuple] = {}
+
+
+def get_kernel(row: str) -> tuple:
+    """(kernel, args) of a KERNEL_ROWS row, captured once per
+    subprocess on the shared model of its control."""
+    if row not in _KERNELS:
+        label, name = split_row(row)
+        model = get_model(label)
+        _KERNELS[row] = capture_kernel(model.model_dict[name], model.time)
+    return _KERNELS[row]
 
 
 _OUTPUT_VAR_NAMES: list[str] | None = None

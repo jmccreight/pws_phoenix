@@ -26,6 +26,9 @@ from pws_phoenix.process import Process
 sys.path.insert(0, str(pl.Path(__file__).resolve().parents[1]))
 from benchmarks._common import (  # noqa: E402
     BENCHMARKED_DATA,
+    KERNEL_ROWS,
+    PROCESS_NAMES,
+    VARIANT_ROWS,
     benchmarked_classes,
     covered_process_classes,
 )
@@ -83,6 +86,13 @@ def test_variant_rows_add_new_classes_only():
     a class no other row does."""
     by_row = benchmarked_classes()
     assert len(set(by_row.values())) == len(by_row), by_row
+
+
+def test_kernel_rows_have_calculate_rows():
+    """time_calculate - time_kernel is the point: every kernel row is
+    also a lifecycle row (ProcessLifecycle or ProcessVariants)."""
+    lifecycle_rows = {f"drb_stream_temp/{nn}" for nn in PROCESS_NAMES}
+    assert set(KERNEL_ROWS) <= lifecycle_rows | set(VARIANT_ROWS)
 
 
 def test_flow_node_types_covered():

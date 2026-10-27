@@ -1,10 +1,19 @@
 """FlowGraph models for the benchmarks (bench_flow_graph.py; no
-benchmarks in here). Two graphs (README section 4 ledger):
+benchmarks in here). Four graphs (README section 4 ledger):
 
     drb_graph_channel    the drb segment network as a pure channel
                          graph (456 nodes, tests/test_flow_graph.py
                          "pure_channel") -- its calculate against
                          PRMSChannel's is the scalar-node dispatch cost
+    ucb_graph_channel    control: the ucb network (1942 segments) as
+                         the same one-type channel graph -- network
+                         SIZE alone against drb_graph_channel
+    drb_graph_all_types_class
+                         control: the SEVEN-type class on the plain
+                         drb network, every node a channel (the
+                         reservoir/obsin/source_sink columns declared
+                         but unused) -- class COMPOSITION alone, the
+                         literal_unroll chain at the same 456 nodes
     ucb_graph_all_types  the ucb network (1942 segments) with EVERY
                          node type spliced in: the mixed test's Big
                          Sandy chain (PT -> starfit -> PT above nhm_seg
@@ -74,6 +83,8 @@ ALL_TYPES = (
 # label -> node types composed; checked by tests/test_benchmark_coverage.py
 GRAPHS: dict[str, tuple] = {
     "drb_graph_channel": (PRMSChannelFlowNode,),
+    "ucb_graph_channel": (PRMSChannelFlowNode,),
+    "drb_graph_all_types_class": ALL_TYPES,
     "ucb_graph_all_types": ALL_TYPES,
 }
 BENCHMARKED_NODE_TYPES = {
@@ -229,16 +240,74 @@ def _nor_midpoint_initial_storage(bs, init_date) -> float:
     return float(bs["GRanD_CAP_MCM"]) * pct_res_cap
 
 
-def _all_types_graph(domain: str) -> Model:
-    channel, dis_seg, node_vol_input = _domain(domain)
-    n_seg = dis_seg.sizes["nsegment"]
-    nhm_seg = dis_seg["nhm_seg"].values
-    graph_class = make_flow_graph(
+def _all_types_class():
+    return make_flow_graph(
         ALL_TYPES,
         class_name="BenchAllTypesFlowGraph",
         n_substeps=N_SUBSTEPS,
         io_in_cfs=True,
     )
+
+
+def _all_types_extras(n_nodes: int, times) -> tuple[dict, dict]:
+    """What the seven-type class DECLARES beyond the channel's fields,
+    with no member rows: every STARFIT parameter nan, flow_min and
+    source_sink_storage_min zero, obs_flow -1 (pass through) and a
+    zero source_sink request on every node. The type hooks only read
+    their own rows, so a graph with no reservoir/obsin/source_sink
+    nodes runs on these as-is."""
+    extra_params = {
+        nn: np.full(n_nodes, np.nan)
+        for nn, mm in StarfitFlowNode.fields.items()
+        if mm.kind == "parameter"
+    }
+    extra_params["flow_min"] = np.zeros(n_nodes)
+    extra_params["source_sink_storage_min"] = np.zeros(n_nodes)
+
+    def flat_input(name, fill):
+        return xr.DataArray(
+            np.full((times.shape[0], n_nodes), fill),
+            dims=("time", "nnodes"),
+            coords={"time": times},
+            name=name,
+        )
+
+    extra_inputs = {
+        "node_obs_flow": flat_input("node_obs_flow", -1.0),
+        "node_source_sink": flat_input("node_source_sink", 0.0),
+    }
+    return extra_params, extra_inputs
+
+
+def _all_types_class_channel_graph(domain: str) -> Model:
+    """The seven-type class on the plain network, every node a channel."""
+    channel, dis_seg, node_vol_input = _domain(domain)
+    n_seg = dis_seg.sizes["nsegment"]
+    graph_class = _all_types_class()
+    to_graph_index = dis_seg["tosegment"].values.astype(np.int64) - 1
+    node_type = np.full(
+        n_seg, graph_class.node_type_code("prms_channel"), dtype=np.int64
+    )
+    times = node_vol_input("sroff_vol", 0)["time"].values
+    extra_params, extra_inputs = _all_types_extras(n_seg, times)
+    return _graph_model(
+        dis_seg,
+        channel,
+        node_vol_input,
+        graph_class,
+        to_graph_index,
+        node_type,
+        0,
+        extra_params,
+        extra_inputs,
+    )
+
+
+def _all_types_graph(domain: str) -> Model:
+    channel, dis_seg, node_vol_input = _domain(domain)
+    n_seg = dis_seg.sizes["nsegment"]
+    nhm_seg = dis_seg["nhm_seg"].values
+    graph_class = _all_types_class()
 
     # appended nodes: three PT -> reservoir -> PT chains, a neutral
     # source_sink splice, an obsin headwater
@@ -316,19 +385,12 @@ def _all_types_graph(domain: str) -> Model:
         new["starfit_daily"],
         new["starfit_source_sink"],
     ]
-    extra_params = {}
-    for nn, mm in StarfitFlowNode.fields.items():
-        if mm.kind != "parameter":
-            continue
-        vals = np.full(n_nodes, np.nan)
-        if nn != "initial_storage":
-            vals[reservoir_rows] = float(big_sandy[nn])
-        extra_params[nn] = vals
-    extra_params["flow_min"] = np.zeros(n_nodes)
-    extra_params["source_sink_storage_min"] = np.zeros(n_nodes)
+    times = node_vol_input("sroff_vol", n_extra)["time"].values
+    extra_params, extra_inputs = _all_types_extras(n_nodes, times)
+    for nn in extra_params:
+        if nn in StarfitFlowNode.fields and nn != "initial_storage":
+            extra_params[nn][reservoir_rows] = float(big_sandy[nn])
 
-    node_vol = node_vol_input("sroff_vol", n_extra)  # for the time axis
-    times = node_vol["time"].values
     init_date = (
         (times[0] - np.timedelta64(1, "D"))
         .astype("datetime64[s]")
@@ -340,21 +402,11 @@ def _all_types_graph(domain: str) -> Model:
         * cms_to_cfs  # cfs graph: MCM -> Mcf (cm_to_cf == cms_to_cfs)
     )
 
-    # -- per-step inputs (all nodes; non-member rows never read) --
-    def flat_input(name, fill):
-        return xr.DataArray(
-            np.full((times.shape[0], n_nodes), fill),
-            dims=("time", "nnodes"),
-            coords={"time": times},
-            name=name,
-        )
-
-    source_sink = flat_input("node_source_sink", 0.0)  # neutral splice
-    source_sink.values[:, new["starfit_source_sink"]] = SOURCE_SINK_REQUEST
-    extra_inputs = {
-        "node_obs_flow": flat_input("node_obs_flow", -1.0),  # pass through
-        "node_source_sink": source_sink,
-    }
+    # -- per-step inputs: the source_sink splice stays neutral (0.0),
+    # the obsin headwater passes through (-1.0); the combined node sinks
+    extra_inputs["node_source_sink"].values[:, new["starfit_source_sink"]] = (
+        SOURCE_SINK_REQUEST
+    )
     return _graph_model(
         dis_seg,
         channel,
@@ -371,6 +423,10 @@ def _all_types_graph(domain: str) -> Model:
 def build_graph_model(label: str) -> Model:
     if label == "drb_graph_channel":
         return _channel_graph("drb_2yr")
+    if label == "ucb_graph_channel":
+        return _channel_graph("ucb_2yr")
+    if label == "drb_graph_all_types_class":
+        return _all_types_class_channel_graph("drb_2yr")
     if label == "ucb_graph_all_types":
         return _all_types_graph("ucb_2yr")
     raise KeyError(label)
