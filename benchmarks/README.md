@@ -398,8 +398,10 @@ timed: the whole MPI path is outside the first cut (below).
 
 - `time_kernel_<process>`: the bare `_calculate` njit call, below the
   `.values` extraction -- kernel vs Python/xarray overhead per
-  process. Needs per-process argument plumbing; add once the numbers
-  above show the overhead matters.
+  process. Needs per-process argument plumbing. **Now the next item**:
+  the Oct 27 numbers show the overhead matters (the channel graph
+  beats PRMSChannel 4x; see below) and it is what would confirm the
+  ag soilzone kernel's per-HRU cost.
 - Individual Maps (`time_map_apply` per Map, incl. the MapMPI
   Allreduce under MPI) and Inputs (`Input.advance` / `set_index`).
 - MPI: ASV runs its subprocess under plain `python`, not `mpirun`. An
@@ -422,6 +424,19 @@ HRUs / 456 segments, medians:
 | `peakmem_imports` / `_model_build` / `_chain_warm` / `_chain_run` | 333 / 505-558 / 658 / 666-724 MB (±50 MB run to run) |
 | `track_step_alloc_bytes`               | 5.6 kB over 30 steps (≈190 B/step of xarray/pandas bookkeeping; one hru array is 6 kB) |
 | `time_output_zarr`                     | 204 ms for 134 variables x 30 steps                        |
+
+### Coverage-run numbers (Oct 27, 2026; same machine/env; commit 574e528)
+
+Row-1 numbers unchanged (chain step 9.54 ms, build 430 ms, zarr
+205 ms; `track_step_alloc_bytes` 7.2 kB, noise level). Findings:
+
+| what | value | reading |
+| ---- | ----- | ------- |
+| `drb_graph_channel/time_calculate` vs `prms_channel` | 43.8 µs vs 185 µs | the GRAPH beats the array channel 4x on the same 456 segments and inflows: ~11k node-substeps in 44 µs (~4 ns each), so PRMSChannel's 185 µs is mostly not muskingum arithmetic -- likely the per-call `self._obj[name].values` lookups and the lateral-inflow sum. `time_kernel_<process>` would settle it. |
+| `ucb_graph_all_types/time_calculate` | 839 µs = 1953 nodes x 24 substeps, ~18 ns each | 4.5x the one-type graph's per-node cost -- NOT yet attributable: the network is 4.3x larger (cache) and the class composes 7 types (the `literal_unroll` if-chain; channel is code 0, first). Control rows to add: ucb as a pure channel graph (size alone) and the 7-type class on the plain drb network with every node a channel (composition alone). Even if all dispatch: 0.8 ms/step on ucb, ~0.15 ms on drb, vs a ~10 ms chain step -- not worth a design change (node order is topological and must stay order-exact; a function-pointer table is the only lever and gains little). |
+| ag soilzone per HRU | drb PRMSSoilzone 1.65 ms/765 = 2.2 µs; fgr SoilzoneAg 4.40 ms/612 = 7.2 µs; SoilzoneAgObsET 5.52 ms/612 = 9.0 µs | the dual-area kernel is ~3.3x per HRU BEFORE the obs-ET iteration (+25%): the shared-kernel superset design runs both area paths on every ag HRU. Confirm with the kernel-only timing. |
+| NoDprst variants | runoff 781 µs vs 1.63 ms; soilzone 1.36 vs 1.65 ms; gw 230 vs 291 µs | cheaper, as expected |
+| `time_initialize` of every stream-temp leaf | ~21 ms | the topology resolution, independent of leaf |
 
 ## 6. asv.conf.json
 
