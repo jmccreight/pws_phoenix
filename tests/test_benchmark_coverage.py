@@ -25,15 +25,21 @@ from pws_phoenix.process import Process
 # the benchmarks package is not installed; it lives at the repo root
 sys.path.insert(0, str(pl.Path(__file__).resolve().parents[1]))
 from benchmarks._common import (  # noqa: E402
-    BENCHMARKED_CONTROLS,
-    BENCHMARKED_NODE_TYPES,
+    BENCHMARKED_DATA,
+    benchmarked_classes,
     covered_process_classes,
 )
+from benchmarks._flow_graph import (  # noqa: E402
+    BENCHMARKED_NODE_TYPES,
+    graph_data_files,
+)
 
-_missing = [str(ff) for ff in BENCHMARKED_CONTROLS if not ff.exists()]
+_missing = [
+    str(ff) for ff in BENCHMARKED_DATA + graph_data_files() if not ff.exists()
+]
 pytestmark = pytest.mark.skipif(
     bool(_missing),
-    reason="benchmarked control files missing: " + ", ".join(_missing),
+    reason="benchmarked data files missing: " + ", ".join(_missing),
 )
 
 PROCESS_PACKAGES = (pws_phoenix.hydrology, pws_phoenix.atmosphere)
@@ -42,33 +48,9 @@ PROCESS_PACKAGES = (pws_phoenix.hydrology, pws_phoenix.atmosphere)
 # cannot tell): never instantiated, never benchmarked
 ABSTRACT_BASES = {"PRMSAtmosphereBase", "PRMSStreamTempBase"}
 
-# the shrinking lists -- the README ledger's remaining rows
-PROCESSES_NOT_YET_COVERED = {
-    # drb nhm_no_dprst.control
-    "PRMSGroundwaterNoDprst",
-    "PRMSRunoffNoDprst",
-    "PRMSSoilzoneNoDprst",
-    # fgr_ag_2yr ag controls
-    "PRMSRunoffAg",
-    "PRMSSoilzoneAg",
-    "PRMSSoilzoneAgObsET",
-    # drb nhm_transp_frost.control (+ dyn frost flags)
-    "PRMSAtmosphereTranspFrost",
-    "PRMSAtmosphereTranspFrostDyn",
-    # drb stream-temp variants
-    "PRMSStreamTempSegHumidity",
-    "PRMSStreamTempConstantShade",
-    "PRMSHydraulicGeometryFull",
-}
-NODE_TYPES_NOT_YET_COVERED = {
-    "PRMSChannelFlowNode",
-    "PassThroughFlowNode",
-    "StarfitFlowNode",
-    "StarfitDailyFlowNode",
-    "ObsInFlowNode",
-    "SourceSinkFlowNode",
-    "StarfitSourceSinkFlowNode",
-}
+# the shrinking lists -- the README ledger's remaining rows (none)
+PROCESSES_NOT_YET_COVERED: set[str] = set()  # all covered (Oct 2026)
+NODE_TYPES_NOT_YET_COVERED: set[str] = set()  # all covered (Oct 2026)
 
 
 def _import_all(package) -> list[str]:
@@ -91,8 +73,16 @@ def test_process_classes_covered():
         if cls.__module__ in modules
     } - ABSTRACT_BASES
     covered = covered_process_classes()
-    assert covered <= in_scope  # the benchmarked controls resolve to real classes
+    # the benchmarked controls resolve to real classes
+    assert covered <= in_scope
     assert in_scope - covered == PROCESSES_NOT_YET_COVERED
+
+
+def test_variant_rows_add_new_classes_only():
+    """The no-repeat rule: each benchmarked (control, slot) row times
+    a class no other row does."""
+    by_row = benchmarked_classes()
+    assert len(set(by_row.values())) == len(by_row), by_row
 
 
 def test_flow_node_types_covered():

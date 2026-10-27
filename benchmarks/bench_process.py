@@ -12,9 +12,20 @@ Build cost of a process = time_init + time_initialize; per-step cost
 = time_advance + time_calculate. Repeated calls without an
 ``advance`` between them drift the state -- the wall clock is right,
 the values are not a physics run (README section 4).
+
+``ProcessVariants`` = the same four timings for the ledger's other
+controls (``_common.VARIANT_ROWS``, "label/process"): only the slots
+whose class the CONTROL model lacks, one shared model per control.
 """
 
-from benchmarks._common import DT, PROCESS_NAMES, TIMING_ATTRS, get_model
+from benchmarks._common import (
+    DT,
+    PROCESS_NAMES,
+    TIMING_ATTRS,
+    VARIANT_ROWS,
+    get_model,
+    split_row,
+)
 
 
 class ProcessLifecycle:
@@ -39,4 +50,27 @@ class ProcessLifecycle:
 
     def time_calculate(self, name):
         model = get_model()
+        model.model_dict[name].calculate(DT, model.time)
+
+
+class ProcessVariants(ProcessLifecycle):
+    params = VARIANT_ROWS
+    param_names = ["control/process"]
+
+    def time_init(self, row):
+        label, name = split_row(row)
+        proc = get_model(label).model_dict[name]
+        type(proc)(proc._obj)
+
+    def time_initialize(self, row):
+        label, name = split_row(row)
+        get_model(label).model_dict[name].initialize()
+
+    def time_advance(self, row):
+        label, name = split_row(row)
+        get_model(label).model_dict[name].advance()
+
+    def time_calculate(self, row):
+        label, name = split_row(row)
+        model = get_model(label)
         model.model_dict[name].calculate(DT, model.time)

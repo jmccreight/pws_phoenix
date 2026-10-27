@@ -254,14 +254,31 @@ no-skips policy's analogue): every class in `Process._registry` and
 every node-type module in `hydrology/` must be named by some
 benchmark. Ledger (first cut = row 1; later rows are the plan):
 
-| model / control                                   | classes it adds                                                                  |
-| ------------------------------------------------- | -------------------------------------------------------------------------------- |
-| drb `nhm_stream_temp.control`                     | the nine above (PRMSAtmosphere, PRMSHydraulicGeometryWidthOnly, PRMSStreamTemp leaves) |
-| drb `nhm_no_dprst.control`                        | PRMSGroundwaterNoDprst, PRMSRunoffNoDprst, PRMSSoilzoneNoDprst                   |
-| fgr_ag_2yr (ag controls)                          | PRMSRunoffAg, PRMSSoilzoneAg, PRMSSoilzoneAgObsET                                |
-| drb `nhm_transp_frost.control`                    | PRMSAtmosphereTranspFrost{,Dyn}                                                  |
-| drb stream-temp variants (seg_humid matrix/scalar; constant shade) | PRMSStreamTempSegHumidity, PRMSStreamTempConstantShade, PRMSHydraulicGeometryFull |
-| drb FlowGraph (channel + pass-through + reservoirs; `tests/test_flow_graph.py` geometry) | FlowGraph kernel per node type: PRMSChannelFlowNode, PassThroughFlowNode, StarfitFlowNode, StarfitDailyFlowNode, ObsInFlowNode, SourceSinkFlowNode, StarfitSourceSinkFlowNode |
+| model / control (`_common.CONTROLS` label)                        | classes it adds                                                                  |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| drb `nhm_stream_temp.control` (`drb_stream_temp`)                 | the nine above (PRMSAtmosphere, PRMSHydraulicGeometryWidthOnly, PRMSStreamTemp leaves) |
+| drb `nhm_no_dprst.control` (`drb_no_dprst`)                       | PRMSGroundwaterNoDprst, PRMSRunoffNoDprst, PRMSSoilzoneNoDprst                   |
+| fgr_ag_2yr `spinup.control` (`fgr_spinup`)                        | PRMSRunoffAg, PRMSSoilzoneAg, PRMSAtmosphereTranspFrost                          |
+| fgr_ag_2yr `analysis.control` (`fgr_analysis`)                    | PRMSSoilzoneAgObsET, PRMSAtmosphereTranspFrostDyn (dyn_springfrost_flag)         |
+| hand-built drb segment grid (`_common.HAND_BUILT`: `drb_seg_hg_full` = HydraulicGeometryFull -> ConstantShade with live `seg_flow_width`; `drb_seg_humid`), fed the `output_stream_temp/` answers as disk forcings -- `model_from_control` cannot build them (`resolve_classes` never picks HydraulicGeometryFull, no control sets `stream_temp_shade_flag=1`, `assemble_from_control` refuses the SegHumidity leaf) | PRMSHydraulicGeometryFull, PRMSStreamTempConstantShade, PRMSStreamTempSegHumidity |
+| FlowGraphs (`_flow_graph.GRAPHS`): `drb_graph_channel` = the drb network as a pure channel graph; `ucb_graph_all_types` = the ucb network (1942 segments) with the mixed test's Big Sandy chain + a daily-STARFIT chain + a STARFIT-source-sink chain + a neutral source_sink splice + an obsin headwater (11 inserted nodes, one 24-substep cfs graph) | all seven node types: PRMSChannelFlowNode, PassThroughFlowNode, StarfitFlowNode, StarfitDailyFlowNode, StarfitSourceSinkFlowNode, ObsInFlowNode, SourceSinkFlowNode |
+
+Rows 2-5 are `bench_process.ProcessVariants` (Oct 27, 2026): the
+same four timings as `ProcessLifecycle`, `params = _common.VARIANT_ROWS`
+= `"label/process"` strings naming ONLY the slots whose class row 1
+lacks (e.g. `drb_no_dprst/prms_runoff`; the no_dprst control's other
+six slots are the row-1 classes and are not repeated).
+`test_variant_rows_add_new_classes_only` enforces the no-repeat rule.
+Row 6 is `bench_flow_graph.FlowGraphLifecycle` (same four timings on
+the `flow_graph` process; `_flow_graph.get_graph_model(label)`); the
+all-types graph is a TIMING composition, not a validated scenario (Big
+Sandy's parameters on every reservoir row). Both ledgers are now
+empty: `PROCESSES_NOT_YET_COVERED` and `NODE_TYPES_NOT_YET_COVERED`
+in the test are `set()`.
+drb `nhm_transp_frost.control` and ucb `nhm_transp_frost.control` add
+nothing the fgr controls do not. `get_model(label)` keeps one warmed
+model per control in the subprocess; `bench_model.py` uses only
+`drb_stream_temp`.
 
 ## 5. Benchmark inventory
 
@@ -274,27 +291,32 @@ compile; tune after the first run), `timeout = 900`.
 ```python
 PWS_TEST_DATA = pl.Path(os.environ.get("PWS_TEST_DATA", MPIX_ROOT / "pywatershed" / "test_data"))
 DRB = PWS_TEST_DATA / "drb_2yr"
+FGR = PWS_TEST_DATA / "fgr_ag_2yr"
 CONTROL = DRB / "nhm_stream_temp.control"
+CONTROLS = {"drb_stream_temp": CONTROL, "drb_no_dprst": ..., "fgr_spinup": ..., "fgr_analysis": ...}
 DT = np.float64(86400.0)
 PROCESS_NAMES = [...]            # the 9 keys above
+VARIANT_ROWS = ["drb_no_dprst/prms_runoff", ...]   # section 4 ledger rows 2-4
 
-def build_model(control=None) -> Model:
-    return model_from_control(CONTROL, control)
+def build_model(label="drb_stream_temp", control=None) -> Model:
+    return model_from_control(CONTROLS[label], control)
 
-def get_model() -> Model:         # built + warmed once per subprocess, then reused
-    global _MODEL
-    if _MODEL is None:
-        _MODEL = build_model()
-        _MODEL.run(DT, np.int32(1))
-        _unfreeze_parameters_internal(_MODEL)   # see time_initialize
-    return _MODEL
+def get_model(label="drb_stream_temp") -> Model:   # built + warmed once per subprocess per control
+    if label not in _MODELS:
+        model = build_model(label)
+        model.run(DT, np.int32(1))
+        _unfreeze_parameters_internal(model)   # see time_initialize
+        _MODELS[label] = model
+    return _MODELS[label]
 ```
 
 ### `benchmarks/bench_process.py` -- per-process lifecycle costs (the primary set)
 
-One class, `params = PROCESS_NAMES`, `param_names = ["process"]`.
-Each method fetches `model = get_model()` and `proc =
-model.model_dict[name]`, then performs exactly one call:
+`ProcessLifecycle`: `params = PROCESS_NAMES`, `param_names =
+["process"]`. Each method fetches `model = get_model()` and `proc =
+model.model_dict[name]`, then performs exactly one call
+(`ProcessVariants` repeats the four for `VARIANT_ROWS` on
+`get_model(label)` -- section 4):
 
 | benchmark          | the call                                        | what it is                                                                                                                                                                    |
 | ------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -337,6 +359,19 @@ warm-up iterations + samples (`number = 10`, `warmup_time = 2 s` at
 ~9 ms/step ≈ 340 steps). `Model.run` past the end of the time axis
 raises.
 
+### `benchmarks/bench_flow_graph.py` -- FlowGraph lifecycle
+
+`FlowGraphLifecycle`, `params = list(_flow_graph.GRAPHS)` (section 4,
+row 6): `time_init` / `time_initialize` / `time_advance` /
+`time_calculate` on `get_graph_model(label).model_dict["flow_graph"]`.
+`drb_graph_channel/time_calculate` against
+`ProcessLifecycle.time_calculate(prms_channel)` = the scalar-node
+dispatch cost of the graph kernel over the array muskingum (same 456
+segments, same inflows -- pre-aggregated hru volumes, no Maps).
+`ucb_graph_all_types` is the `literal_unroll` dispatch at its widest
+(seven types). Graph building lives in `benchmarks/_flow_graph.py`
+(the tests' splice arithmetic, minus pytest).
+
 ### `benchmarks/bench_output.py` -- the serial zarr writer alone
 
 | benchmark          | the call                                                                                                                                                                                                  |
@@ -359,8 +394,8 @@ timed: the whole MPI path is outside the first cut (below).
 
 ### Not in the first cut
 
-- The other models of the coverage ledger (section 4) and the
-  FlowGraph node-type benchmark.
+(The coverage ledger of section 4 is complete as of Oct 27, 2026.)
+
 - `time_kernel_<process>`: the bare `_calculate` njit call, below the
   `.values` extraction -- kernel vs Python/xarray overhead per
   process. Needs per-process argument plumbing; add once the numbers
