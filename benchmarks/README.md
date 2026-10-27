@@ -461,13 +461,41 @@ HRUs / 456 segments, medians:
 Row-1 numbers unchanged (chain step 9.54 ms, build 430 ms, zarr
 205 ms; `track_step_alloc_bytes` 7.2 kB, noise level). Findings:
 
-| what | value | reading |
+| what | value | interpretation |
 | ---- | ----- | ------- |
 | `drb_graph_channel/time_calculate` vs `prms_channel` | 43.8 µs vs 185 µs | the GRAPH beats the array channel 4x on the same 456 segments and inflows: ~11k node-substeps in 44 µs (~4 ns each), so PRMSChannel's 185 µs is mostly not muskingum arithmetic -- likely the per-call `self._obj[name].values` lookups and the lateral-inflow sum. `time_kernel_<process>` would settle it. |
 | `ucb_graph_all_types/time_calculate` | 839 µs = 1953 nodes x 24 substeps, ~18 ns each | 4.5x the one-type graph's per-node cost. ATTRIBUTED by the two control rows (dry run, same session): per node-substep `drb_graph_channel` 4.0 ns, `ucb_graph_channel` 5.5 ns (size alone: 1.4x), `drb_graph_all_types_class` 15.6 ns (composition alone: 3.9x), `ucb_graph_all_types` 18.7 ns (= 4.0 x 1.4 x 3.9 within 10%). So the seven-type CLASS costs ~12 ns per node-substep even when every node is a channel (code 0, first in the `literal_unroll` chain) -- more than seven compares; the composed kernel is a bigger function over a wider state namedtuple, so inlining/register allocation of the substep body likely changes, not just the branch. Not pursued: 0.13 ms/step on drb, 0.6 ms on ucb, vs a ~10 ms chain step (node order is topological and must stay order-exact; a function-pointer table is the only lever and gains little). |
 | ag soilzone per HRU | drb PRMSSoilzone 1.65 ms/765 = 2.2 µs; fgr SoilzoneAg 4.40 ms/612 = 7.2 µs; SoilzoneAgObsET 5.52 ms/612 = 9.0 µs | the dual-area kernel is ~3.3x per HRU BEFORE the obs-ET iteration (+25%): the shared-kernel superset design runs both area paths on every ag HRU. Confirm with the kernel-only timing. |
 | NoDprst variants | runoff 781 µs vs 1.63 ms; soilzone 1.36 vs 1.65 ms; gw 230 vs 291 µs | cheaper, as expected |
 | `time_initialize` of every stream-temp leaf | ~21 ms | the topology resolution, independent of leaf |
+
+### After the `_refs` cache (Oct 27, 2026; `asv compare --factor 1.1 --machine LaNueva 5d8e402 414ff9d`)
+
+`Process.__init__` now captures one ndarray per declared field and
+every step method reads `refs[name]` (DEVELOPER.md "Per-step data
+access"). Same machine/env; the before commit is the baseline
+recorded earlier the same day.
+
+Speed-up = before/after (>1 faster, <1 slower); asv's own `Ratio`
+column is the inverse (after/before), and its `+`/`-` flags mark
+slower/faster.
+
+| benchmark | before | after | speed-up | interpretation |
+| --------- | ------ | ----- | -------- | ------- |
+| `ChainStep.time_chain_step` | 9.80 ms | 1.92 ms | 5.1x | the nine `time_calculate` rows now sum to ~0.57 ms (stream temp 0.36 of it), so ~1.3 ms of the step is framework: 13 Maps, `Output.collect_current_timestep`, and `self.times[tt].values` (`model.py:710`, the same `__getitem__` pattern once per step) |
+| `ProcessLifecycle.time_calculate` | 190 us - 1.70 ms | 2.2 - 64 us (stream temp 362 us) | 5x (channel), 2.3x (stream temp), 25-160x (the rest) | each within a few us of its `time_kernel` row: gw 2.15 vs 1.77, canopy 3.75 vs 3.30, channel 36.3 vs 36.0, soilzone 51.5 vs 49.2, runoff 64.0 vs 63.1, snow 16.9 vs 7.3 (scalar-param prep + 74-arg dispatch) |
+| `ProcessLifecycle.time_advance` | 15 - 179 us | 0.24 - 0.93 us | 65-190x | the `*_previous` copies were ~all lookup |
+| `ProcessLifecycle.time_initialize` | 52 us - 2.63 ms | 1.3 us - 1.22 ms | 2-90x | same reason; stream temp's 21.5 ms (topology) and runoff's 1.22 ms (numba init kernel) are unchanged because they were never lookups |
+| `ProcessLifecycle.time_init` | ~160 ns | 82 us - 1.74 ms | 0.002-0.0001x (SLOWER, by design) | construction now pays the lookups ONCE (one `.values` per declared field) instead of every step paying them; asv flags every `time_init` row `+` for this |
+| `ProcessVariants.time_calculate` | 71 us - 5.44 ms | 1.9 - 360 us | 2x (humid stream temp), 5x (HG full), 12-130x (the rest) | ag soilzone 4.39 ms -> 36.7 us (spinup), 5.44 ms -> 41.8 us (obs-ET analysis): the "3.3x per HRU" reading above was lookups, not the dual-area kernel; the obs-ET loop is now visible as +5 us |
+| `ProcessVariants.time_init` | ~250 ns | 67 us - 3.55 ms | 0.004-0.00008x (SLOWER, by design) | as `ProcessLifecycle.time_init`; the ag soilzone's 3.55 ms = its ~180 declared fields |
+| `FlowGraphLifecycle.*` | | | 1.0-1.07x (unchanged); `time_init` slower as above | the graph already held its arrays in the state namedtuple |
+| `track_step_alloc_bytes` | 6.75 kB | 6.71 kB | -- | no new per-step allocation |
+| `ModelBuild`, `PeakMemory`, `OutputZarr` | | | within noise | |
+
+Next targets, in order of size: the ~1.3 ms framework share of the
+chain step; the four multi-kernel processes (stream temp 362 us has no
+kernel row yet).
 
 ## 6. asv.conf.json
 

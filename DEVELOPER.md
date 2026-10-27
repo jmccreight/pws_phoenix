@@ -51,6 +51,16 @@ halves side by side:
 | channel               | 188 us    | 34.5 us | 20      | 7.7 us     |
 | hydraulic geometry    | 91 us     | 5.4 us  | 11      | 7.8 us     |
 
+After the `_refs` cache (`asv compare 5d8e402 414ff9d`, same machine):
+canopy 3.8 us, snow 16.9 us, runoff (no_dprst) 28.2 us, soilzone
+(no_dprst) 48.0 us, groundwater (no_dprst) 1.9 us, channel 36.3 us,
+hydraulic geometry 5.6 us -- each within a few us of its kernel (the
+remainder = numba dispatch over long argument lists + scalar
+parameter prep; snow's 9 us is the largest). Chain step 9.80 ms ->
+1.92 ms. `time_init` grew by exactly the moved cost (one `.values`
+per declared field, once per run: snow 1.63 ms). Full table:
+`benchmarks/README.md` "After the `_refs` cache".
+
 The physics is 0.5-18% of a step. The remainder is the lookups, at a
 cost that is constant within a grid (~20 us on the hru dataset, ~8 us
 on the smaller segment dataset) -- which is what makes the attribution
