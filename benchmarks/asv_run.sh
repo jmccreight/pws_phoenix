@@ -53,7 +53,10 @@ for hh in "${hashes[@]}"; do
     full+=("$hash")
     echo "==> $hh ($hash)"
     git checkout -q "$hash"
-    asv run --show-stderr --set-commit-hash "$hash" "${extra_args[@]}"
+    # ${arr[@]+"${arr[@]}"}: an EMPTY array is "unbound" under set -u
+    # in bash 3.2 (macOS); this expands to nothing instead of failing
+    asv run --show-stderr --set-commit-hash "$hash" \
+        ${extra_args[@]+"${extra_args[@]}"}
     conda list --export > ".asv/env_lists/${hash}.txt"
 done
 
