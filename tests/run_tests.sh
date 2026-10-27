@@ -20,6 +20,7 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
+start_s=${SECONDS}
 
 # ---- env check: WARN (never fail) unless the active env's pws_phoenix
 # imports from THIS clone (its editable install). The former name check
@@ -58,10 +59,12 @@ for ff in tests/test_*_mpi.py; do
 done
 
 echo
+elapsed=$(( SECONDS - start_s ))
+elapsed="$(( elapsed / 60 ))m$(( elapsed % 60 ))s"
 if [ "${failures}" -eq 0 ]; then
-    echo "==== ALL SUITES PASSED"
+    echo "==== ALL SUITES PASSED (in ${elapsed})"
 else
-    echo "==== ${failures} SUITE(S) FAILED"
+    echo "==== ${failures} SUITE(S) FAILED (in ${elapsed})"
 fi
 # repeat the env warning: the top of the output is long gone by now
 if [ -n "${env_warning}" ]; then

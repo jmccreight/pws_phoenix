@@ -9,8 +9,9 @@ ModelMPI) live in model.py.
 What is a Process?
 ------------------
 A Process is a stateful, accessor-style view of its grid's ONE shared
-dataset: it stores self._obj (the dataset) and exposes advance() and
-calculate(dt, time) as instance methods. It does not own or build its
+dataset: it stores self._obj (the dataset) and self._refs (one ndarray
+reference per declared field, captured once at bind -- what advance()
+and calculate(dt, time) read) and exposes those as instance methods. It does not own or build its
 dataset -- the Model assembles one shared dataset per grid
 (discretization) from its processes' field declarations and binds each
 process to it directly (serial: Model._add_process_fields; MPI:
@@ -178,7 +179,8 @@ _FILL_VALUE: dict[type, object] = {
 class Process(ABC):
     """Accessor-style ABC: a view of its grid's shared dataset.
 
-    Stores self._obj (the dataset, bound by the Model) and dispatches
+    Stores self._obj (the dataset, bound by the Model) and self._refs
+    (its fields' ndarrays, captured once) and dispatches
     advance()/calculate(). Subclasses declare fields as DataArrayMeta
     class attributes and auto-register in Process._registry via
     __init_subclass__.
@@ -196,10 +198,9 @@ class Process(ABC):
                 flow[:] = flow_previous * 0.95 + forcing
 
             def calculate(self, dt: np.float64, time: Time) -> None:
+                refs = self._refs
                 self._calculate(
-                    self._obj["flow"].values,
-                    self._obj["flow_previous"].values,
-                    self._obj["forcing_up"].values,
+                    refs["flow"], refs["flow_previous"], refs["forcing_up"]
                 )
     """
 
@@ -221,6 +222,15 @@ class Process(ABC):
 
     def __init__(self, xarray_obj: xr.Dataset) -> None:
         self._obj = xarray_obj
+        # One ndarray reference per declared field, captured ONCE at bind
+        # (DEVELOPER.md "Per-step data access"): advance()/calculate()
+        # read these, never `self._obj[name].values` (an xr.Dataset
+        # lookup, ~20 us each). The MPI rebind (ModelMPI.run) does NOT
+        # recapture -- the arrays behind the names never move.
+        self._refs: dict[str, np.ndarray] = {
+            name: xarray_obj[name].values
+            for name in _resolved_fields(type(self))
+        }
 
     def __getitem__(self, key: str) -> xr.DataArray:
         """Subscript delegates to the bound dataset (a process is a view of its
@@ -233,7 +243,7 @@ class Process(ABC):
         loop. Compute `kind="parameter_internal"` fields in place here
         (e.g. Muskingum coefficients from mann_n + dis variables); the
         Model freezes them (read-only) after all hooks run. Contract:
-        LOCAL (no collectives), reads params/dis vars off self._obj, no
+        LOCAL (no collectives), reads params/dis vars off self._refs, no
         Time (construction, not runtime)."""
 
     @abstractmethod

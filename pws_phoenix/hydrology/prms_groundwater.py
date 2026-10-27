@@ -162,7 +162,7 @@ class PRMSGroundwaterNoDprst(Process):
     # ------------------------------------------------------------------
 
     def advance(self) -> None:
-        self._obj["gwres_stor_old"].values[:] = self._obj["gwres_stor"].values
+        self._refs["gwres_stor_old"][:] = self._refs["gwres_stor"]
 
     @staticmethod
     @numba.njit
@@ -201,18 +201,18 @@ class PRMSGroundwaterNoDprst(Process):
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         self._calculate(
-            self._obj["gwres_stor"].values,
-            self._obj["gwres_flow"].values,
-            self._obj["gwres_sink"].values,
-            self._obj["gwres_stor_change"].values,
-            self._obj["gwres_flow_vol"].values,
-            self._obj["gwres_stor_old"].values,
-            self._obj["soil_to_gw"].values,
-            self._obj["ssr_to_gw"].values,
-            self._obj["hru_area"].values,
-            self._obj["hru_in_to_cf"].values,
-            self._obj["gwflow_coef"].values,
-            self._obj["gwsink_coef"].values,
+            self._refs["gwres_stor"],
+            self._refs["gwres_flow"],
+            self._refs["gwres_sink"],
+            self._refs["gwres_stor_change"],
+            self._refs["gwres_flow_vol"],
+            self._refs["gwres_stor_old"],
+            self._refs["soil_to_gw"],
+            self._refs["ssr_to_gw"],
+            self._refs["hru_area"],
+            self._refs["hru_in_to_cf"],
+            self._refs["gwflow_coef"],
+            self._refs["gwsink_coef"],
         )
 
 
@@ -275,17 +275,17 @@ class PRMSGroundwater(PRMSGroundwaterNoDprst):
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         self._calculate(
-            self._obj["gwres_stor"].values,
-            self._obj["gwres_flow"].values,
-            self._obj["gwres_sink"].values,
-            self._obj["gwres_stor_change"].values,
-            self._obj["gwres_flow_vol"].values,
-            self._obj["gwres_stor_old"].values,
-            self._obj["soil_to_gw"].values,
-            self._obj["ssr_to_gw"].values,
-            self._obj["dprst_seep_hru"].values,
-            self._obj["hru_area"].values,
-            self._obj["hru_in_to_cf"].values,
-            self._obj["gwflow_coef"].values,
-            self._obj["gwsink_coef"].values,
+            self._refs["gwres_stor"],
+            self._refs["gwres_flow"],
+            self._refs["gwres_sink"],
+            self._refs["gwres_stor_change"],
+            self._refs["gwres_flow_vol"],
+            self._refs["gwres_stor_old"],
+            self._refs["soil_to_gw"],
+            self._refs["ssr_to_gw"],
+            self._refs["dprst_seep_hru"],
+            self._refs["hru_area"],
+            self._refs["hru_in_to_cf"],
+            self._refs["gwflow_coef"],
+            self._refs["gwsink_coef"],
         )

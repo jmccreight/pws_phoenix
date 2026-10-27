@@ -7,7 +7,7 @@ Upper and Lower: concrete Process subclasses for the toy Upper/Lower model.
   - Auto-registered in Process._registry via __init_subclass__.
   - Instantiated by the Model with the grid's shared dataset: cls(grid_ds).
   - advance(self) / calculate(self, dt, time) are instance methods using
-    self._obj.
+    self._refs (the fields' ndarrays, captured once at bind).
   - _calculate is a @staticmethod taking raw numpy arrays, compiled with
     @numba.njit (nopython -- uncompilable code raises, no silent
     object-mode fallback). Convention: the output buffer(s) come first
@@ -69,7 +69,7 @@ class Upper(Process):
     # ------------------------------------------------------------------
 
     def advance(self) -> None:
-        self._obj["flow_previous"].values[:] = self._obj["flow"].values
+        self._refs["flow_previous"][:] = self._refs["flow"]
 
     @staticmethod
     @numba.njit
@@ -84,11 +84,11 @@ class Upper(Process):
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         # param_up_1 is cyclic-monthly; index by current month (a view)
-        param_up_1_now = self._obj["param_up_1"].values[time.month - 1]
+        param_up_1_now = self._refs["param_up_1"][time.month - 1]
         self._calculate(
-            self._obj["flow"].values,
-            self._obj["flow_previous"].values,
-            self._obj["forcing_up"].values,
+            self._refs["flow"],
+            self._refs["flow_previous"],
+            self._refs["forcing_up"],
             param_up_1_now,
             dt,
         )
@@ -142,7 +142,7 @@ class Lower(Process):
     # ------------------------------------------------------------------
 
     def advance(self) -> None:
-        self._obj["storage_previous"].values[:] = self._obj["storage"].values
+        self._refs["storage_previous"][:] = self._refs["storage"]
 
     @staticmethod
     @numba.njit
@@ -161,9 +161,9 @@ class Lower(Process):
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         self._calculate(
-            self._obj["storage"].values,
-            self._obj["storage_previous"].values,
-            self._obj["flow"].values,
-            self._obj["forcing_low"].values,
+            self._refs["storage"],
+            self._refs["storage_previous"],
+            self._refs["flow"],
+            self._refs["forcing_low"],
             dt,
         )

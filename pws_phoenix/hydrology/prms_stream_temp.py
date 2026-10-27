@@ -1056,8 +1056,8 @@ class PRMSStreamTempBase(Process):
     # ------------------------------------------------------------------
 
     def initialize(self) -> None:
-        obj = self._obj
-        nsegment = obj["seg_length"].values.shape[0]
+        refs = self._refs
+        nsegment = refs["seg_length"].shape[0]
 
         for name in (
             "seg_tave_gw",
@@ -1065,36 +1065,36 @@ class PRMSStreamTempBase(Process):
             "seg_tave_lat",
             "seg_shade",
         ):
-            obj[name].values[:] = 0.0
-        obj["seg_tave_water"].values[:] = -99.9
-        obj["seg_tave_upstream"].values[:] = np.nan
+            refs[name][:] = 0.0
+        refs["seg_tave_water"][:] = -99.9
+        refs["seg_tave_upstream"][:] = np.nan
 
         # seg_length validation + m -> km (upstream edits the param)
-        seg_length = obj["seg_length"].values
+        seg_length = refs["seg_length"]
         if (seg_length < NEARZERO).any():
             raise ValueError(
                 "seg_length too small for segments "
                 f"{np.where(seg_length < NEARZERO)[0]}"
             )
-        obj["seg_length_km"].values[:] = seg_length / 1000.0
+        refs["seg_length_km"][:] = seg_length / 1000.0
 
         # seg_slope clamp (upstream edits the param; derived copy here)
-        obj["_seg_slope"].values[:] = np.where(
-            obj["seg_slope"].values < 0.0000001,
+        refs["_seg_slope"][:] = np.where(
+            refs["seg_slope"] < 0.0000001,
             0.0000001,
-            obj["seg_slope"].values,
+            refs["seg_slope"],
         )
 
-        obj["_seg_lat_rad"].values[:] = obj["seg_lat"].values * (np.pi / 180.0)
+        refs["_seg_lat_rad"][:] = refs["seg_lat"] * (np.pi / 180.0)
 
         # scalar parameters
-        self._albedo = float(obj["albedo"].values[0])
-        self._melt_temp = float(obj["melt_temp"].values[0])
-        self._maxiter = int(obj["maxiter_sntemp"].values[0])
+        self._albedo = float(refs["albedo"][0])
+        self._melt_temp = float(refs["melt_temp"][0])
+        self._maxiter = int(refs["maxiter_sntemp"][0])
 
         # segment HRU areas (never-flow walk only in this class)
-        hru_segment = obj["hru_segment"].values
-        hru_area = obj["hru_area"].values
+        hru_segment = refs["hru_segment"]
+        hru_area = refs["hru_area"]
         segment_hruarea = np.zeros(nsegment, dtype=np.float64)
         for jhru in range(hru_segment.shape[0]):
             seg_idx = hru_segment[jhru]
@@ -1103,7 +1103,7 @@ class PRMSStreamTempBase(Process):
         self._segment_hruarea = segment_hruarea
 
         # upstream segment info (tosegment 1-based scan; max 10)
-        tosegment = obj["tosegment"].values
+        tosegment = refs["tosegment"]
         self._upstream_count = np.zeros(nsegment, dtype=np.int32)
         self._upstream_idx = np.zeros((nsegment, 10), dtype=np.int32)
         for jseg in range(nsegment):
@@ -1116,7 +1116,7 @@ class PRMSStreamTempBase(Process):
 
         # never-has-flow marking (upstream init, verbatim walk): a
         # segment without HRUs anywhere upstream can never have flow
-        seg_tave_water = obj["seg_tave_water"].values
+        seg_tave_water = refs["seg_tave_water"]
         for iseg in range(nsegment):
             if segment_hruarea[iseg] <= NEARZERO:
                 has_upstream_hrus = False
@@ -1170,78 +1170,76 @@ class PRMSStreamTempBase(Process):
         pass  # silos/indices persist; no *_prev variables
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         doy = time.doy  # 1-based
         declination = float(self._declination[doy - 1])
         summer_flag = 1 if 121 <= doy <= 273 else 0
 
         _update_running_avg_temp(
-            obj["segment_order"].values,
-            obj["seg_tave_water"].values,
-            obj["seginc_swrad"].values,
-            obj["seg_tave_air"].values,
-            obj["gw_tau"].values,
+            refs["segment_order"],
+            refs["seg_tave_water"],
+            refs["seginc_swrad"],
+            refs["seg_tave_air"],
+            refs["gw_tau"],
             self._gw_index,
             self._gw_silo,
             self._gw_sum,
-            obj["seg_tave_gw"].values,
-            obj["ss_tau"].values,
+            refs["seg_tave_gw"],
+            refs["ss_tau"],
             self._ss_index,
             self._ss_silo,
             self._ss_sum,
-            obj["seg_tave_ss"].values,
+            refs["seg_tave_ss"],
         )
 
         _compute_lateral_temp(
-            obj["segment_order"].values,
-            obj["seg_tave_water"].values,
-            obj["seginc_swrad"].values,
-            obj["seg_lateral_inflow"].values,
-            obj["seginc_sroff"].values,
-            obj["seginc_ssflow"].values,
-            obj["seginc_gwflow"].values,
-            obj["seg_melt"].values,
-            obj["seg_rain"].values,
-            obj["seg_tave_gw"].values,
-            obj["seg_tave_air"].values,
-            obj["seg_tave_ss"].values,
+            refs["segment_order"],
+            refs["seg_tave_water"],
+            refs["seginc_swrad"],
+            refs["seg_lateral_inflow"],
+            refs["seginc_sroff"],
+            refs["seginc_ssflow"],
+            refs["seginc_gwflow"],
+            refs["seg_melt"],
+            refs["seg_rain"],
+            refs["seg_tave_gw"],
+            refs["seg_tave_air"],
+            refs["seg_tave_ss"],
             self._melt_temp,
-            obj["lat_temp_adj"].values,
+            refs["lat_temp_adj"],
             time.month,
-            obj["seg_tave_lat"].values,
+            refs["seg_tave_lat"],
         )
 
         # (upstream: zero each step; skipped segments keep 0.0)
-        obj["seg_tave_upstream"].values[:] = 0.0
+        refs["seg_tave_upstream"][:] = 0.0
 
         self._compute_shade(declination, summer_flag)
 
-        _reset_water_temp(
-            obj["segment_order"].values, obj["seg_tave_water"].values
-        )
+        _reset_water_temp(refs["segment_order"], refs["seg_tave_water"])
 
         _compute_water_temp(
-            obj["segment_order"].values,
-            obj["seg_tave_water"].values,
-            obj["seginc_swrad"].values,
-            obj["seg_outflow"].values,
+            refs["segment_order"],
+            refs["seg_tave_water"],
+            refs["seginc_swrad"],
+            refs["seg_outflow"],
             self._upstream_count,
             self._upstream_idx,
-            obj["seg_lateral_inflow"].values,
-            obj["seg_tave_upstream"].values,
+            refs["seg_lateral_inflow"],
+            refs["seg_tave_upstream"],
             self._seg_svi,
             self._seg_inflow,
-            obj["seg_tave_lat"].values,
-            obj["seginc_swrad"].values,
-            obj["seg_humid"].values,
-            obj["seg_elev"].values,
-            obj["seg_potet"].values,
-            obj["seg_shade"].values,
-            obj["seg_ccov"].values,
-            obj["seg_flow_width"].values,
-            obj["_seg_slope"].values,
-            obj["seg_tave_gw"].values,
-            obj["seg_length_km"].values,
+            refs["seg_tave_lat"],
+            refs["seginc_swrad"],
+            refs["seg_humid"],
+            refs["seg_elev"],
+            refs["seg_potet"],
+            refs["seg_shade"],
+            refs["seg_ccov"],
+            refs["seg_flow_width"],
+            refs["_seg_slope"],
+            refs["seg_tave_gw"],
+            refs["seg_length_km"],
             self._albedo,
             self._maxiter,
             False,  # track_energy_fluxes (upstream's own off-path)
@@ -1306,27 +1304,27 @@ class PRMSStreamTemp(PRMSStreamTempBase):
     vdwmn = _meta("parameter", "Min west bank vegetation density [-]")
 
     def _compute_shade(self, declination: float, summer_flag: int) -> None:
-        obj = self._obj
+        refs = self._refs
         _shade_all(
-            obj["seg_shade"].values,
+            refs["seg_shade"],
             self._seg_svi,
             declination,
             summer_flag,
-            obj["_seg_lat_rad"].values,
-            obj["seg_flow_width"].values,
-            obj["azrh"].values,
-            obj["alte"].values,
-            obj["altw"].values,
-            obj["vce"].values,
-            obj["voe"].values,
-            obj["vhe"].values,
-            obj["vdemx"].values,
-            obj["vdemn"].values,
-            obj["vcw"].values,
-            obj["vow"].values,
-            obj["vhw"].values,
-            obj["vdwmx"].values,
-            obj["vdwmn"].values,
+            refs["_seg_lat_rad"],
+            refs["seg_flow_width"],
+            refs["azrh"],
+            refs["alte"],
+            refs["altw"],
+            refs["vce"],
+            refs["voe"],
+            refs["vhe"],
+            refs["vdemx"],
+            refs["vdemn"],
+            refs["vcw"],
+            refs["vow"],
+            refs["vhw"],
+            refs["vdwmx"],
+            refs["vdwmn"],
             self._maxiter,
         )
 
@@ -1347,11 +1345,11 @@ class PRMSStreamTempConstantShade(PRMSStreamTempBase):
     )
 
     def _compute_shade(self, declination: float, summer_flag: int) -> None:
-        obj = self._obj
+        refs = self._refs
         if summer_flag == 1:
-            obj["seg_shade"].values[:] = obj["segshade_sum"].values
+            refs["seg_shade"][:] = refs["segshade_sum"]
         else:
-            obj["seg_shade"].values[:] = obj["segshade_win"].values
+            refs["seg_shade"][:] = refs["segshade_win"]
 
 
 class PRMSStreamTempSegHumidity(PRMSStreamTemp):
@@ -1376,14 +1374,12 @@ class PRMSStreamTempSegHumidity(PRMSStreamTemp):
 
     def initialize(self) -> None:
         super().initialize()
-        self._obj["seg_humid"].values[:] = 0.0
+        self._refs["seg_humid"][:] = 0.0
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         # upstream flag==1 path: Seg_humid(i) = Seg_humidity(i, Nowmonth)
-        obj["seg_humid"].values[:] = obj["seg_humidity"].values[
-            time.month - 1, :
-        ]
+        refs["seg_humid"][:] = refs["seg_humidity"][time.month - 1, :]
         super().calculate(dt, time)
 
 

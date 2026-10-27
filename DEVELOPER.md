@@ -7,9 +7,19 @@ README "Installation" and `CLAUDE.md`; the pywatershed port record is
 
 ## Per-step data access: hold the ndarray, not the Dataset lookup
 
-**Status (Oct 27, 2026): measured and decided; NOT yet implemented.**
+**Status (Oct 27, 2026): measured, decided, IMPLEMENTED** --
+`Process.__init__` captures `self._refs: dict[str, np.ndarray]` (one
+entry per declared field, `_resolved_fields`), and every
+`advance()`/`calculate()`/`initialize()` reads `refs[name]`; no
+`.values` inside a step anywhere in the package. The MPI rebind does
+not recapture (rule 2 below). `Model._validate_inputs_resolved` now
+runs BEFORE binding in both paths -- the capture is strict, so an
+unresolved input would otherwise surface as a bare `KeyError` at bind
+instead of the assembly-time `ValueError`. Full serial + MPI sweep
+green on the first run after the sweep. Before/after numbers: see
+`benchmarks/README.md`.
 
-### What a process step costs today
+### What a process step cost before
 
 A process reaches every field it uses through its grid dataset, once
 per step:
@@ -99,10 +109,12 @@ would fail them.
    input refills, Map targets (`Map.apply` already writes into
    `target_values`), restart restores (`_restore_grid_var`), warm-start
    seeding. Assigning `ds[name] = new_da` after bind is a bug.
-2. **A cache is captured at bind and at every rebind** (the MPI rebind
-   sets `proc._obj = step`; the capture must follow it). Cheapest
-   form: capture once at the first bind and ASSERT identity at
-   rebind in a debug mode, since the invariant says nothing moves.
+2. **The cache is captured ONCE, at bind, and NOT at the MPI rebind**
+   (`proc._obj = step` in `ModelMPI.run` only re-points the dataset).
+   Recapturing would re-pay the lookups every step; the invariant
+   says nothing moves, and `test_step_buffers_persist_across_rebinds`
+   plus every MPI parity test guard it. (A debug-mode identity assert
+   at rebind was considered and skipped.)
 3. **Freezing is fine.** The post-initialize `writeable = False` flag
    on `parameter_internal` arrays changes a flag on the same ndarray,
    not the array.
@@ -112,11 +124,9 @@ would fail them.
 
 ### Open
 
-- Implement: the per-process capture (`self._bufs: dict[str,
-  np.ndarray]`, or attributes), kernels called with those references;
-  `ModelMPI.run` recapture after rebind. Then re-run
-  `ProcessLifecycle.time_calculate` -- the number should fall to about
-  `time_kernel` plus numba dispatch (a few us for long argument lists).
+- Re-run `ProcessLifecycle.time_calculate` on the implemented cache --
+  expected to fall to about `time_kernel` plus numba dispatch (a few
+  us for long argument lists) plus ~40 ns per dict lookup.
 - The four multi-kernel processes (atmosphere, stream temperature,
   RunoffAg, SoilzoneAg/AgObsET) get one njit `_calculate` per leaf in
   the same pass (njit-to-njit calls are free; the obs-ET iteration can

@@ -330,7 +330,7 @@ model.model_dict[name]`, then performs exactly one call
 
 | benchmark          | the call                                        | what it is                                                                                                                                                                    |
 | ------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `time_init`        | `type(proc)(proc._obj)`                         | construction = binding to the grid dataset (`model.py:440`; `Process.__init__` is `self._obj = xarray_obj`, `process.py:222-223`)                                            |
+| `time_init`        | `type(proc)(proc._obj)`                         | construction = binding to the grid dataset + the `_refs` capture (one `.values` lookup per declared field; `Process.__init__`)                                            |
 | `time_initialize`  | `proc.initialize()`                             | the init hook: `parameter_internal` derivation (Muskingum coefficients, soilzone/runoff derived params); a no-op for processes without one (e.g. groundwater) -- still recorded |
 | `time_advance`     | `proc.advance()`                                | the `*_previous` copies                                                                                                                                                       |
 | `time_calculate`   | `proc.calculate(DT, model.time)`                | one step of physics incl. the `.values` extraction around the njit kernel                                                                                                     |
@@ -351,8 +351,8 @@ appear only in the whole-model numbers below.
 `ProcessKernel.time_kernel` (`params = KERNEL_ROWS`, "control/process",
 Oct 27, 2026): the bare njit call below `calculate()`,
 `kernel(*args)`, so `time_calculate - time_kernel` is the
-Python/xarray share of a step (the `self._obj[name].values` lookups
-and scalar prep). No per-process plumbing: `_common.capture_kernel`
+Python/xarray share of a step (before the `_refs` cache: the
+`self._obj[name].values` lookups; after: dict lookups + scalar prep). No per-process plumbing: `_common.capture_kernel`
 records the arguments of ONE `calculate()` -- `_calculate` is a
 `@staticmethod` on the class, so an instance attribute of the same
 name shadows it for that call -- and `get_kernel(row)` keeps

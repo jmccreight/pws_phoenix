@@ -270,7 +270,7 @@ class PRMSCanopy(Process):
     # ------------------------------------------------------------------
 
     def initialize(self) -> None:
-        obj = self._obj
+        refs = self._refs
         for name in (
             "net_ppt",
             "net_rain",
@@ -283,17 +283,17 @@ class PRMSCanopy(Process):
             "hru_intcpstor_change",
             "hru_intcpstor_old",
         ):
-            obj[name].values[:] = 0.0
-        obj["intcp_form"].values[:] = _RAIN  # upstream init 0
-        obj["intcp_transp_on"].values[:] = _OFF  # upstream init 0
+            refs[name][:] = 0.0
+        refs["intcp_form"][:] = _RAIN  # upstream init 0
+        refs["intcp_transp_on"][:] = _OFF  # upstream init 0
 
     # ------------------------------------------------------------------
     # Computation
     # ------------------------------------------------------------------
 
     def advance(self) -> None:
-        obj = self._obj
-        obj["hru_intcpstor_old"].values[:] = obj["hru_intcpstor"].values
+        refs = self._refs
+        refs["hru_intcpstor_old"][:] = refs["hru_intcpstor"]
 
     @staticmethod
     @numba.njit
@@ -476,33 +476,33 @@ class PRMSCanopy(Process):
             )
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         self._calculate(
-            obj["net_ppt"].values,
-            obj["net_rain"].values,
-            obj["net_snow"].values,
-            obj["intcp_changeover"].values,
-            obj["intcp_evap"].values,
-            obj["intcp_form"].values,
-            obj["intcp_stor"].values,
-            obj["intcp_transp_on"].values,
-            obj["hru_intcpevap"].values,
-            obj["hru_intcpstor"].values,
-            obj["hru_intcpstor_change"].values,
-            obj["pptmix"].values,
-            obj["hru_intcpstor_old"].values,
-            obj["pk_ice_prev"].values,
-            obj["freeh2o_prev"].values,
-            obj["transp_on"].values,
-            obj["hru_ppt"].values,
-            obj["hru_rain"].values,
-            obj["hru_snow"].values,
-            obj["potet"].values,
-            obj["cov_type"].values,
-            obj["covden_sum"].values,
-            obj["covden_win"].values,
-            obj["srain_intcp"].values,
-            obj["wrain_intcp"].values,
-            obj["snow_intcp"].values,
-            obj["potet_sublim"].values,
+            refs["net_ppt"],
+            refs["net_rain"],
+            refs["net_snow"],
+            refs["intcp_changeover"],
+            refs["intcp_evap"],
+            refs["intcp_form"],
+            refs["intcp_stor"],
+            refs["intcp_transp_on"],
+            refs["hru_intcpevap"],
+            refs["hru_intcpstor"],
+            refs["hru_intcpstor_change"],
+            refs["pptmix"],
+            refs["hru_intcpstor_old"],
+            refs["pk_ice_prev"],
+            refs["freeh2o_prev"],
+            refs["transp_on"],
+            refs["hru_ppt"],
+            refs["hru_rain"],
+            refs["hru_snow"],
+            refs["potet"],
+            refs["cov_type"],
+            refs["covden_sum"],
+            refs["covden_win"],
+            refs["srain_intcp"],
+            refs["wrain_intcp"],
+            refs["snow_intcp"],
+            refs["potet_sublim"],
         )
