@@ -8,3 +8,6 @@ pyrightconfig.json
 examples/[0-9][0-9]_*/
 
 *.egg-info/
+
+# ASV working directory (results/html/env; see benchmarks/README.md)
+.asv/

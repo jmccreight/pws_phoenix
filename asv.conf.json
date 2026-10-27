@@ -1,0 +1,18 @@
+{
+    // ASV (airspeed velocity) configuration -- design and rationale in
+    // benchmarks/README.md. "existing" = benchmark the working tree in
+    // the current conda env (the same as `asv run --python=same`);
+    // ASV neither builds an env nor installs the project, so results
+    // are saved only with `--set-commit-hash <hash>` (README section 3).
+    "version": 1,
+    "project": "pws_phoenix",
+    "project_url": "https://github.com/EC-USGS/pws_phoenix",
+    "repo": ".",
+    "branches": ["main"],
+    "dvcs": "git",
+    "environment_type": "existing",
+    "benchmark_dir": "benchmarks",
+    "env_dir": ".asv/env",
+    "results_dir": ".asv/results",
+    "html_dir": ".asv/html"
+}
