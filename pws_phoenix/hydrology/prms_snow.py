@@ -60,6 +60,7 @@ in parameters_PRMSSnow.nc.
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -92,7 +93,7 @@ _AMLT_INIT = np.array(
 # ----------------------------------------------------------------------
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_sca_deplcrv(snarea_curve, frac_swe):
     """Interpolate along snow covered area depletion curve."""
     if frac_swe > 1.0:
@@ -115,7 +116,7 @@ def calc_sca_deplcrv(snarea_curve, frac_swe):
     return res
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_calin(
     cal,
     den_max,
@@ -228,7 +229,7 @@ def calc_calin(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_caloss(
     cal,
     freeh2o,
@@ -285,7 +286,7 @@ def calc_caloss(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_ppt_to_pack(
     den_max,
     denmaxinv,
@@ -527,7 +528,7 @@ def calc_ppt_to_pack(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_snowcov(
     ai,
     frac_swe,
@@ -656,7 +657,7 @@ def calc_snowcov(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_snalbedo(
     albedo,
     albset_rna,
@@ -795,7 +796,7 @@ def calc_snalbedo(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_snowbal(
     niteda,
     cec,
@@ -1020,7 +1021,7 @@ def calc_snowbal(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_step_4(
     trd,
     canopy_covden,
@@ -1230,7 +1231,7 @@ def calc_step_4(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_snowevap(
     freeh2o,
     hru_intcpevap,
@@ -1896,7 +1897,7 @@ class PRMSSnow(Process):
         refs["pk_ice_prev"][:] = refs["pk_ice"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         ai: np.ndarray,

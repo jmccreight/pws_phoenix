@@ -49,6 +49,7 @@ Deliberately NOT ported (each documented in place or in CLAUDE.md):
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -408,7 +409,7 @@ class PRMSChannel(Process):
         self._refs["inflow_ts_prev"][:] = self._refs["seg_inflow"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         seg_lateral_inflow: np.ndarray,
         seg_upstream_inflow: np.ndarray,

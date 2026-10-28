@@ -42,6 +42,8 @@ import math
 import numba as nb
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
+
 # Constants from PRMS
 NEARZERO = 1e-6
 PI = np.pi
@@ -90,7 +92,8 @@ WEIGHT = np.array(
 )
 
 
-@nb.jit(nopython=True)  # upstream: parallel=True (not used here)
+# upstream: parallel=True (not used here)
+@nb.jit(nopython=True, cache=NUMBA_CACHE)
 def _shday_vectorized(
     seg_lat_rads,
     declination,
@@ -168,7 +171,7 @@ def _shday_vectorized(
     return shades, svis
 
 
-@nb.jit(nopython=True)
+@nb.jit(nopython=True, cache=NUMBA_CACHE)
 def _shday_statics(seg_lat, declination, azrh, alte, altw, maxiter_sntemp):
     """The seg_width-INDEPENDENT half of shday: the level-plain and
     topographic sunrise/sunset geometry of one segment on one solar
@@ -352,7 +355,7 @@ def _shday_statics(seg_lat, declination, azrh, alte, altw, maxiter_sntemp):
     return hrsr, hrrh, hrss, sti, totsh
 
 
-@nb.jit(nopython=True)
+@nb.jit(nopython=True, cache=NUMBA_CACHE)
 def _shday_from_statics(
     hrsr,
     hrrh,
@@ -430,7 +433,7 @@ def _shday_from_statics(
     return shade, svi
 
 
-@nb.jit(nopython=True)
+@nb.jit(nopython=True, cache=NUMBA_CACHE)
 def _shday(
     seg_lat,
     declination,
@@ -506,7 +509,7 @@ def _shday(
     )
 
 
-@nb.jit(nopython=True)
+@nb.jit(nopython=True, cache=NUMBA_CACHE)
 def _solalt(coso, sino, sin_d, az, almn, almx, maxiter_sntemp):
     """Determine solar altitude from trigonometric parameters.
 
@@ -567,7 +570,7 @@ def _solalt(coso, sino, sin_d, az, almn, almx, maxiter_sntemp):
     return al
 
 
-@nb.jit(nopython=True)
+@nb.jit(nopython=True, cache=NUMBA_CACHE)
 def _snr_sst(
     coso,
     sino,
@@ -697,7 +700,7 @@ def _snr_sst(
     return azs, als, hrs
 
 
-@nb.jit(nopython=True)
+@nb.jit(nopython=True, cache=NUMBA_CACHE)
 def _rprnvg(
     hrsr,
     hrrs,

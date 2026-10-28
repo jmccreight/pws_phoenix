@@ -17,6 +17,7 @@ Upper and Lower: concrete Process subclasses for the toy Upper/Lower model.
 
 import numba
 import numpy as np
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -72,7 +73,7 @@ class Upper(Process):
         self._refs["flow_previous"][:] = self._refs["flow"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         flow: np.ndarray,
         flow_previous: np.ndarray,
@@ -145,7 +146,7 @@ class Lower(Process):
         self._refs["storage_previous"][:] = self._refs["storage"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         storage: np.ndarray,
         storage_previous: np.ndarray,

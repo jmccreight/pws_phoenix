@@ -46,6 +46,7 @@ deliberately unused, see above).
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -67,7 +68,7 @@ _ACTIVE = 1
 _HRU_TYPE = _LAND
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def intercept(precip, stor_max, cov, intcp_stor, net_precip):
     net_precip = precip * (1.0 - cov)
     intcp_stor = intcp_stor + precip
@@ -296,7 +297,7 @@ class PRMSCanopy(Process):
         refs["hru_intcpstor_old"][:] = refs["hru_intcpstor"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         net_ppt: np.ndarray,

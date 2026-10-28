@@ -84,6 +84,7 @@ values, one shared field per grid).
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -114,7 +115,7 @@ _TWOTHIRDS = 2.0 / 3.0
 # ----------------------------------------------------------------------
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def compute_soilmoist(
     soil2gw_flag,
     perv_frac,
@@ -161,7 +162,7 @@ def compute_soilmoist(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def compute_interflow(coef_lin, coef_sq, ssres_in, storage, inter_flow):
     # inter_flow is in inches for the timestep
     if (coef_lin <= 0.0) and (ssres_in <= 0.0):
@@ -201,7 +202,7 @@ def compute_interflow(coef_lin, coef_sq, ssres_in, storage, inter_flow):
     return storage, inter_flow
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def compute_gwflow(ssr2gw_rate, ssr2gw_exp, slow_stor):
     # Compute flow to groundwater
     ssr_to_gw = max(0.0, ssr2gw_rate * slow_stor**ssr2gw_exp)
@@ -210,7 +211,7 @@ def compute_gwflow(ssr2gw_rate, ssr2gw_exp, slow_stor):
     return ssr_to_gw, slow_stor
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def compute_szactet(
     transp_on,
     cov_type,
@@ -1029,7 +1030,7 @@ class PRMSSoilzoneNoDprst(Process):
         refs["slow_stor_prev"][:] = refs["slow_stor"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         cap_infil_tot: np.ndarray,
@@ -1475,7 +1476,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
     # ------------------------------------------------------------------
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         cap_infil_tot: np.ndarray,

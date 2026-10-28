@@ -94,6 +94,8 @@ MPS_CONVERT = 2.93981481e-07
 # ----------------------------------------------------------------------
 # Module helpers -- upstream verbatim (appended by extraction)
 # ----------------------------------------------------------------------
+# NOT cache=True: these call prms_stream_shade.py's jitted helpers; a
+# cached caller never notices an edited callee (DEVELOPER.md "Numba cache").
 @nb.jit(nopython=True)
 def _teak1(a_coef, b_coef, c_coef, d_coef, teq, maxiter_sntemp):
     """Solve for equilibrium temperature using Newton-Raphson iteration.

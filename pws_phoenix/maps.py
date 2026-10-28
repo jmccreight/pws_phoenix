@@ -59,6 +59,8 @@ import numba
 import numpy as np
 import xarray as xr
 
+from pws_phoenix import NUMBA_CACHE
+
 
 def _compress_rows(weights: np.ndarray) -> tuple:
     """The nonzeros of ``weights`` by row: ``(indptr, cols, vals)``, row
@@ -71,7 +73,7 @@ def _compress_rows(weights: np.ndarray) -> tuple:
     return indptr, cols.astype(np.int64), weights[rows, cols]
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def _apply_sparse(target, indptr, cols, vals, source):
     """target = weights @ source over the nonzeros only; each row summed
     in column order (a dense BLAS product sums in its own blocked

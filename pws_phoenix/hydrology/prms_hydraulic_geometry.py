@@ -39,6 +39,7 @@ parameters_PRMSHydraulicGeometry*.nc.
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -159,7 +160,7 @@ class PRMSHydraulicGeometryWidthOnly(Process):
         pass  # no *_prev state
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # outputs (written in place)
         seg_flow_width: np.ndarray,

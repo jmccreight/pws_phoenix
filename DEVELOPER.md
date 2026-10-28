@@ -142,3 +142,73 @@ would fail them.
   RunoffAg, SoilzoneAg/AgObsET) get one njit `_calculate` per leaf in
   the same pass (njit-to-njit calls are free; the obs-ET iteration can
   move into numba), which also gives them `time_kernel` rows.
+
+## Numba cache: on for users, off for tests, opt-in per kernel
+
+`pws_phoenix.NUMBA_CACHE` (read once at import from `PWS_NUMBA_CACHE`;
+default on) feeds `@numba.njit(cache=NUMBA_CACHE)` on the kernels that
+opt in. A cached kernel skips its compile (seconds per process) on
+every later Python process: model runs, notebooks, benchmarks, each
+MPI rank. The files are `*.nbi`/`*.nbc` in `__pycache__` beside the
+source (gitignored).
+
+Opt out for a whole environment (the developer setting; see why below):
+
+    conda env config vars set PWS_NUMBA_CACHE=0 -n pwpx
+
+`tests/conftest.py` forces `PWS_NUMBA_CACHE=0` before the first
+`pws_phoenix` import, so every test run -- bare `pytest` or
+`run_tests.sh`, serial or per MPI rank -- compiles fresh. The suite
+never exercises the cached path; that path is numba's, not ours.
+
+### What invalidates the cache (numba 0.64, `numba/core/caching.py`)
+
+The index key is the call signature, the target machine, a hash of
+the function's bytecode and its closure cells; the stamp that
+invalidates an entry is the **defining file's** mtime and size.
+Nothing else is tracked. The `.nbc` holds the linked machine code of
+every jitted function the kernel calls and the frozen value of every
+global it reads (numba freezes module globals as constants).
+
+**If a caller has callees jitted in separate files, stale callees are
+not discovered by the caller.** Edit `prms_stream_shade.py`: its own
+helpers' entries invalidate, but `prms_stream_temp.py`'s `.nbc` still
+contains the old shade code and runs it -- wrong numbers, no error.
+The same for a constant imported from another module
+(`prms_atmosphere` freezes `solar_constants.solf`). Hence the rule:
+
+- opt in (`cache=NUMBA_CACHE`) only where every jitted callee and
+  every captured constant lives in the kernel's own file:
+  groundwater, runoff (+Ag, +NoDprst), soilzone (+NoDprst), canopy,
+  snow, channel, hydraulic geometry, stream shade, `maps.py`,
+  `processes_concrete.py`;
+- leave plain `@numba.njit`, with a comment naming the callee file:
+  `prms_stream_temp` (-> stream shade), `prms_soilzone_ag` (->
+  soilzone), `starfit_source_sink_flow_node` and
+  `starfit_daily_flow_node` (-> starfit_flow_node), `prms_atmosphere`
+  (-> solar_constants), and the FlowGraph kernel (built per
+  composition; closes over the node types' Dispatcher tuples).
+
+Helpers may be cached freely: a stale helper entry is only ever read
+by a caller that is itself fresh. And under `pip install -e` a
+developer who edits a file with the cache on is still safe for the
+opt-in set -- numba's own file stamp sees the edit -- which is why the
+exclusions above exist: they make the forgot-to-set-the-variable case
+harmless too.
+
+### MPI: no barrier
+
+The cache is read only at a kernel's first call in a process (index,
+stamp check, load). A miss compiles in memory -- LLVM never touches
+the cache files -- then writes `.nbc` and `.nbi` by temp file +
+`os.replace`. Four cold ranks each compile and write identical bytes;
+a rank that reads another's just-renamed file gets a hit on the same
+content; a partial file is never visible. No coordination needed.
+
+### Measured
+
+`benchmarks/_common.get_model()` (the drb stream-temperature chain:
+build + one step, every kernel compiled), LaNueva, Oct 28, 2026,
+import time excluded: **5.1 s cold** (cache wiped) -> **1.9 s warm**.
+The warm 1.9 s still holds the uncached atmosphere and stream-
+temperature compiles plus the data loading and assembly.

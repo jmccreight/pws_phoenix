@@ -407,6 +407,9 @@ class PRMSAtmosphereBase(Process):
     def advance(self) -> None:
         pass  # transp_on/tmax_sum/transp_check persist; no *_prev vars
 
+    # NOT cache=True: the kernels freeze _SOLF from solar_constants.py; a
+    # cached caller never notices an edited constant (DEVELOPER.md
+    # "Numba cache").
     @staticmethod
     @numba.njit
     def _calculate(

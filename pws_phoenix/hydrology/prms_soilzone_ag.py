@@ -787,6 +787,9 @@ class PRMSSoilzoneAg(Process):
         refs["ag_soil_moist_prev"][:] = refs["ag_soil_moist"]
         refs["ag_soil_rechr_prev"][:] = refs["ag_soil_rechr"]
 
+    # NOT cache=True: the kernels call prms_soilzone.py's jitted helpers;
+    # a cached caller never notices an edited callee (DEVELOPER.md
+    # "Numba cache").
     @staticmethod
     @numba.njit
     def _update_areas(

@@ -72,6 +72,7 @@ parameters_PRMSRunoff.nc.
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -95,7 +96,7 @@ _INTCP_CHANGEOVER_IN_NET_RAIN = False
 # ----------------------------------------------------------------------
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def perv_comp(
     soil_moist_prev,
     carea_max,
@@ -123,7 +124,7 @@ def perv_comp(
     return infil, srp, ca_fraction
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def check_capacity(soil_moist_prev, soil_moist_max, snowinfil_max, infil, srp):
     """Fill soil to soil_moist_max; if more than capacity restrict
     infiltration by snowinfil_max, with excess added to runoff."""
@@ -136,7 +137,7 @@ def check_capacity(soil_moist_prev, soil_moist_max, snowinfil_max, infil, srp):
     return infil, srp
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def imperv_et(imperv_stor, potet, imperv_evap, sca, avail_et, imperv_frac):
     if sca < 1.0:
         if potet < imperv_stor:
@@ -149,7 +150,7 @@ def imperv_et(imperv_stor, potet, imperv_evap, sca, avail_et, imperv_frac):
     return imperv_stor, imperv_evap
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def compute_infil(
     contrib_fraction,
     soil_moist_prev,
@@ -298,7 +299,7 @@ def compute_infil(
     return sri, srp, imperv_stor, infil, contrib_fraction
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def dprst_comp(
     dprst_vol_clos,
     dprst_area_clos_max,
@@ -536,7 +537,7 @@ def dprst_comp(
 # ----------------------------------------------------------------------
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def ag_comp(
     ag_soil_moist_prev,
     ag_soil_rechr_prev,
@@ -567,7 +568,7 @@ def ag_comp(
     return infil_ag, sroff_ag
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def check_capacity_ag(
     ag_soil_moist_prev,
     ag_soil_moist_max,
@@ -586,7 +587,7 @@ def check_capacity_ag(
     return infil_ag, sroff_ag
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def compute_infil_ag(
     ag_soil_moist_prev,
     ag_soil_rechr_prev,
@@ -704,7 +705,7 @@ def compute_infil_ag(
     return infil_ag, sroff_ag
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def dprst_comp_ag(
     dprst_vol_clos,
     dprst_area_clos_max,
@@ -1278,7 +1279,7 @@ class PRMSRunoffNoDprst(Process):
         refs["hru_impervstor_old"][:] = refs["hru_impervstor"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -1915,7 +1916,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         refs["dprst_stor_hru_old"][:] = refs["dprst_stor_hru"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -2406,7 +2407,7 @@ class PRMSRunoffAg(PRMSRunoff):
     # ------------------------------------------------------------------
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -2680,7 +2681,7 @@ class PRMSRunoffAg(PRMSRunoff):
             sroff[ii] = srunoff
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _post_areas(
         # updated in place
         ag_area: np.ndarray,

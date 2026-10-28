@@ -26,6 +26,13 @@ import numpy as np
 import pytest
 import xarray as xr
 
+# The numba on-disk kernel cache is OFF for every test run (bare pytest
+# and run_tests.sh alike; each MPI rank runs its own conftest). A cached
+# kernel keeps stale copies of jitted callees/constants from OTHER files
+# (DEVELOPER.md "Numba cache") -- never let that reach a test. Must
+# precede the first pws_phoenix import (the switch is read at import).
+os.environ["PWS_NUMBA_CACHE"] = "0"
+
 # ---- pywatershed-domain FlowGraph data (shared by
 # test_flow_graph.py [drb_2yr] and test_mixed_channel_starfit.py
 # [ucb_2yr]). GENERATED pywatershed test data; consumer modules carry

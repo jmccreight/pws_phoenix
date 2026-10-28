@@ -51,6 +51,7 @@ ride in the combined input file instead.
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -165,7 +166,7 @@ class PRMSGroundwaterNoDprst(Process):
         self._refs["gwres_stor_old"][:] = self._refs["gwres_stor"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         gwres_stor: np.ndarray,
         gwres_flow: np.ndarray,
@@ -234,7 +235,7 @@ class PRMSGroundwater(PRMSGroundwaterNoDprst):
     )
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         gwres_stor: np.ndarray,
         gwres_flow: np.ndarray,
