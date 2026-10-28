@@ -119,6 +119,18 @@ from pws_phoenix.hydrology.prms_soilzone import (
 )
 from pws_phoenix.process import DataArrayMeta, Process
 
+# the state the obs-ET iteration rewinds between passes (Fortran It0
+# variables), in the order the It0 buffers are held
+_IT0_NAMES = (
+    "soil_moist",
+    "soil_rechr",
+    "ssres_stor",
+    "slow_stor",
+    "ag_soil_moist",
+    "ag_soil_rechr",
+    "pref_flow_stor",
+)
+
 
 def _meta(kind, description, dtype=np.float64, restart=False, derivation=None):
     return DataArrayMeta(
@@ -677,6 +689,90 @@ class PRMSSoilzoneAg(Process):
         refs["ag_soil_rechr_prev"][:] = ag_soil_rechr
         refs["pref_flow_stor_prev"][:] = pref_flow_stor
         refs["slow_stor_prev"][:] = slow_stor
+
+        # -- kernel argument tuples, assembled ONCE (the refs never
+        # change: DEVELOPER.md "Per-step data access"); the family
+        # tuple needs _pref_flow_flag, its iterating form AET_external
+        # (an ObsET-leaf field) --
+        flags = (False, True) if "AET_external" in refs else (False,)
+        self._family_args = {
+            flag: self._build_family_args(flag) for flag in flags
+        }
+        self._update_areas_args = self._hold(
+            "ag_area",
+            "hru_area_perv",
+            "hru_frac_perv",
+            "ag_soil_moist",
+            "ag_soil_rechr",
+            "slow_stor",
+            "soil_moist",
+            "soil_rechr",
+            "ag_frac",
+            "hru_area",
+            "hru_area_imperv",
+            "dprst_frac",
+            "hru_type",
+        )
+        self._pre_args = self._hold(
+            "soil_lower",
+            "ag_soil_moist_redistribution",
+            "ag_soil_rechr_redistribution",
+            "soil_rechr_redistribution",
+            "soil_lower_redistribution",
+            "slow_stor_redistribution",
+            "soil_moist",
+            "soil_rechr",
+            "ag_soil_moist",
+            "ag_soil_rechr",
+            "slow_stor",
+            "soil_rechr_prev",
+            "soil_lower_prev",
+            "slow_stor_prev",
+            "ag_soil_moist_prev",
+            "ag_soil_rechr_prev",
+        )
+        self._post_args = self._hold(
+            "pref_flow_stor_change",
+            "soil_lower_change",
+            "soil_rechr_change",
+            "slow_stor_change",
+            "soil_lower_change_hru",
+            "soil_rechr_change_hru",
+            "ag_soil_moist_change",
+            "ag_soil_rechr_change",
+            "ag_soil_lower_change",
+            "ag_soil_moist_change_hru",
+            "ag_soil_rechr_change_hru",
+            "ag_soil_lower_change_hru",
+            "sroff_vol",
+            "ssres_flow_vol",
+            "perv_infil_hru",
+            "ag_infil_hru",
+            "pref_flow_stor",
+            "pref_flow_stor_prev",
+            "soil_lower",
+            "soil_lower_prev",
+            "soil_lower_redistribution",
+            "soil_rechr",
+            "soil_rechr_prev",
+            "soil_rechr_redistribution",
+            "slow_stor",
+            "slow_stor_prev",
+            "slow_stor_redistribution",
+            "hru_frac_perv",
+            "ag_soil_moist",
+            "ag_soil_moist_prev",
+            "ag_soil_moist_redistribution",
+            "ag_soil_rechr",
+            "ag_soil_rechr_prev",
+            "ag_soil_rechr_redistribution",
+            "ag_frac",
+            "sroff",
+            "ssres_flow",
+            "hru_in_to_cf",
+            "infil",
+            "infil_ag",
+        )
 
     # ------------------------------------------------------------------
     # Computation
@@ -1353,16 +1449,27 @@ class PRMSSoilzoneAg(Process):
             perv_infil_hru[hh] = infil[hh] * hru_frac_perv[hh]
             ag_infil_hru[hh] = infil_ag[hh] * ag_frac[hh]
 
+    def _hold(self, *names: str) -> tuple:
+        """The named field ndarrays as a tuple, for a kernel call made
+        every step: ``self._kernel(*self._kernel_args)``."""
+        return tuple(self._refs[nn] for nn in names)
+
     def _calculate_family(self, iter_aet_flag: bool) -> None:
         """One physics pass over the shared family kernel (the ObsET
         subclass calls this inside its iteration loop)."""
+        self._calculate(*self._family_args[iter_aet_flag])
+
+    def _build_family_args(self, iter_aet_flag: bool) -> tuple:
+        """The family kernel's ~80 arguments, assembled ONCE per flag
+        value at the end of initialize() (see the _family_args note
+        there)."""
         refs = self._refs
         if iter_aet_flag:
             aet_external = refs["AET_external"]
         else:
             # never read under iter_aet_flag=False; benign aliasing
             aet_external = refs["ag_irrigation_add"]
-        self._calculate(
+        return (
             iter_aet_flag,
             self._pref_flow_flag,
             refs["soil_moist"],
@@ -1452,40 +1559,8 @@ class PRMSSoilzoneAg(Process):
 
     def _pre_kernel(self) -> None:
         """istep0 areas (once) + per-step area update + pre lines."""
-        refs = self._refs
-        self._update_areas(
-            refs["ag_area"],
-            refs["hru_area_perv"],
-            refs["hru_frac_perv"],
-            refs["ag_soil_moist"],
-            refs["ag_soil_rechr"],
-            refs["slow_stor"],
-            refs["soil_moist"],
-            refs["soil_rechr"],
-            refs["ag_frac"],
-            refs["hru_area"],
-            refs["hru_area_imperv"],
-            refs["dprst_frac"],
-            refs["hru_type"],
-        )
-        self._pre(
-            refs["soil_lower"],
-            refs["ag_soil_moist_redistribution"],
-            refs["ag_soil_rechr_redistribution"],
-            refs["soil_rechr_redistribution"],
-            refs["soil_lower_redistribution"],
-            refs["slow_stor_redistribution"],
-            refs["soil_moist"],
-            refs["soil_rechr"],
-            refs["ag_soil_moist"],
-            refs["ag_soil_rechr"],
-            refs["slow_stor"],
-            refs["soil_rechr_prev"],
-            refs["soil_lower_prev"],
-            refs["slow_stor_prev"],
-            refs["ag_soil_moist_prev"],
-            refs["ag_soil_rechr_prev"],
-        )
+        self._update_areas(*self._update_areas_args)
+        self._pre(*self._pre_args)
 
     def _istep0_areas(self) -> None:
         """upstream _initialize_soilzone_ag_data area block: runs at
@@ -1521,49 +1596,7 @@ class PRMSSoilzoneAg(Process):
         )
 
     def _post_kernel(self) -> None:
-        refs = self._refs
-        self._post(
-            refs["pref_flow_stor_change"],
-            refs["soil_lower_change"],
-            refs["soil_rechr_change"],
-            refs["slow_stor_change"],
-            refs["soil_lower_change_hru"],
-            refs["soil_rechr_change_hru"],
-            refs["ag_soil_moist_change"],
-            refs["ag_soil_rechr_change"],
-            refs["ag_soil_lower_change"],
-            refs["ag_soil_moist_change_hru"],
-            refs["ag_soil_rechr_change_hru"],
-            refs["ag_soil_lower_change_hru"],
-            refs["sroff_vol"],
-            refs["ssres_flow_vol"],
-            refs["perv_infil_hru"],
-            refs["ag_infil_hru"],
-            refs["pref_flow_stor"],
-            refs["pref_flow_stor_prev"],
-            refs["soil_lower"],
-            refs["soil_lower_prev"],
-            refs["soil_lower_redistribution"],
-            refs["soil_rechr"],
-            refs["soil_rechr_prev"],
-            refs["soil_rechr_redistribution"],
-            refs["slow_stor"],
-            refs["slow_stor_prev"],
-            refs["slow_stor_redistribution"],
-            refs["hru_frac_perv"],
-            refs["ag_soil_moist"],
-            refs["ag_soil_moist_prev"],
-            refs["ag_soil_moist_redistribution"],
-            refs["ag_soil_rechr"],
-            refs["ag_soil_rechr_prev"],
-            refs["ag_soil_rechr_redistribution"],
-            refs["ag_frac"],
-            refs["sroff"],
-            refs["ssres_flow"],
-            refs["hru_in_to_cf"],
-            refs["infil"],
-            refs["infil_ag"],
-        )
+        self._post(*self._post_args)
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         if time.current_index == 0:
@@ -1646,20 +1679,23 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         refs = self._refs
         for name in self._OBS_ZERO_VARS:
             refs[name][:] = 0
-        # It0 iteration scratch (persistent; prime directive: memory)
+        # It0 iteration scratch (persistent; prime directive: memory),
+        # one buffer per _IT0_NAMES entry, same order
         nhru = refs["hru_area"].shape[0]
-        self._it0 = {
-            name: np.zeros(nhru, dtype=np.float64)
-            for name in (
-                "soil_moist",
-                "soil_rechr",
-                "ssres_stor",
-                "slow_stor",
-                "ag_soil_moist",
-                "ag_soil_rechr",
-                "pref_flow_stor",
-            )
-        }
+        self._it0 = tuple(np.zeros(nhru, dtype=np.float64) for _ in _IT0_NAMES)
+        self._it0_state = self._hold(*_IT0_NAMES)
+        self._prep_aet_args = self._hold(
+            "AET_external",
+            "ag_irrigation_add",
+            "ag_irrigation_add_vol",
+            "ag_aet_external_vol",
+            "aet_observed",
+            "ag_frac",
+            "transp_on",
+        )
+        # parameters are frozen: the iteration caps, read once
+        self._max_iter = int(refs["max_soilzone_ag_iter"][0])
+        self._converge = float(refs["soilzone_aet_converge"][0])
 
     @staticmethod
     @numba.njit
@@ -1786,36 +1822,30 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
             ag_irrigation_hru_source[hh] = ag_irrigation_add[hh] * ag_frac[hh]
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        refs = self._refs
         if time.current_index == 0:
             self._istep0_areas()
         self._pre_kernel()
+        refs = self._refs
 
         # store initial values for iteration (Fortran It0 variables)
-        for name, buf in self._it0.items():
-            buf[:] = refs[name]
+        for live, buf in zip(self._it0_state, self._it0, strict=True):
+            buf[:] = live
 
-        n_transp = self._prep_aet(
-            refs["AET_external"],
-            refs["ag_irrigation_add"],
-            refs["ag_irrigation_add_vol"],
-            refs["ag_aet_external_vol"],
-            refs["aet_observed"],
-            refs["ag_frac"],
-            refs["transp_on"],
-        )
+        n_transp = self._prep_aet(*self._prep_aet_args)
 
-        max_iter = int(refs["max_soilzone_ag_iter"][0])
-        converge = float(refs["soilzone_aet_converge"][0])
+        max_iter = self._max_iter
+        converge = self._converge
 
         keep_iterating = True
         soil_iter = 1
         while keep_iterating:
             if soil_iter > 1:
-                for name, buf in self._it0.items():
+                for name, live, buf in zip(
+                    _IT0_NAMES, self._it0_state, self._it0, strict=True
+                ):
                     if name == "pref_flow_stor" and not (self._pref_flow_flag):
                         continue
-                    refs[name][:] = buf
+                    live[:] = buf
 
             self._calculate_family(iter_aet_flag=True)
 

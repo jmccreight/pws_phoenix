@@ -533,7 +533,17 @@ steps):** the Python between the kernels costs ~2 us in stream temp
 kernels (20.9 of 42.9 us: the Python obs-ET iteration and its `_it0`
 copies). So the one-kernel-per-leaf redesign is NOT a speed item;
 the `time_kernel` rows these four lack would show the same ~2 us
-gap. The obs-ET iteration into numba remains a (small) target.
+gap. The obs-ET iteration was then tried both ways (same evening):
+holding the kernels' argument tuples once at `initialize`
+(`PRMSSoilzoneAg._family_args` and friends) and moving the whole
+loop into one njit driver. Neither moved the rows outside their
+1-3 us run-to-run band (spinup 32-36 us, analysis 40-42 us) -- the
+"outside the kernels" time is numba's per-call argument typing,
+which scales with argument count and is paid the same whether the
+~100 arrays arrive in seven calls or one. The driver was reverted;
+the held tuples stayed (the right pattern, no cost). The lever for
+that cost would be a state-tuple kernel signature (the FlowGraph
+pattern) -- a design change, not a tweak.
 
 ### Stream shade (Oct 27, 2026; same `--dry-run` method)
 
