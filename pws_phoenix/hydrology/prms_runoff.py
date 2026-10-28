@@ -72,6 +72,7 @@ parameters_PRMSRunoff.nc.
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -95,7 +96,7 @@ _INTCP_CHANGEOVER_IN_NET_RAIN = False
 # ----------------------------------------------------------------------
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def perv_comp(
     soil_moist_prev,
     carea_max,
@@ -123,7 +124,7 @@ def perv_comp(
     return infil, srp, ca_fraction
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def check_capacity(soil_moist_prev, soil_moist_max, snowinfil_max, infil, srp):
     """Fill soil to soil_moist_max; if more than capacity restrict
     infiltration by snowinfil_max, with excess added to runoff."""
@@ -136,7 +137,7 @@ def check_capacity(soil_moist_prev, soil_moist_max, snowinfil_max, infil, srp):
     return infil, srp
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def imperv_et(imperv_stor, potet, imperv_evap, sca, avail_et, imperv_frac):
     if sca < 1.0:
         if potet < imperv_stor:
@@ -149,7 +150,7 @@ def imperv_et(imperv_stor, potet, imperv_evap, sca, avail_et, imperv_frac):
     return imperv_stor, imperv_evap
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def compute_infil(
     contrib_fraction,
     soil_moist_prev,
@@ -298,7 +299,7 @@ def compute_infil(
     return sri, srp, imperv_stor, infil, contrib_fraction
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def dprst_comp(
     dprst_vol_clos,
     dprst_area_clos_max,
@@ -536,7 +537,7 @@ def dprst_comp(
 # ----------------------------------------------------------------------
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def ag_comp(
     ag_soil_moist_prev,
     ag_soil_rechr_prev,
@@ -567,7 +568,7 @@ def ag_comp(
     return infil_ag, sroff_ag
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def check_capacity_ag(
     ag_soil_moist_prev,
     ag_soil_moist_max,
@@ -586,7 +587,7 @@ def check_capacity_ag(
     return infil_ag, sroff_ag
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def compute_infil_ag(
     ag_soil_moist_prev,
     ag_soil_rechr_prev,
@@ -704,7 +705,7 @@ def compute_infil_ag(
     return infil_ag, sroff_ag
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def dprst_comp_ag(
     dprst_vol_clos,
     dprst_area_clos_max,
@@ -1225,8 +1226,8 @@ class PRMSRunoffNoDprst(Process):
     def initialize(self) -> None:
         """basin_init with the dprst branch OFF (upstream shared
         basin_init under _dprst_flag == False)."""
-        obj = self._obj
-        nhru = obj["hru_area"].values.shape[0]
+        refs = self._refs
+        nhru = refs["hru_area"].shape[0]
 
         # -- zero-init all variables (pywatershed get_init_values) --
         for name in (
@@ -1244,19 +1245,19 @@ class PRMSRunoffNoDprst(Process):
             "hru_impervstor_old",
             "hru_impervstor_change",
         ):
-            obj[name].values[:] = 0.0
+            refs[name][:] = 0.0
         for name in (
             "hru_perv",
             "hru_frac_perv",
             "hru_imperv",
         ):
-            obj[name].values[:] = 0.0
+            refs[name][:] = 0.0
 
-        hru_area = obj["hru_area"].values
-        hru_percent_imperv = obj["hru_percent_imperv"].values
-        hru_perv = obj["hru_perv"].values
-        hru_frac_perv = obj["hru_frac_perv"].values
-        hru_imperv = obj["hru_imperv"].values
+        hru_area = refs["hru_area"]
+        hru_percent_imperv = refs["hru_percent_imperv"]
+        hru_perv = refs["hru_perv"]
+        hru_frac_perv = refs["hru_frac_perv"]
+        hru_imperv = refs["hru_imperv"]
 
         # -- basin_init (prms basin.f90/basinit subset) --
         for ii in range(nhru):
@@ -1274,11 +1275,11 @@ class PRMSRunoffNoDprst(Process):
     # ------------------------------------------------------------------
 
     def advance(self) -> None:
-        obj = self._obj
-        obj["hru_impervstor_old"].values[:] = obj["hru_impervstor"].values
+        refs = self._refs
+        refs["hru_impervstor_old"][:] = refs["hru_impervstor"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -1431,48 +1432,48 @@ class PRMSRunoffNoDprst(Process):
             sroff_vol[ii] = sroff[ii] * hru_in_to_cf[ii]
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         self._calculate(
-            obj["contrib_fraction"].values,
-            obj["infil"].values,
-            obj["infil_hru"].values,
-            obj["sroff"].values,
-            obj["sroff_vol"].values,
-            obj["hru_sroffp"].values,
-            obj["hru_sroffi"].values,
-            obj["imperv_stor"].values,
-            obj["imperv_evap"].values,
-            obj["hru_impervevap"].values,
-            obj["hru_impervstor"].values,
-            obj["hru_impervstor_change"].values,
-            obj["hru_impervstor_old"].values,
-            obj["soil_lower_prev"].values,
-            obj["soil_rechr_prev"].values,
-            obj["net_rain"].values,
-            obj["net_ppt"].values,
-            obj["net_snow"].values,
-            obj["potet"].values,
-            obj["snowmelt"].values,
-            obj["snow_evap"].values,
-            obj["pkwater_equiv"].values,
-            obj["pptmix_nopack"].values,
-            obj["snowcov_area"].values,
-            obj["through_rain"].values,
-            obj["hru_intcpevap"].values,
-            obj["intcp_changeover"].values,
-            obj["hru_type"].values,
-            obj["hru_area"].values,
-            obj["hru_in_to_cf"].values,
-            obj["hru_percent_imperv"].values,
-            obj["imperv_stor_max"].values,
-            obj["carea_max"].values,
-            obj["smidx_coef"].values,
-            obj["smidx_exp"].values,
-            obj["soil_moist_max"].values,
-            obj["snowinfil_max"].values,
-            obj["hru_perv"].values,
-            obj["hru_frac_perv"].values,
-            obj["hru_imperv"].values,
+            refs["contrib_fraction"],
+            refs["infil"],
+            refs["infil_hru"],
+            refs["sroff"],
+            refs["sroff_vol"],
+            refs["hru_sroffp"],
+            refs["hru_sroffi"],
+            refs["imperv_stor"],
+            refs["imperv_evap"],
+            refs["hru_impervevap"],
+            refs["hru_impervstor"],
+            refs["hru_impervstor_change"],
+            refs["hru_impervstor_old"],
+            refs["soil_lower_prev"],
+            refs["soil_rechr_prev"],
+            refs["net_rain"],
+            refs["net_ppt"],
+            refs["net_snow"],
+            refs["potet"],
+            refs["snowmelt"],
+            refs["snow_evap"],
+            refs["pkwater_equiv"],
+            refs["pptmix_nopack"],
+            refs["snowcov_area"],
+            refs["through_rain"],
+            refs["hru_intcpevap"],
+            refs["intcp_changeover"],
+            refs["hru_type"],
+            refs["hru_area"],
+            refs["hru_in_to_cf"],
+            refs["hru_percent_imperv"],
+            refs["imperv_stor_max"],
+            refs["carea_max"],
+            refs["smidx_coef"],
+            refs["smidx_exp"],
+            refs["soil_moist_max"],
+            refs["snowinfil_max"],
+            refs["hru_perv"],
+            refs["hru_frac_perv"],
+            refs["hru_imperv"],
             _INTCP_CHANGEOVER_IN_NET_RAIN,
         )
 
@@ -1725,8 +1726,8 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         """basin_init + dprst_init verbatim (init-time loops; perf
         irrelevant). Derived geometry -> parameter_internal (frozen
         after this); dprst initial state -> variables."""
-        obj = self._obj
-        nhru = obj["hru_area"].values.shape[0]
+        refs = self._refs
+        nhru = refs["hru_area"].shape[0]
 
         # -- zero-init all variables (pywatershed get_init_values) --
         for name in (
@@ -1759,7 +1760,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
             "dprst_stor_hru_change",
             "dprst_in",
         ):
-            obj[name].values[:] = 0.0
+            refs[name][:] = 0.0
         for name in (
             "hru_perv",
             "hru_frac_perv",
@@ -1772,35 +1773,35 @@ class PRMSRunoff(PRMSRunoffNoDprst):
             "dprst_vol_clos_max",
             "dprst_vol_thres_open",
         ):
-            obj[name].values[:] = 0.0
+            refs[name][:] = 0.0
 
-        hru_area = obj["hru_area"].values
-        hru_percent_imperv = obj["hru_percent_imperv"].values
-        dprst_frac = obj["dprst_frac"].values
-        dprst_frac_open = obj["dprst_frac_open"].values
-        dprst_frac_init = obj["dprst_frac_init"].values
-        dprst_depth_avg = obj["dprst_depth_avg"].values
-        op_flow_thres = obj["op_flow_thres"].values
-        va_open_exp = obj["va_open_exp"].values
-        va_clos_exp = obj["va_clos_exp"].values
+        hru_area = refs["hru_area"]
+        hru_percent_imperv = refs["hru_percent_imperv"]
+        dprst_frac = refs["dprst_frac"]
+        dprst_frac_open = refs["dprst_frac_open"]
+        dprst_frac_init = refs["dprst_frac_init"]
+        dprst_depth_avg = refs["dprst_depth_avg"]
+        op_flow_thres = refs["op_flow_thres"]
+        va_open_exp = refs["va_open_exp"]
+        va_clos_exp = refs["va_clos_exp"]
 
-        hru_perv = obj["hru_perv"].values
-        hru_frac_perv = obj["hru_frac_perv"].values
-        hru_imperv = obj["hru_imperv"].values
-        dprst_area_max = obj["dprst_area_max"].values
-        dprst_area_open_max = obj["dprst_area_open_max"].values
-        dprst_area_clos_max = obj["dprst_area_clos_max"].values
-        dprst_frac_clos = obj["dprst_frac_clos"].values
-        dprst_vol_open_max = obj["dprst_vol_open_max"].values
-        dprst_vol_clos_max = obj["dprst_vol_clos_max"].values
-        dprst_vol_thres_open = obj["dprst_vol_thres_open"].values
-        dprst_vol_open = obj["dprst_vol_open"].values
-        dprst_vol_clos = obj["dprst_vol_clos"].values
-        dprst_area_open = obj["dprst_area_open"].values
-        dprst_area_clos = obj["dprst_area_clos"].values
-        dprst_stor_hru = obj["dprst_stor_hru"].values
-        dprst_stor_hru_old = obj["dprst_stor_hru_old"].values
-        dprst_vol_frac = obj["dprst_vol_frac"].values
+        hru_perv = refs["hru_perv"]
+        hru_frac_perv = refs["hru_frac_perv"]
+        hru_imperv = refs["hru_imperv"]
+        dprst_area_max = refs["dprst_area_max"]
+        dprst_area_open_max = refs["dprst_area_open_max"]
+        dprst_area_clos_max = refs["dprst_area_clos_max"]
+        dprst_frac_clos = refs["dprst_frac_clos"]
+        dprst_vol_open_max = refs["dprst_vol_open_max"]
+        dprst_vol_clos_max = refs["dprst_vol_clos_max"]
+        dprst_vol_thres_open = refs["dprst_vol_thres_open"]
+        dprst_vol_open = refs["dprst_vol_open"]
+        dprst_vol_clos = refs["dprst_vol_clos"]
+        dprst_area_open = refs["dprst_area_open"]
+        dprst_area_clos = refs["dprst_area_clos"]
+        dprst_stor_hru = refs["dprst_stor_hru"]
+        dprst_stor_hru_old = refs["dprst_stor_hru_old"]
+        dprst_vol_frac = refs["dprst_vol_frac"]
 
         # -- basin_init (prms basin.f90/basinit subset) --
         dprst_clos_flag = False
@@ -1910,12 +1911,12 @@ class PRMSRunoff(PRMSRunoffNoDprst):
     # ------------------------------------------------------------------
 
     def advance(self) -> None:
-        obj = self._obj
-        obj["hru_impervstor_old"].values[:] = obj["hru_impervstor"].values
-        obj["dprst_stor_hru_old"].values[:] = obj["dprst_stor_hru"].values
+        refs = self._refs
+        refs["hru_impervstor_old"][:] = refs["hru_impervstor"]
+        refs["dprst_stor_hru_old"][:] = refs["dprst_stor_hru"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -2166,79 +2167,79 @@ class PRMSRunoff(PRMSRunoffNoDprst):
             sroff_vol[ii] = sroff[ii] * hru_in_to_cf[ii]
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         self._calculate(
-            obj["contrib_fraction"].values,
-            obj["infil"].values,
-            obj["infil_hru"].values,
-            obj["sroff"].values,
-            obj["sroff_vol"].values,
-            obj["hru_sroffp"].values,
-            obj["hru_sroffi"].values,
-            obj["imperv_stor"].values,
-            obj["imperv_evap"].values,
-            obj["hru_impervevap"].values,
-            obj["hru_impervstor"].values,
-            obj["hru_impervstor_change"].values,
-            obj["dprst_vol_open"].values,
-            obj["dprst_vol_clos"].values,
-            obj["dprst_vol_open_frac"].values,
-            obj["dprst_vol_clos_frac"].values,
-            obj["dprst_vol_frac"].values,
-            obj["dprst_area_open"].values,
-            obj["dprst_area_clos"].values,
-            obj["dprst_sroff_hru"].values,
-            obj["dprst_seep_hru"].values,
-            obj["dprst_evap_hru"].values,
-            obj["dprst_insroff_hru"].values,
-            obj["dprst_stor_hru"].values,
-            obj["dprst_stor_hru_change"].values,
-            obj["dprst_in"].values,
-            obj["hru_impervstor_old"].values,
-            obj["dprst_stor_hru_old"].values,
-            obj["soil_lower_prev"].values,
-            obj["soil_rechr_prev"].values,
-            obj["net_rain"].values,
-            obj["net_ppt"].values,
-            obj["net_snow"].values,
-            obj["potet"].values,
-            obj["snowmelt"].values,
-            obj["snow_evap"].values,
-            obj["pkwater_equiv"].values,
-            obj["pptmix_nopack"].values,
-            obj["snowcov_area"].values,
-            obj["through_rain"].values,
-            obj["hru_intcpevap"].values,
-            obj["intcp_changeover"].values,
-            obj["hru_type"].values,
-            obj["hru_area"].values,
-            obj["hru_in_to_cf"].values,
-            obj["hru_percent_imperv"].values,
-            obj["imperv_stor_max"].values,
-            obj["carea_max"].values,
-            obj["smidx_coef"].values,
-            obj["smidx_exp"].values,
-            obj["soil_moist_max"].values,
-            obj["snowinfil_max"].values,
-            obj["dprst_et_coef"].values,
-            obj["dprst_flow_coef"].values,
-            obj["dprst_frac_open"].values,
-            obj["dprst_seep_rate_clos"].values,
-            obj["dprst_seep_rate_open"].values,
-            obj["sro_to_dprst_imperv"].values,
-            obj["sro_to_dprst_perv"].values,
-            obj["va_open_exp"].values,
-            obj["va_clos_exp"].values,
-            obj["hru_perv"].values,
-            obj["hru_frac_perv"].values,
-            obj["hru_imperv"].values,
-            obj["dprst_area_max"].values,
-            obj["dprst_area_open_max"].values,
-            obj["dprst_area_clos_max"].values,
-            obj["dprst_frac_clos"].values,
-            obj["dprst_vol_open_max"].values,
-            obj["dprst_vol_clos_max"].values,
-            obj["dprst_vol_thres_open"].values,
+            refs["contrib_fraction"],
+            refs["infil"],
+            refs["infil_hru"],
+            refs["sroff"],
+            refs["sroff_vol"],
+            refs["hru_sroffp"],
+            refs["hru_sroffi"],
+            refs["imperv_stor"],
+            refs["imperv_evap"],
+            refs["hru_impervevap"],
+            refs["hru_impervstor"],
+            refs["hru_impervstor_change"],
+            refs["dprst_vol_open"],
+            refs["dprst_vol_clos"],
+            refs["dprst_vol_open_frac"],
+            refs["dprst_vol_clos_frac"],
+            refs["dprst_vol_frac"],
+            refs["dprst_area_open"],
+            refs["dprst_area_clos"],
+            refs["dprst_sroff_hru"],
+            refs["dprst_seep_hru"],
+            refs["dprst_evap_hru"],
+            refs["dprst_insroff_hru"],
+            refs["dprst_stor_hru"],
+            refs["dprst_stor_hru_change"],
+            refs["dprst_in"],
+            refs["hru_impervstor_old"],
+            refs["dprst_stor_hru_old"],
+            refs["soil_lower_prev"],
+            refs["soil_rechr_prev"],
+            refs["net_rain"],
+            refs["net_ppt"],
+            refs["net_snow"],
+            refs["potet"],
+            refs["snowmelt"],
+            refs["snow_evap"],
+            refs["pkwater_equiv"],
+            refs["pptmix_nopack"],
+            refs["snowcov_area"],
+            refs["through_rain"],
+            refs["hru_intcpevap"],
+            refs["intcp_changeover"],
+            refs["hru_type"],
+            refs["hru_area"],
+            refs["hru_in_to_cf"],
+            refs["hru_percent_imperv"],
+            refs["imperv_stor_max"],
+            refs["carea_max"],
+            refs["smidx_coef"],
+            refs["smidx_exp"],
+            refs["soil_moist_max"],
+            refs["snowinfil_max"],
+            refs["dprst_et_coef"],
+            refs["dprst_flow_coef"],
+            refs["dprst_frac_open"],
+            refs["dprst_seep_rate_clos"],
+            refs["dprst_seep_rate_open"],
+            refs["sro_to_dprst_imperv"],
+            refs["sro_to_dprst_perv"],
+            refs["va_open_exp"],
+            refs["va_clos_exp"],
+            refs["hru_perv"],
+            refs["hru_frac_perv"],
+            refs["hru_imperv"],
+            refs["dprst_area_max"],
+            refs["dprst_area_open_max"],
+            refs["dprst_area_clos_max"],
+            refs["dprst_frac_clos"],
+            refs["dprst_vol_open_max"],
+            refs["dprst_vol_clos_max"],
+            refs["dprst_vol_thres_open"],
             _INTCP_CHANGEOVER_IN_NET_RAIN,
         )
 
@@ -2388,7 +2389,7 @@ class PRMSRunoffAg(PRMSRunoff):
         at time zero in calculate() (upstream's itime_step==0 block):
         ag_frac is an input, not yet fed here."""
         super().initialize()
-        obj = self._obj
+        refs = self._refs
         for name in (
             "ag_area",
             "infil_ag",
@@ -2396,10 +2397,9 @@ class PRMSRunoffAg(PRMSRunoff):
             "infil_perv_hru",
             "hru_sroff_ag",
         ):
-            obj[name].values[:] = 0.0
-        obj["ag_soil_rechr_max"].values[:] = (
-            obj["ag_soil_moist_max"].values
-            * obj["ag_soil_rechr_max_frac"].values
+            refs[name][:] = 0.0
+        refs["ag_soil_rechr_max"][:] = (
+            refs["ag_soil_moist_max"] * refs["ag_soil_rechr_max_frac"]
         )
 
     # ------------------------------------------------------------------
@@ -2407,7 +2407,7 @@ class PRMSRunoffAg(PRMSRunoff):
     # ------------------------------------------------------------------
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -2681,7 +2681,7 @@ class PRMSRunoffAg(PRMSRunoff):
             sroff[ii] = srunoff
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _post_areas(
         # updated in place
         ag_area: np.ndarray,
@@ -2734,120 +2734,120 @@ class PRMSRunoffAg(PRMSRunoff):
             sroff_vol[ii] = sroff[ii] * hru_in_to_cf[ii]
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
 
         if time.current_index == 0:
             # upstream itime_step==0 block: carve the ag area out of
             # basin_init's pervious area (ag_frac now fed; once-only
             # numpy staging)
             np.multiply(
-                obj["ag_frac"].values,
-                obj["hru_area"].values,
-                out=obj["ag_area"].values,
+                refs["ag_frac"],
+                refs["hru_area"],
+                out=refs["ag_area"],
             )
-            obj["hru_perv"].values[:] -= obj["ag_area"].values
+            refs["hru_perv"][:] -= refs["ag_area"]
             np.divide(
-                obj["hru_perv"].values,
-                obj["hru_area"].values,
-                out=obj["hru_frac_perv"].values,
+                refs["hru_perv"],
+                refs["hru_area"],
+                out=refs["hru_frac_perv"],
             )
 
         self._calculate(
-            obj["contrib_fraction"].values,
-            obj["infil"].values,
-            obj["infil_ag"].values,
-            obj["sroff"].values,
-            obj["hru_sroffp"].values,
-            obj["hru_sroffi"].values,
-            obj["hru_sroff_ag"].values,
-            obj["imperv_stor"].values,
-            obj["imperv_evap"].values,
-            obj["hru_impervevap"].values,
-            obj["hru_impervstor"].values,
-            obj["dprst_vol_open"].values,
-            obj["dprst_vol_clos"].values,
-            obj["dprst_vol_open_frac"].values,
-            obj["dprst_vol_clos_frac"].values,
-            obj["dprst_vol_frac"].values,
-            obj["dprst_area_open"].values,
-            obj["dprst_area_clos"].values,
-            obj["dprst_sroff_hru"].values,
-            obj["dprst_seep_hru"].values,
-            obj["dprst_evap_hru"].values,
-            obj["dprst_insroff_hru"].values,
-            obj["dprst_stor_hru"].values,
-            obj["dprst_in"].values,
-            obj["soil_lower_prev"].values,
-            obj["soil_rechr_prev"].values,
-            obj["ag_soil_moist_prev"].values,
-            obj["ag_soil_rechr_prev"].values,
-            obj["net_rain"].values,
-            obj["net_ppt"].values,
-            obj["net_snow"].values,
-            obj["potet"].values,
-            obj["snowmelt"].values,
-            obj["snow_evap"].values,
-            obj["pkwater_equiv"].values,
-            obj["pptmix_nopack"].values,
-            obj["snowcov_area"].values,
-            obj["through_rain"].values,
-            obj["hru_intcpevap"].values,
-            obj["intcp_changeover"].values,
-            obj["ag_frac"].values,
-            obj["hru_type"].values,
-            obj["hru_area"].values,
-            obj["hru_percent_imperv"].values,
-            obj["imperv_stor_max"].values,
-            obj["carea_max"].values,
-            obj["smidx_coef"].values,
-            obj["smidx_exp"].values,
-            obj["soil_moist_max"].values,
-            obj["snowinfil_max"].values,
-            obj["ag_soil_moist_max"].values,
-            obj["ag_soil_rechr_max"].values,
-            obj["dprst_et_coef"].values,
-            obj["dprst_flow_coef"].values,
-            obj["dprst_frac_open"].values,
-            obj["dprst_seep_rate_clos"].values,
-            obj["dprst_seep_rate_open"].values,
-            obj["sro_to_dprst_imperv"].values,
-            obj["sro_to_dprst_perv"].values,
-            obj["va_open_exp"].values,
-            obj["va_clos_exp"].values,
-            obj["hru_perv"].values,
-            obj["hru_frac_perv"].values,
-            obj["hru_imperv"].values,
-            obj["ag_area"].values,
-            obj["dprst_area_max"].values,
-            obj["dprst_area_open_max"].values,
-            obj["dprst_area_clos_max"].values,
-            obj["dprst_frac_clos"].values,
-            obj["dprst_vol_open_max"].values,
-            obj["dprst_vol_clos_max"].values,
-            obj["dprst_vol_thres_open"].values,
+            refs["contrib_fraction"],
+            refs["infil"],
+            refs["infil_ag"],
+            refs["sroff"],
+            refs["hru_sroffp"],
+            refs["hru_sroffi"],
+            refs["hru_sroff_ag"],
+            refs["imperv_stor"],
+            refs["imperv_evap"],
+            refs["hru_impervevap"],
+            refs["hru_impervstor"],
+            refs["dprst_vol_open"],
+            refs["dprst_vol_clos"],
+            refs["dprst_vol_open_frac"],
+            refs["dprst_vol_clos_frac"],
+            refs["dprst_vol_frac"],
+            refs["dprst_area_open"],
+            refs["dprst_area_clos"],
+            refs["dprst_sroff_hru"],
+            refs["dprst_seep_hru"],
+            refs["dprst_evap_hru"],
+            refs["dprst_insroff_hru"],
+            refs["dprst_stor_hru"],
+            refs["dprst_in"],
+            refs["soil_lower_prev"],
+            refs["soil_rechr_prev"],
+            refs["ag_soil_moist_prev"],
+            refs["ag_soil_rechr_prev"],
+            refs["net_rain"],
+            refs["net_ppt"],
+            refs["net_snow"],
+            refs["potet"],
+            refs["snowmelt"],
+            refs["snow_evap"],
+            refs["pkwater_equiv"],
+            refs["pptmix_nopack"],
+            refs["snowcov_area"],
+            refs["through_rain"],
+            refs["hru_intcpevap"],
+            refs["intcp_changeover"],
+            refs["ag_frac"],
+            refs["hru_type"],
+            refs["hru_area"],
+            refs["hru_percent_imperv"],
+            refs["imperv_stor_max"],
+            refs["carea_max"],
+            refs["smidx_coef"],
+            refs["smidx_exp"],
+            refs["soil_moist_max"],
+            refs["snowinfil_max"],
+            refs["ag_soil_moist_max"],
+            refs["ag_soil_rechr_max"],
+            refs["dprst_et_coef"],
+            refs["dprst_flow_coef"],
+            refs["dprst_frac_open"],
+            refs["dprst_seep_rate_clos"],
+            refs["dprst_seep_rate_open"],
+            refs["sro_to_dprst_imperv"],
+            refs["sro_to_dprst_perv"],
+            refs["va_open_exp"],
+            refs["va_clos_exp"],
+            refs["hru_perv"],
+            refs["hru_frac_perv"],
+            refs["hru_imperv"],
+            refs["ag_area"],
+            refs["dprst_area_max"],
+            refs["dprst_area_open_max"],
+            refs["dprst_area_clos_max"],
+            refs["dprst_frac_clos"],
+            refs["dprst_vol_open_max"],
+            refs["dprst_vol_clos_max"],
+            refs["dprst_vol_thres_open"],
             self._intcp_changeover_in_net_rain,
         )
 
         self._post_areas(
-            obj["ag_area"].values,
-            obj["hru_perv"].values,
-            obj["hru_frac_perv"].values,
-            obj["infil_perv_hru"].values,
-            obj["infil_ag_hru"].values,
-            obj["infil_hru"].values,
-            obj["hru_impervstor_change"].values,
-            obj["dprst_stor_hru_change"].values,
-            obj["sroff_vol"].values,
-            obj["infil"].values,
-            obj["infil_ag"].values,
-            obj["ag_frac"].values,
-            obj["hru_area"].values,
-            obj["hru_imperv"].values,
-            obj["dprst_area_max"].values,
-            obj["hru_impervstor"].values,
-            obj["hru_impervstor_old"].values,
-            obj["dprst_stor_hru"].values,
-            obj["dprst_stor_hru_old"].values,
-            obj["sroff"].values,
-            obj["hru_in_to_cf"].values,
+            refs["ag_area"],
+            refs["hru_perv"],
+            refs["hru_frac_perv"],
+            refs["infil_perv_hru"],
+            refs["infil_ag_hru"],
+            refs["infil_hru"],
+            refs["hru_impervstor_change"],
+            refs["dprst_stor_hru_change"],
+            refs["sroff_vol"],
+            refs["infil"],
+            refs["infil_ag"],
+            refs["ag_frac"],
+            refs["hru_area"],
+            refs["hru_imperv"],
+            refs["dprst_area_max"],
+            refs["hru_impervstor"],
+            refs["hru_impervstor_old"],
+            refs["dprst_stor_hru"],
+            refs["dprst_stor_hru_old"],
+            refs["sroff"],
+            refs["hru_in_to_cf"],
         )

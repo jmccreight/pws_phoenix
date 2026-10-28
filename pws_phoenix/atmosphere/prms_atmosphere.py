@@ -371,7 +371,7 @@ class PRMSAtmosphereBase(Process):
     # ------------------------------------------------------------------
 
     def initialize(self) -> None:
-        obj = self._obj
+        refs = self._refs
         for name in (
             "tmaxf",
             "tminf",
@@ -389,16 +389,16 @@ class PRMSAtmosphereBase(Process):
             "potet",
             "transp_on",
         ):
-            obj[name].values[:] = 0.0
+            refs[name][:] = 0.0
 
         # upstream's is_summer logic assumes the northern hemisphere
-        if not (obj["hru_lat"].values > 0.0).any():
+        if not (refs["hru_lat"] > 0.0).any():
             raise NotImplementedError(
                 "PRMSAtmosphere: southern-hemisphere domains are not "
                 "implemented (upstream raises the same)"
             )
 
-        obj["hru_cossl"].values[:] = np.cos(np.arctan(obj["hru_slope"].values))
+        refs["hru_cossl"][:] = np.cos(np.arctan(refs["hru_slope"]))
 
     # ------------------------------------------------------------------
     # Computation
@@ -407,6 +407,9 @@ class PRMSAtmosphereBase(Process):
     def advance(self) -> None:
         pass  # transp_on/tmax_sum/transp_check persist; no *_prev vars
 
+    # NOT cache=True: the kernels freeze _SOLF from solar_constants.py; a
+    # cached caller never notices an edited constant (DEVELOPER.md
+    # "Numba cache").
     @staticmethod
     @numba.njit
     def _calculate(
@@ -569,53 +572,53 @@ class PRMSAtmosphereBase(Process):
     def _calculate_base(self, time: Time) -> None:
         """One pass of the shared (transpiration-free) kernel; each
         leaf's calculate() runs this then its transpiration kernel."""
-        obj = self._obj
+        refs = self._refs
         self._calculate(
-            obj["tmaxf"].values,
-            obj["tminf"].values,
-            obj["tmaxc"].values,
-            obj["tminc"].values,
-            obj["tavgc"].values,
-            obj["prmx"].values,
-            obj["hru_ppt"].values,
-            obj["hru_rain"].values,
-            obj["hru_snow"].values,
-            obj["pptmix"].values,
-            obj["swrad"].values,
-            obj["orad_hru"].values,
-            obj["potet"].values,
-            obj["prcp"].values,
-            obj["tmax"].values,
-            obj["tmin"].values,
-            obj["tmax_cbh_adj"].values,
-            obj["tmin_cbh_adj"].values,
-            obj["tmax_allsnow"].values,
-            obj["tmax_allrain_offset"].values,
-            obj["snow_cbh_adj"].values,
-            obj["rain_cbh_adj"].values,
-            obj["adjmix_rain"].values,
-            obj["dday_slope"].values,
-            obj["dday_intcp"].values,
-            obj["radmax"].values,
-            obj["ppt_rad_adj"].values,
-            obj["radadj_intcp"].values,
-            obj["radadj_slope"].values,
-            obj["tmax_index"].values,
-            obj["jh_coef"].values,
-            obj["jh_coef_hru"].values,
-            obj["radj_sppt"].values,
-            obj["radj_wppt"].values,
-            obj["soltab_potsw"].values,
-            obj["soltab_horad_potsw"].values,
-            obj["hru_cossl"].values,
+            refs["tmaxf"],
+            refs["tminf"],
+            refs["tmaxc"],
+            refs["tminc"],
+            refs["tavgc"],
+            refs["prmx"],
+            refs["hru_ppt"],
+            refs["hru_rain"],
+            refs["hru_snow"],
+            refs["pptmix"],
+            refs["swrad"],
+            refs["orad_hru"],
+            refs["potet"],
+            refs["prcp"],
+            refs["tmax"],
+            refs["tmin"],
+            refs["tmax_cbh_adj"],
+            refs["tmin_cbh_adj"],
+            refs["tmax_allsnow"],
+            refs["tmax_allrain_offset"],
+            refs["snow_cbh_adj"],
+            refs["rain_cbh_adj"],
+            refs["adjmix_rain"],
+            refs["dday_slope"],
+            refs["dday_intcp"],
+            refs["radmax"],
+            refs["ppt_rad_adj"],
+            refs["radadj_intcp"],
+            refs["radadj_slope"],
+            refs["tmax_index"],
+            refs["jh_coef"],
+            refs["jh_coef_hru"],
+            refs["radj_sppt"],
+            refs["radj_wppt"],
+            refs["soltab_potsw"],
+            refs["soltab_horad_potsw"],
+            refs["hru_cossl"],
             np.int64(time.month),
             np.int64(time.doy),
         )
         self._compute_ccov_hru(
-            obj["ccov_hru"].values,
-            obj["swrad"].values,
-            obj["soltab_potsw"].values,
-            obj["hru_cossl"].values,
+            refs["ccov_hru"],
+            refs["swrad"],
+            refs["soltab_potsw"],
+            refs["hru_cossl"],
             np.int64(time.doy),
         )
 
@@ -712,16 +715,16 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
 
     def initialize(self) -> None:
         super().initialize()
-        obj = self._obj
-        obj["tmax_sum"].values[:] = 0.0
-        obj["transp_check"].values[:] = 0
+        refs = self._refs
+        refs["tmax_sum"][:] = 0.0
+        refs["transp_check"][:] = 0
 
         # transp_tmax units ("candidate for worst code lines" upstream)
-        if int(obj["temp_units"].values[0]) == 0:
-            obj["transp_tmax_f"].values[:] = obj["transp_tmax"].values
+        if int(refs["temp_units"][0]) == 0:
+            refs["transp_tmax_f"][:] = refs["transp_tmax"]
         else:
-            obj["transp_tmax_f"].values[:] = (
-                obj["transp_tmax"].values * (9.0 / 5.0)
+            refs["transp_tmax_f"][:] = (
+                refs["transp_tmax"] * (9.0 / 5.0)
             ) + 32.0
 
     @staticmethod
@@ -785,16 +788,16 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
                     tmax_sum[ii] = 0.0
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         self._calculate_base(time)
         self._transp_tindex(
-            obj["transp_on"].values,
-            obj["tmax_sum"].values,
-            obj["transp_check"].values,
-            obj["tmaxf"].values,
-            obj["transp_beg"].values,
-            obj["transp_end"].values,
-            obj["transp_tmax_f"].values,
+            refs["transp_on"],
+            refs["tmax_sum"],
+            refs["transp_check"],
+            refs["tmaxf"],
+            refs["transp_beg"],
+            refs["transp_end"],
+            refs["transp_tmax_f"],
             np.int64(time.month),
             np.int64(time.day_of_month),
             np.int64(1 if time.current_index == 0 else 0),
@@ -838,12 +841,12 @@ class PRMSAtmosphereTranspFrost(PRMSAtmosphereBase):
                 transp_on[ii] = 0.0
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         self._calculate_base(time)
         self._transp_frost(
-            obj["transp_on"].values,
-            obj["spring_frost"].values,
-            obj["fall_frost"].values,
+            refs["transp_on"],
+            refs["spring_frost"],
+            refs["fall_frost"],
             np.int64(time.jsol),
         )
 

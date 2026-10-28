@@ -49,6 +49,7 @@ Deliberately NOT ported (each documented in place or in CLAUDE.md):
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -346,7 +347,7 @@ class PRMSChannel(Process):
         """Compute Muskingum coefficients and initial routing state,
         replicating pywatershed _initialize_channel_data numerics (and
         order) exactly. Temporaries here are INIT-time, not per-step."""
-        obj = self._obj
+        refs = self._refs
 
         # -- init values: allocation fills nan; pywatershed zero-inits
         # these (channel_outflow_vol is nan upstream but overwritten
@@ -361,21 +362,21 @@ class PRMSChannel(Process):
             "inflow_ts",
             "seg_current_sum",
         ):
-            obj[name].values[:] = 0.0
+            refs[name][:] = 0.0
         # pywatershed order: inflow_ts_prev from seg_inflow (still zero)
         # BEFORE the seg_inflow propagation below
-        obj["inflow_ts_prev"].values[:] = obj["seg_inflow"].values
+        refs["inflow_ts_prev"][:] = refs["seg_inflow"]
 
         # -- 0-based connectivity for the kernel --
-        obj["tosegment0"].values[:] = obj["tosegment"].values - 1
-        tosegment0 = obj["tosegment0"].values
+        refs["tosegment0"][:] = refs["tosegment"] - 1
+        tosegment0 = refs["tosegment0"]
 
         # -- initial seg_inflow propagation (non-restart). NOTE
         # assignment, not +=: with multiple upstreams the LAST one in
         # index order wins -- pywatershed verbatim. seg_outflow arrived
         # via initial="segment_flow_init". --
-        seg_inflow = obj["seg_inflow"].values
-        seg_outflow = obj["seg_outflow"].values
+        seg_inflow = refs["seg_inflow"]
+        seg_outflow = refs["seg_outflow"]
         for iseg in range(tosegment0.shape[0]):
             jseg = tosegment0[iseg]
             if jseg < 0:
@@ -385,17 +386,17 @@ class PRMSChannel(Process):
         # -- Muskingum coefficients (module function above; shared with
         # the FlowGraph channel node type) --
         muskingum_mann_coefficients(
-            obj["ts"].values,
-            obj["tsi"].values,
-            obj["c0"].values,
-            obj["c1"].values,
-            obj["c2"].values,
-            obj["mann_n"].values,
-            obj["seg_slope"].values,
-            obj["seg_depth"].values,
-            obj["seg_length"].values,
-            obj["segment_type"].values,
-            obj["x_coef"].values,
+            refs["ts"],
+            refs["tsi"],
+            refs["c0"],
+            refs["c1"],
+            refs["c2"],
+            refs["mann_n"],
+            refs["seg_slope"],
+            refs["seg_depth"],
+            refs["seg_length"],
+            refs["segment_type"],
+            refs["x_coef"],
         )
 
     # ------------------------------------------------------------------
@@ -405,10 +406,10 @@ class PRMSChannel(Process):
     def advance(self) -> None:
         # pywatershed verbatim (incl. its "seems strange" comment that
         # an instantaneous value is set to a daily-averaged one)
-        self._obj["inflow_ts_prev"].values[:] = self._obj["seg_inflow"].values
+        self._refs["inflow_ts_prev"][:] = self._refs["seg_inflow"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         seg_lateral_inflow: np.ndarray,
         seg_upstream_inflow: np.ndarray,
@@ -504,25 +505,25 @@ class PRMSChannel(Process):
     def calculate(self, dt: np.float64, time: Time) -> None:
         # dt is SECONDS (s_per_time); 86400.0 for daily PRMS
         self._calculate(
-            self._obj["seg_lateral_inflow"].values,
-            self._obj["seg_upstream_inflow"].values,
-            self._obj["seg_inflow"].values,
-            self._obj["seg_outflow"].values,
-            self._obj["seg_stor_change"].values,
-            self._obj["channel_outflow_vol"].values,
-            self._obj["inflow_ts"].values,
-            self._obj["outflow_ts"].values,
-            self._obj["inflow_ts_prev"].values,
-            self._obj["seg_current_sum"].values,
-            self._obj["seg_sroff_vol"].values,
-            self._obj["seg_ssres_flow_vol"].values,
-            self._obj["seg_gwres_flow_vol"].values,
-            self._obj["segment_order"].values,
-            self._obj["tosegment0"].values,
-            self._obj["ts"].values,
-            self._obj["tsi"].values,
-            self._obj["c0"].values,
-            self._obj["c1"].values,
-            self._obj["c2"].values,
+            self._refs["seg_lateral_inflow"],
+            self._refs["seg_upstream_inflow"],
+            self._refs["seg_inflow"],
+            self._refs["seg_outflow"],
+            self._refs["seg_stor_change"],
+            self._refs["channel_outflow_vol"],
+            self._refs["inflow_ts"],
+            self._refs["outflow_ts"],
+            self._refs["inflow_ts_prev"],
+            self._refs["seg_current_sum"],
+            self._refs["seg_sroff_vol"],
+            self._refs["seg_ssres_flow_vol"],
+            self._refs["seg_gwres_flow_vol"],
+            self._refs["segment_order"],
+            self._refs["tosegment0"],
+            self._refs["ts"],
+            self._refs["tsi"],
+            self._refs["c0"],
+            self._refs["c1"],
+            self._refs["c2"],
             dt,
         )

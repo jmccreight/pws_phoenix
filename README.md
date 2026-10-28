@@ -83,10 +83,26 @@ tests are not available in CI; those tests skip cleanly.
 pytest tests/ -q              # serial only
 ```
 
+The pywatershed-validation tests read a pywatershed `test_data/` tree
+that has been populated from the
+[pws-prms-oracle](https://github.com/DOI-USGS/pws-prms-oracle) and
+derived (pywatershed's `test_data/generate/oracle_populate.py`; the
+`starfit/` data are tracked in pywatershed itself). By default that is
+the sibling clone's, `../pywatershed/test_data`; set `PWS_TEST_DATA` to
+point at another such tree (pytest prints the resolved path and whether
+it exists in its header). The answer keys the tests expect are pinned
+in `tests/prms_oracle.toml`; a session aborts when the tree's
+`.oracle_ikey` / `.oracle_okey` / `.derived_okey` markers disagree
+with the pins, so a regenerated oracle shows up as a reviewed key bump.
+
 ## Internal design considerations
 
 See CLAUDE.md for design notes and discussion (incl. the xarray-simlab /
 Landlab comparisons distilled from the retired xr design summary).
+
+Decided designs, with their evidence and the invariants they impose on a
+`Process`, are written up in `DEVELOPER.md` (first entry: per-step data
+access -- hold the ndarray, not the Dataset lookup).
 
 1. Within process parallelism (over space): embarassing parallel; DAG ordered parallelism
 2. Use xarray accessor pattern (?)

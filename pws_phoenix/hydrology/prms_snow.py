@@ -60,6 +60,7 @@ in parameters_PRMSSnow.nc.
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -92,7 +93,7 @@ _AMLT_INIT = np.array(
 # ----------------------------------------------------------------------
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_sca_deplcrv(snarea_curve, frac_swe):
     """Interpolate along snow covered area depletion curve."""
     if frac_swe > 1.0:
@@ -115,7 +116,7 @@ def calc_sca_deplcrv(snarea_curve, frac_swe):
     return res
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_calin(
     cal,
     den_max,
@@ -228,7 +229,7 @@ def calc_calin(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_caloss(
     cal,
     freeh2o,
@@ -285,7 +286,7 @@ def calc_caloss(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_ppt_to_pack(
     den_max,
     denmaxinv,
@@ -527,7 +528,7 @@ def calc_ppt_to_pack(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_snowcov(
     ai,
     frac_swe,
@@ -656,7 +657,7 @@ def calc_snowcov(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_snalbedo(
     albedo,
     albset_rna,
@@ -795,7 +796,7 @@ def calc_snalbedo(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_snowbal(
     niteda,
     cec,
@@ -1020,7 +1021,7 @@ def calc_snowbal(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_step_4(
     trd,
     canopy_covden,
@@ -1230,7 +1231,7 @@ def calc_step_4(
     )
 
 
-@numba.njit
+@numba.njit(cache=NUMBA_CACHE)
 def calc_snowevap(
     freeh2o,
     hru_intcpevap,
@@ -1830,7 +1831,7 @@ class PRMSSnow(Process):
     # ------------------------------------------------------------------
 
     def initialize(self) -> None:
-        obj = self._obj
+        refs = self._refs
 
         # zero-init all float variables; flags to their upstream inits
         for name in (
@@ -1863,23 +1864,23 @@ class PRMSSnow(Process):
             "tcal",
             "through_rain",
         ):
-            obj[name].values[:] = 0.0
-        obj["iasw"].values[:] = False
-        obj["lst"].values[:] = False
-        obj["newsnow"].values[:] = False
-        obj["pptmix_nopack"].values[:] = 0.0
-        obj["int_alb"].values[:] = 1
-        obj["iso"].values[:] = 1
-        obj["mso"].values[:] = 1
-        obj["lso"].values[:] = 0
+            refs[name][:] = 0.0
+        refs["iasw"][:] = False
+        refs["lst"][:] = False
+        refs["newsnow"][:] = False
+        refs["pptmix_nopack"][:] = 0.0
+        refs["int_alb"][:] = 1
+        refs["iso"][:] = 1
+        refs["mso"][:] = 1
+        refs["lso"][:] = 0
 
         # snarea_curve sanity: flat length must be n_curves * 11
-        if obj["snarea_curve"].values.shape[0] % 11 != 0:
+        if refs["snarea_curve"].shape[0] % 11 != 0:
             raise ValueError("snarea_curve length must be a multiple of 11")
 
         # nonzero snowpack_init requires upstream's (buggy) init block
         # -- not ported; see module docstring
-        if (obj["snowpack_init"].values > 0.0).any():
+        if (refs["snowpack_init"] > 0.0).any():
             raise NotImplementedError(
                 "PRMSSnow: nonzero snowpack_init is not ported (upstream "
                 "initialization block is faulty; nhm domains use zero)"
@@ -1891,12 +1892,12 @@ class PRMSSnow(Process):
     # ------------------------------------------------------------------
 
     def advance(self) -> None:
-        obj = self._obj
-        obj["freeh2o_prev"].values[:] = obj["freeh2o"].values
-        obj["pk_ice_prev"].values[:] = obj["pk_ice"].values
+        refs = self._refs
+        refs["freeh2o_prev"][:] = refs["freeh2o"]
+        refs["pk_ice_prev"][:] = refs["pk_ice"]
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # in/out state + outputs (written in place)
         ai: np.ndarray,
@@ -2284,88 +2285,88 @@ class PRMSSnow(Process):
                 through_rain[jj] = 0.0
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         # scalar ('scalar',)-dim parameters, extracted once per step
         # (cheap); deninv/denmaxinv derived from them (upstream
         # _set_initial_conditions)
-        den_init = np.float64(obj["den_init"].values[0])
-        den_max = np.float64(obj["den_max"].values[0])
+        den_init = np.float64(refs["den_init"][0])
+        den_max = np.float64(refs["den_max"][0])
         self._calculate(
-            obj["ai"].values,
-            obj["albedo"].values,
-            obj["frac_swe"].values,
-            obj["freeh2o"].values,
-            obj["freeh2o_change"].values,
-            obj["iasw"].values,
-            obj["int_alb"].values,
-            obj["iso"].values,
-            obj["lso"].values,
-            obj["lst"].values,
-            obj["mso"].values,
-            obj["newsnow"].values,
-            obj["pk_def"].values,
-            obj["pk_den"].values,
-            obj["pk_depth"].values,
-            obj["pk_ice"].values,
-            obj["pk_ice_change"].values,
-            obj["pk_precip"].values,
-            obj["pk_temp"].values,
-            obj["pksv"].values,
-            obj["pkwater_equiv"].values,
-            obj["pptmix_nopack"].values,
-            obj["pss"].values,
-            obj["pst"].values,
-            obj["salb"].values,
-            obj["scrv"].values,
-            obj["slst"].values,
-            obj["snow_evap"].values,
-            obj["snowcov_area"].values,
-            obj["snowcov_areasv"].values,
-            obj["snowmelt"].values,
-            obj["snsv"].values,
-            obj["tcal"].values,
-            obj["through_rain"].values,
-            obj["freeh2o_prev"].values,
-            obj["pk_ice_prev"].values,
-            obj["hru_ppt"].values,
-            obj["hru_intcpevap"].values,
-            obj["net_ppt"].values,
-            obj["net_rain"].values,
-            obj["net_snow"].values,
-            obj["orad_hru"].values,
-            obj["potet"].values,
-            obj["pptmix"].values,
-            obj["prmx"].values,
-            obj["swrad"].values,
-            obj["tavgc"].values,
-            obj["tmaxc"].values,
-            obj["tminc"].values,
-            obj["transp_on"].values,
-            obj["hru_type"].values,
-            obj["cov_type"].values,
-            obj["covden_win"].values,
-            obj["covden_sum"].values,
-            obj["emis_noppt"].values,
-            obj["freeh2o_cap"].values,
-            obj["hru_deplcrv"].values,
-            obj["melt_force"].values,
-            obj["melt_look"].values,
-            obj["potet_sublim"].values,
-            obj["rad_trncf"].values,
-            obj["snarea_curve"].values,
-            obj["snarea_thresh"].values,
-            obj["tmax_allsnow"].values,
-            obj["cecn_coef"].values,
-            obj["tstorm_mo"].values,
-            obj["soltab_horad_potsw"].values,
-            np.float64(obj["albset_rna"].values[0]),
-            np.float64(obj["albset_rnm"].values[0]),
-            np.float64(obj["albset_sna"].values[0]),
-            np.float64(obj["albset_snm"].values[0]),
+            refs["ai"],
+            refs["albedo"],
+            refs["frac_swe"],
+            refs["freeh2o"],
+            refs["freeh2o_change"],
+            refs["iasw"],
+            refs["int_alb"],
+            refs["iso"],
+            refs["lso"],
+            refs["lst"],
+            refs["mso"],
+            refs["newsnow"],
+            refs["pk_def"],
+            refs["pk_den"],
+            refs["pk_depth"],
+            refs["pk_ice"],
+            refs["pk_ice_change"],
+            refs["pk_precip"],
+            refs["pk_temp"],
+            refs["pksv"],
+            refs["pkwater_equiv"],
+            refs["pptmix_nopack"],
+            refs["pss"],
+            refs["pst"],
+            refs["salb"],
+            refs["scrv"],
+            refs["slst"],
+            refs["snow_evap"],
+            refs["snowcov_area"],
+            refs["snowcov_areasv"],
+            refs["snowmelt"],
+            refs["snsv"],
+            refs["tcal"],
+            refs["through_rain"],
+            refs["freeh2o_prev"],
+            refs["pk_ice_prev"],
+            refs["hru_ppt"],
+            refs["hru_intcpevap"],
+            refs["net_ppt"],
+            refs["net_rain"],
+            refs["net_snow"],
+            refs["orad_hru"],
+            refs["potet"],
+            refs["pptmix"],
+            refs["prmx"],
+            refs["swrad"],
+            refs["tavgc"],
+            refs["tmaxc"],
+            refs["tminc"],
+            refs["transp_on"],
+            refs["hru_type"],
+            refs["cov_type"],
+            refs["covden_win"],
+            refs["covden_sum"],
+            refs["emis_noppt"],
+            refs["freeh2o_cap"],
+            refs["hru_deplcrv"],
+            refs["melt_force"],
+            refs["melt_look"],
+            refs["potet_sublim"],
+            refs["rad_trncf"],
+            refs["snarea_curve"],
+            refs["snarea_thresh"],
+            refs["tmax_allsnow"],
+            refs["cecn_coef"],
+            refs["tstorm_mo"],
+            refs["soltab_horad_potsw"],
+            np.float64(refs["albset_rna"][0]),
+            np.float64(refs["albset_rnm"][0]),
+            np.float64(refs["albset_sna"][0]),
+            np.float64(refs["albset_snm"][0]),
             den_max,
             np.float64(1.0 / den_init),
             np.float64(1.0 / den_max),
-            np.float64(obj["settle_const"].values[0]),
+            np.float64(refs["settle_const"][0]),
             np.int64(time.dowy),
             np.int64(time.doy),
             np.int64(time.month),

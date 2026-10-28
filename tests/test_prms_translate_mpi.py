@@ -26,6 +26,7 @@ from mpi4py import MPI
 
 pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
 
+from conftest import PWS_TEST_DATA
 from pws_phoenix.prms_translate import (  # noqa: E402
     assemble_from_control,
     model_from_control,
@@ -33,8 +34,7 @@ from pws_phoenix.prms_translate import (  # noqa: E402
     write_mpi_input_file,
 )
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DRB_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DRB_DIR = PWS_TEST_DATA / "drb_2yr"
 CONTROL_FILE = DRB_DIR / "nhm_stream_temp.control"
 
 N_DAYS = 5

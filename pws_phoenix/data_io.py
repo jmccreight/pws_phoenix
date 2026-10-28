@@ -64,11 +64,23 @@ class Input:
         self._current_index = np.int64(-1)
         self._current_values = np.nan * self.data[0, :]
         self._closed = False
+        # the ndarrays behind the per-step copy (DEVELOPER.md "Per-step
+        # data access"): a DataArray index + setitem cost ~100 us a step.
+        # A lazy (file-backed, load=False) input keeps reading one slice
+        # per step through xarray -- its whole array is not in memory.
+        self._in_memory: bool = self.data.variable._in_memory
+        self._data_values: np.ndarray | None = (
+            self.data.values if self._in_memory else None
+        )
+        self._current: np.ndarray = self._current_values.values
 
     def advance(self) -> None:
         """Advance current_values to the next time step."""
         self._current_index += np.int64(1)
-        self._current_values[:] = self.data[self._current_index, :]
+        if self._in_memory:
+            self._current[:] = self._data_values[self._current_index]
+        else:
+            self._current[:] = self.data[self._current_index, :].values
 
     def set_index(self, index: int) -> None:
         """Fast-forward (restart): the NEXT advance() serves `index`.

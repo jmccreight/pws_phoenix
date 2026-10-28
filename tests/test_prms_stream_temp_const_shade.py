@@ -20,17 +20,15 @@ The temperature physics itself is validated on the dynamic leaves
 (test_prms_stream_temp*.py); this leaf changes ONLY the shade source.
 """
 
-import pathlib as pl
-
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.hydrology.prms_stream_temp import PRMSStreamTempConstantShade
 from pws_phoenix.model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output_stream_temp"
 
 INPUT_NAMES = (

@@ -31,6 +31,7 @@ import numpy as np
 import pytest
 import xarray as xr
 from mpi4py import MPI
+from conftest import PWS_TEST_DATA
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.hydrology.prms_groundwater import PRMSGroundwater
 from pws_phoenix.hydrology.prms_hydraulic_geometry import (
@@ -39,8 +40,7 @@ from pws_phoenix.hydrology.prms_hydraulic_geometry import (
 from pws_phoenix.hydrology.prms_stream_temp import PRMSStreamTemp
 from pws_phoenix.model import ModelMPI
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR_HRU = DOMAIN_DIR / "output"
 GEN_DIR_SEG = DOMAIN_DIR / "output_stream_temp"
 

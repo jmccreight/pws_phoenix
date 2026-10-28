@@ -433,13 +433,13 @@ class Model:
                 self._add_process_fields(kk, grid, grid_ds)
             self.discretizations[grid].dataset = grid_ds
 
+        self._validate_inputs_resolved()
         # Bind in process_dict order (assembly above groups by grid, but the
         # author's order IS the execution schedule).
         for kk in self._process_dict:
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
 
-        self._validate_inputs_resolved()
         self._run_initialize_hooks()
         self._resolve_maps()
 
@@ -459,11 +459,14 @@ class Model:
         dataset after assembly -- supplied in the process_dict entry, produced
         by a process on the same grid, or fed by a registered Map. Fail fast
         here; a missing input would otherwise surface as a KeyError
-        mid-calculate (or silently read a stale variable)."""
-        for proc_name, proc in self.model_dict.items():
+        mid-calculate (or silently read a stale variable). Runs BEFORE
+        binding: Process.__init__ captures every declared field's ndarray
+        and would raise a bare KeyError on the same gap."""
+        for proc_name, vv in self._process_dict.items():
+            cls = vv["class"]
             grid = self._proc_grid[proc_name]
             grid_ds = self.discretizations[grid].dataset
-            needed = proc.get_inputs() + proc.get_mutable_inputs()
+            needed = cls.get_inputs() + cls.get_mutable_inputs()
             missing = [ii for ii in needed if ii not in grid_ds]
             if missing:
                 raise ValueError(
@@ -598,6 +601,7 @@ class Model:
                     f"Map '{map_name}': source variable '{mm.source_var}' "
                     f"not found on grid '{mm.source_grid}'."
                 )
+            mm.bind(source_ds)
             # grid_sizes overrides a grid's dataset size for the weights
             # shape check (ModelMPI passes the GLOBAL size of the
             # decomposed grid; its dataset only knows the rank-local
@@ -696,7 +700,7 @@ class Model:
         later consumers re-read the same target buffer."""
         for proc_name, vv in self.model_dict.items():
             for mm in self._proc_maps[proc_name]:
-                mm.apply(self.discretizations[mm.source_grid].dataset)
+                mm.apply()
             vv.calculate(dt, self.time)
 
     def run(self, dt: np.float64, n_steps: np.int32) -> None:
@@ -707,8 +711,8 @@ class Model:
         start = self._start_index
         for tt in range(start, start + int(n_steps)):
             self.current_time_index[0] = tt
-            self.current_time[0] = self.times[tt].values
             self.time.set_index(tt)
+            self.current_time[0] = self.time.current
             self.advance()
             self.calculate(dt=dt)
             if self.output is not None:
@@ -1229,6 +1233,7 @@ class ModelMPI(Model):
                 self._add_process_fields(kk, grid, grid_ds)
             self.discretizations[grid].dataset = grid_ds
 
+        self._validate_inputs_resolved()
         # ---- Bind in process_dict (author) order; distributed-grid
         #      processes are rebound to each streaming step in run(). ----
         for kk, vv in self._process_dict.items():
@@ -1236,7 +1241,6 @@ class ModelMPI(Model):
                 self.discretizations[self._proc_grid[kk]].dataset
             )
 
-        self._validate_inputs_resolved()
         # Per-process init hooks are LOCAL (collective-free) by contract,
         # so running them inside SPMD assembly is safe.
         self._run_initialize_hooks()
@@ -1353,7 +1357,7 @@ class ModelMPI(Model):
                 proc.advance()
             for proc_name, proc in self.model_dict.items():
                 for mm in self._proc_maps[proc_name]:
-                    mm.apply(self.discretizations[mm.source_grid].dataset)
+                    mm.apply()
                 proc.calculate(dt, self.time)
             # Record state into the streaming output slab(s) and write.
             # Every step lands on disk (no values_on_disk subset at

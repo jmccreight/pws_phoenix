@@ -44,11 +44,10 @@ TWO modes, because tolerances differ fundamentally:
 Requires GENERATED pywatershed test data; skips with a reason if absent.
 """
 
-import pathlib as pl
-
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA
 from pws_phoenix.atmosphere.prms_atmosphere import PRMSAtmosphere
 from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
 from pws_phoenix.discretization import Discretization
@@ -61,8 +60,7 @@ from pws_phoenix.hydrology.prms_soilzone import PRMSSoilzone
 from pws_phoenix.maps import Map
 from pws_phoenix.model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
 
 # snow_live mode: the ONLY disk forcings -- the raw CBH files

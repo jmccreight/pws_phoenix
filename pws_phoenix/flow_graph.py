@@ -221,6 +221,8 @@ def _build_graph_kernel(prepare_fns, substep_fns, finalize_fns):
     dispatched.
     """
 
+    # NOT cache=True: built per composition and closes over the node
+    # types' Dispatcher tuples (DEVELOPER.md "Numba cache").
     @numba.njit
     def kernel(state, s_per_time, n_substeps, tctx):
         node_order = state.node_order

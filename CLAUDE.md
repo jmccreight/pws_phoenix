@@ -99,7 +99,13 @@ branch `1.0.0`, mpix `main`** (Oct 2026; the old `pws` branch API is
 gone). `pwpx` has
 everything: pytest (+-mpi), mypy, ruff, and the pywatershed import-chain
 deps for the parity tests (pywatershed itself is used from the mpix-root
-clone via sys.path). Run tests from the repo root:
+clone via sys.path). Test data = the pywatershed clone's `test_data/`,
+populated + derived from the pws-prms-oracle by pywatershed's
+`oracle_populate.py` (Oct 2026); `PWS_TEST_DATA` overrides the root
+(`tests/conftest.py`); answer keys are PINNED in
+`tests/prms_oracle.toml` (macos-arm64 only so far) and checked at
+session start -- a regenerated oracle = a reviewed key bump, never a
+silent shift. Run tests from the repo root:
 `./tests/run_tests.sh` (serial + MPI, no skips allowed) or
 `pytest tests/ -q --ignore-glob='tests/*_mpi.py'` (serial only).
 
@@ -129,6 +135,14 @@ Keep the memory footprint lean and OBVIOUS. Concretely:
 3. Watch for hidden copies and call them out in review: deepcopy,
    np.asarray/astype on existing arrays, fancy indexing, xarray ops that
    materialize (selection on lazy datasets -- see test_ref_behaviors.py).
+4. The same principle in TIME: a process holds its fields' ndarray
+   references and never does `self._obj[name].values` inside a step
+   (`xr.Dataset.__getitem__` builds a DataArray per call, ~8-20 us; the
+   lookups were measured at 82-99% of every process step). Implemented
+   Oct 2026 as `Process._refs` (captured once at bind; `refs[name]` in
+   every step method) -- `DEVELOPER.md` "Per-step data access"
+   has the numbers, the one-ndarray-per-name invariant (serial and MPI)
+   and the rules it imposes.
 
 # incarnations/mpixarray design notes
 

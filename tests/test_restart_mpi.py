@@ -42,13 +42,13 @@ import numpy as np
 import pytest
 import xarray as xr
 from mpi4py import MPI
+from conftest import PWS_TEST_DATA
 from pws_phoenix.hydrology.prms_groundwater import PRMSGroundwater
 from pws_phoenix.maps import Map, MapMPI
 from pws_phoenix.model import Model, ModelMPI
 from pws_phoenix.processes_concrete import Lower, Upper
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
 
 # a -> c full window; b = the restart point (a -> b truncated file)

@@ -119,6 +119,18 @@ from pws_phoenix.hydrology.prms_soilzone import (
 )
 from pws_phoenix.process import DataArrayMeta, Process
 
+# the state the obs-ET iteration rewinds between passes (Fortran It0
+# variables), in the order the It0 buffers are held
+_IT0_NAMES = (
+    "soil_moist",
+    "soil_rechr",
+    "ssres_stor",
+    "slow_stor",
+    "ag_soil_moist",
+    "ag_soil_rechr",
+    "pref_flow_stor",
+)
+
 
 def _meta(kind, description, dtype=np.float64, restart=False, derivation=None):
     return DataArrayMeta(
@@ -509,62 +521,54 @@ class PRMSSoilzoneAg(Process):
     # ------------------------------------------------------------------
 
     def initialize(self) -> None:
-        obj = self._obj
+        refs = self._refs
         for name in self._ZERO_VARS:
-            obj[name].values[:] = 0.0
+            refs[name][:] = 0.0
 
-        hru_type = obj["hru_type"].values
-        hru_area = obj["hru_area"].values
+        hru_type = refs["hru_type"]
+        hru_area = refs["hru_area"]
 
-        obj["hru_area_imperv"].values[:] = (
-            obj["hru_percent_imperv"].values * hru_area
-        )
+        refs["hru_area_imperv"][:] = refs["hru_percent_imperv"] * hru_area
 
-        soil_rechr_max = obj["soil_rechr_max"].values
+        soil_rechr_max = refs["soil_rechr_max"]
         soil_rechr_max[:] = (
-            obj["soil_rechr_max_frac"].values * obj["soil_moist_max"].values
+            refs["soil_rechr_max_frac"] * refs["soil_moist_max"]
         )
-        ag_soil_rechr_max = obj["ag_soil_rechr_max"].values
+        ag_soil_rechr_max = refs["ag_soil_rechr_max"]
         ag_soil_rechr_max[:] = (
-            obj["ag_soil_rechr_max_frac"].values
-            * obj["ag_soil_moist_max"].values
+            refs["ag_soil_rechr_max_frac"] * refs["ag_soil_moist_max"]
         )
 
         wh_inactive_or_lake = np.where(
             (hru_type == _INACTIVE) | (hru_type == _LAKE)
         )
-        sat_threshold = obj["_sat_threshold"].values
-        sat_threshold[:] = obj["sat_threshold"].values
+        sat_threshold = refs["_sat_threshold"]
+        sat_threshold[:] = refs["sat_threshold"]
         sat_threshold[wh_inactive_or_lake] = 0.0
-        pref_flow_den = obj["_pref_flow_den"].values
-        pref_flow_den[:] = obj["pref_flow_den"].values
+        pref_flow_den = refs["_pref_flow_den"]
+        pref_flow_den[:] = refs["pref_flow_den"]
         pref_flow_den[np.where(hru_type != 1)] = 0.0  # non-LAND
 
-        pfif = obj["pref_flow_infil_frac"].values
+        pfif = refs["pref_flow_infil_frac"]
         if (pfif.min() < 0.0) or (pfif.max() > 1.0):
             raise ValueError(
                 "Values of pref_flow_infil_frac outside of [0,1]."
             )
 
         # -- initial states (no-restart path) --
-        soil_moist = obj["soil_moist"].values
-        soil_rechr = obj["soil_rechr"].values
-        ag_soil_moist = obj["ag_soil_moist"].values
-        ag_soil_rechr = obj["ag_soil_rechr"].values
-        soil_moist[:] = (
-            obj["soil_moist_init_frac"].values * obj["soil_moist_max"].values
-        )
-        soil_rechr[:] = obj["soil_rechr_init_frac"].values * soil_rechr_max
+        soil_moist = refs["soil_moist"]
+        soil_rechr = refs["soil_rechr"]
+        ag_soil_moist = refs["ag_soil_moist"]
+        ag_soil_rechr = refs["ag_soil_rechr"]
+        soil_moist[:] = refs["soil_moist_init_frac"] * refs["soil_moist_max"]
+        soil_rechr[:] = refs["soil_rechr_init_frac"] * soil_rechr_max
         ag_soil_moist[:] = (
-            obj["ag_soil_moist_init_frac"].values
-            * obj["ag_soil_moist_max"].values
+            refs["ag_soil_moist_init_frac"] * refs["ag_soil_moist_max"]
         )
-        ag_soil_rechr[:] = (
-            obj["ag_soil_rechr_init_frac"].values * ag_soil_rechr_max
-        )
+        ag_soil_rechr[:] = refs["ag_soil_rechr_init_frac"] * ag_soil_rechr_max
 
-        ssres_stor = obj["ssres_stor"].values
-        ssres_stor[:] = obj["ssstor_init_frac"].values * sat_threshold
+        ssres_stor = refs["ssres_stor"]
+        ssres_stor[:] = refs["ssstor_init_frac"] * sat_threshold
         ssres_stor[wh_inactive_or_lake] = 0.0
 
         # no ag storage on LAKE|INACTIVE (ag_frac==0 asserted at istep0)
@@ -573,18 +577,18 @@ class PRMSSoilzoneAg(Process):
 
         # upstream order: ag_soil_lower_stor_max from the PRE-clamp
         # ag_soil_rechr_max
-        obj["ag_soil_lower_stor_max"].values[:] = (
-            obj["ag_soil_moist_max"].values - ag_soil_rechr_max
+        refs["ag_soil_lower_stor_max"][:] = (
+            refs["ag_soil_moist_max"] - ag_soil_rechr_max
         )
 
         # -- upstream "adjust_parameters" block, exact order. TRUE
         # parameter edits cannot happen against frozen parameters --
-        if (obj["soil_moist_max"].values < 1.0e-5).any():
+        if (refs["soil_moist_max"] < 1.0e-5).any():
             raise NotImplementedError(
                 "PRMSSoilzoneAg: soil_moist_max < 1e-5 requires upstream's "
                 "parameter adjustment, not ported (frozen parameters)"
             )
-        if (obj["ag_soil_moist_max"].values < 1.0e-5).any():
+        if (refs["ag_soil_moist_max"] < 1.0e-5).any():
             raise NotImplementedError(
                 "PRMSSoilzoneAg: ag_soil_moist_max < 1e-5 requires "
                 "upstream's parameter adjustment, not ported"
@@ -596,13 +600,13 @@ class PRMSSoilzoneAg(Process):
             ag_soil_rechr_max < 1.0e-5, 1.0e-5, ag_soil_rechr_max
         )
         soil_rechr_max[:] = np.where(
-            soil_rechr_max > obj["soil_moist_max"].values,
-            obj["soil_moist_max"].values,
+            soil_rechr_max > refs["soil_moist_max"],
+            refs["soil_moist_max"],
             soil_rechr_max,
         )
         ag_soil_rechr_max[:] = np.where(
-            ag_soil_rechr_max > obj["ag_soil_moist_max"].values,
-            obj["ag_soil_moist_max"].values,
+            ag_soil_rechr_max > refs["ag_soil_moist_max"],
+            refs["ag_soil_moist_max"],
             ag_soil_rechr_max,
         )
         soil_rechr[:] = np.where(
@@ -614,13 +618,13 @@ class PRMSSoilzoneAg(Process):
             ag_soil_rechr,
         )
         soil_moist[:] = np.where(
-            soil_moist > obj["soil_moist_max"].values,
-            obj["soil_moist_max"].values,
+            soil_moist > refs["soil_moist_max"],
+            refs["soil_moist_max"],
             soil_moist,
         )
         ag_soil_moist[:] = np.where(
-            ag_soil_moist > obj["ag_soil_moist_max"].values,
-            obj["ag_soil_moist_max"].values,
+            ag_soil_moist > refs["ag_soil_moist_max"],
+            refs["ag_soil_moist_max"],
             ag_soil_moist,
         )
         soil_rechr[:] = np.where(
@@ -634,8 +638,8 @@ class PRMSSoilzoneAg(Process):
         )
 
         # -- preferential-flow thresholds by hru_type --
-        pref_flow_thrsh = obj["pref_flow_thrsh"].values
-        pref_flow_max = obj["pref_flow_max"].values
+        pref_flow_thrsh = refs["pref_flow_thrsh"]
+        pref_flow_max = refs["pref_flow_max"]
         pref_flow_thrsh[:] = 0.0
         pref_flow_max[:] = 0.0
         wh_swale = np.where(hru_type == _SWALE)
@@ -649,8 +653,8 @@ class PRMSSoilzoneAg(Process):
         )
 
         # -- split initial ssres_stor into slow / preferential --
-        slow_stor = obj["slow_stor"].values
-        pref_flow_stor = obj["pref_flow_stor"].values
+        slow_stor = refs["slow_stor"]
+        pref_flow_stor = refs["pref_flow_stor"]
         wh_land_or_swale = np.where((hru_type == 1) | (hru_type == _SWALE))
         slow_stor[wh_land_or_swale] = np.minimum(
             ssres_stor[wh_land_or_swale], pref_flow_thrsh[wh_land_or_swale]
@@ -669,36 +673,123 @@ class PRMSSoilzoneAg(Process):
         # where den == 0, so local!=global WOULD change answers).
         self._pref_flow_flag = bool((pref_flow_den > 0.0).any())
 
-        obj["soil_lower"].values[:] = soil_moist - soil_rechr
-        soil_lower_max = obj["soil_lower_max"].values
-        soil_lower_max[:] = obj["soil_moist_max"].values - soil_rechr_max
+        refs["soil_lower"][:] = soil_moist - soil_rechr
+        soil_lower_max = refs["soil_lower_max"]
+        soil_lower_max[:] = refs["soil_moist_max"] - soil_rechr_max
         wh_soil_lower_stor = np.where(soil_lower_max > 0.0)
-        obj["soil_lower_ratio"].values[wh_soil_lower_stor] = (
-            obj["soil_lower"].values[wh_soil_lower_stor]
+        refs["soil_lower_ratio"][wh_soil_lower_stor] = (
+            refs["soil_lower"][wh_soil_lower_stor]
             / soil_lower_max[wh_soil_lower_stor]
         )
 
         # -- *_prev seeds --
-        obj["soil_rechr_prev"].values[:] = soil_rechr
-        obj["soil_lower_prev"].values[:] = obj["soil_lower"].values
-        obj["ag_soil_moist_prev"].values[:] = ag_soil_moist
-        obj["ag_soil_rechr_prev"].values[:] = ag_soil_rechr
-        obj["pref_flow_stor_prev"].values[:] = pref_flow_stor
-        obj["slow_stor_prev"].values[:] = slow_stor
+        refs["soil_rechr_prev"][:] = soil_rechr
+        refs["soil_lower_prev"][:] = refs["soil_lower"]
+        refs["ag_soil_moist_prev"][:] = ag_soil_moist
+        refs["ag_soil_rechr_prev"][:] = ag_soil_rechr
+        refs["pref_flow_stor_prev"][:] = pref_flow_stor
+        refs["slow_stor_prev"][:] = slow_stor
+
+        # -- kernel argument tuples, assembled ONCE (the refs never
+        # change: DEVELOPER.md "Per-step data access"); the family
+        # tuple needs _pref_flow_flag, its iterating form AET_external
+        # (an ObsET-leaf field) --
+        flags = (False, True) if "AET_external" in refs else (False,)
+        self._family_args = {
+            flag: self._build_family_args(flag) for flag in flags
+        }
+        self._update_areas_args = self._hold(
+            "ag_area",
+            "hru_area_perv",
+            "hru_frac_perv",
+            "ag_soil_moist",
+            "ag_soil_rechr",
+            "slow_stor",
+            "soil_moist",
+            "soil_rechr",
+            "ag_frac",
+            "hru_area",
+            "hru_area_imperv",
+            "dprst_frac",
+            "hru_type",
+        )
+        self._pre_args = self._hold(
+            "soil_lower",
+            "ag_soil_moist_redistribution",
+            "ag_soil_rechr_redistribution",
+            "soil_rechr_redistribution",
+            "soil_lower_redistribution",
+            "slow_stor_redistribution",
+            "soil_moist",
+            "soil_rechr",
+            "ag_soil_moist",
+            "ag_soil_rechr",
+            "slow_stor",
+            "soil_rechr_prev",
+            "soil_lower_prev",
+            "slow_stor_prev",
+            "ag_soil_moist_prev",
+            "ag_soil_rechr_prev",
+        )
+        self._post_args = self._hold(
+            "pref_flow_stor_change",
+            "soil_lower_change",
+            "soil_rechr_change",
+            "slow_stor_change",
+            "soil_lower_change_hru",
+            "soil_rechr_change_hru",
+            "ag_soil_moist_change",
+            "ag_soil_rechr_change",
+            "ag_soil_lower_change",
+            "ag_soil_moist_change_hru",
+            "ag_soil_rechr_change_hru",
+            "ag_soil_lower_change_hru",
+            "sroff_vol",
+            "ssres_flow_vol",
+            "perv_infil_hru",
+            "ag_infil_hru",
+            "pref_flow_stor",
+            "pref_flow_stor_prev",
+            "soil_lower",
+            "soil_lower_prev",
+            "soil_lower_redistribution",
+            "soil_rechr",
+            "soil_rechr_prev",
+            "soil_rechr_redistribution",
+            "slow_stor",
+            "slow_stor_prev",
+            "slow_stor_redistribution",
+            "hru_frac_perv",
+            "ag_soil_moist",
+            "ag_soil_moist_prev",
+            "ag_soil_moist_redistribution",
+            "ag_soil_rechr",
+            "ag_soil_rechr_prev",
+            "ag_soil_rechr_redistribution",
+            "ag_frac",
+            "sroff",
+            "ssres_flow",
+            "hru_in_to_cf",
+            "infil",
+            "infil_ag",
+        )
 
     # ------------------------------------------------------------------
     # Computation
     # ------------------------------------------------------------------
 
     def advance(self) -> None:
-        obj = self._obj
-        obj["pref_flow_stor_prev"].values[:] = obj["pref_flow_stor"].values
-        obj["soil_rechr_prev"].values[:] = obj["soil_rechr"].values
-        obj["soil_lower_prev"].values[:] = obj["soil_lower"].values
-        obj["slow_stor_prev"].values[:] = obj["slow_stor"].values
-        obj["ag_soil_moist_prev"].values[:] = obj["ag_soil_moist"].values
-        obj["ag_soil_rechr_prev"].values[:] = obj["ag_soil_rechr"].values
+        refs = self._refs
+        refs["pref_flow_stor_prev"][:] = refs["pref_flow_stor"]
+        refs["soil_rechr_prev"][:] = refs["soil_rechr"]
+        refs["soil_lower_prev"][:] = refs["soil_lower"]
+        refs["slow_stor_prev"][:] = refs["slow_stor"]
+        refs["ag_soil_moist_prev"][:] = refs["ag_soil_moist"]
+        refs["ag_soil_rechr_prev"][:] = refs["ag_soil_rechr"]
 
+    # NOT cache=True: the kernels call prms_soilzone.py's jitted helpers;
+    # a cached caller never notices an edited callee (DEVELOPER.md
+    # "Numba cache").
     @staticmethod
     @numba.njit
     def _update_areas(
@@ -1361,217 +1452,154 @@ class PRMSSoilzoneAg(Process):
             perv_infil_hru[hh] = infil[hh] * hru_frac_perv[hh]
             ag_infil_hru[hh] = infil_ag[hh] * ag_frac[hh]
 
+    def _hold(self, *names: str) -> tuple:
+        """The named field ndarrays as a tuple, for a kernel call made
+        every step: ``self._kernel(*self._kernel_args)``."""
+        return tuple(self._refs[nn] for nn in names)
+
     def _calculate_family(self, iter_aet_flag: bool) -> None:
         """One physics pass over the shared family kernel (the ObsET
         subclass calls this inside its iteration loop)."""
-        obj = self._obj
+        self._calculate(*self._family_args[iter_aet_flag])
+
+    def _build_family_args(self, iter_aet_flag: bool) -> tuple:
+        """The family kernel's ~80 arguments, assembled ONCE per flag
+        value at the end of initialize() (see the _family_args note
+        there)."""
+        refs = self._refs
         if iter_aet_flag:
-            aet_external = obj["AET_external"].values
+            aet_external = refs["AET_external"]
         else:
             # never read under iter_aet_flag=False; benign aliasing
-            aet_external = obj["ag_irrigation_add"].values
-        self._calculate(
+            aet_external = refs["ag_irrigation_add"]
+        return (
             iter_aet_flag,
             self._pref_flow_flag,
-            obj["soil_moist"].values,
-            obj["soil_rechr"].values,
-            obj["ag_soil_moist"].values,
-            obj["ag_soil_rechr"].values,
-            obj["pref_flow_stor"].values,
-            obj["slow_stor"].values,
-            obj["ssres_stor"].values,
-            obj["soil_to_gw"].values,
-            obj["soil_to_ssr"].values,
-            obj["perv_soil_to_gw"].values,
-            obj["perv_soil_to_gvr"].values,
-            obj["ag_soil_to_gw"].values,
-            obj["ag_soil_to_gvr"].values,
-            obj["ssr_to_gw"].values,
-            obj["slow_flow"].values,
-            obj["ssres_flow"].values,
-            obj["potet_rechr"].values,
-            obj["potet_lower"].values,
-            obj["ag_potet_rechr"].values,
-            obj["ag_potet_lower"].values,
-            obj["cap_waterin"].values,
-            obj["cap_infil_tot"].values,
-            obj["ag_cap_infil_tot"].values,
-            obj["pref_flow_in"].values,
-            obj["pref_flow_infil"].values,
-            obj["pref_flow"].values,
-            obj["perv_actet"].values,
-            obj["perv_actet_hru"].values,
-            obj["ag_actet"].values,
-            obj["hru_ag_actet"].values,
-            obj["hru_actet"].values,
-            obj["soil_lower"].values,
-            obj["ag_soil_lower"].values,
-            obj["dunnian_flow"].values,
-            obj["soil_moist_tot"].values,
-            obj["ssres_in"].values,
-            obj["recharge"].values,
-            obj["unused_potet"].values,
-            obj["unused_ag_et"].values,
-            obj["ag_hortonian"].values,
-            obj["ag_soil_saturated"].values,
-            obj["swale_actet"].values,
-            obj["soil_saturated"].values,
-            obj["soil_lower_ratio"].values,
-            obj["sroff"].values,
-            obj["dprst_evap_hru"].values,
-            obj["dprst_seep_hru"].values,
-            obj["hru_impervevap"].values,
-            obj["hru_intcpevap"].values,
-            obj["infil"].values,
-            obj["infil_ag"].values,
-            obj["potet"].values,
-            obj["transp_on"].values,
-            obj["snow_evap"].values,
-            obj["snowcov_area"].values,
+            refs["soil_moist"],
+            refs["soil_rechr"],
+            refs["ag_soil_moist"],
+            refs["ag_soil_rechr"],
+            refs["pref_flow_stor"],
+            refs["slow_stor"],
+            refs["ssres_stor"],
+            refs["soil_to_gw"],
+            refs["soil_to_ssr"],
+            refs["perv_soil_to_gw"],
+            refs["perv_soil_to_gvr"],
+            refs["ag_soil_to_gw"],
+            refs["ag_soil_to_gvr"],
+            refs["ssr_to_gw"],
+            refs["slow_flow"],
+            refs["ssres_flow"],
+            refs["potet_rechr"],
+            refs["potet_lower"],
+            refs["ag_potet_rechr"],
+            refs["ag_potet_lower"],
+            refs["cap_waterin"],
+            refs["cap_infil_tot"],
+            refs["ag_cap_infil_tot"],
+            refs["pref_flow_in"],
+            refs["pref_flow_infil"],
+            refs["pref_flow"],
+            refs["perv_actet"],
+            refs["perv_actet_hru"],
+            refs["ag_actet"],
+            refs["hru_ag_actet"],
+            refs["hru_actet"],
+            refs["soil_lower"],
+            refs["ag_soil_lower"],
+            refs["dunnian_flow"],
+            refs["soil_moist_tot"],
+            refs["ssres_in"],
+            refs["recharge"],
+            refs["unused_potet"],
+            refs["unused_ag_et"],
+            refs["ag_hortonian"],
+            refs["ag_soil_saturated"],
+            refs["swale_actet"],
+            refs["soil_saturated"],
+            refs["soil_lower_ratio"],
+            refs["sroff"],
+            refs["dprst_evap_hru"],
+            refs["dprst_seep_hru"],
+            refs["hru_impervevap"],
+            refs["hru_intcpevap"],
+            refs["infil"],
+            refs["infil_ag"],
+            refs["potet"],
+            refs["transp_on"],
+            refs["snow_evap"],
+            refs["snowcov_area"],
             aet_external,
-            obj["ag_irrigation_add"].values,
-            obj["hru_type"].values,
-            obj["cov_type"].values,
-            obj["ag_cov_type"].values,
-            obj["fastcoef_lin"].values,
-            obj["fastcoef_sq"].values,
-            obj["hru_frac_perv"].values,
-            obj["ag_frac"].values,
-            obj["ag_area"].values,
-            obj["hru_area_perv"].values,
-            obj["_pref_flow_den"].values,
-            obj["pref_flow_infil_frac"].values,
-            obj["_sat_threshold"].values,
-            obj["slowcoef_lin"].values,
-            obj["slowcoef_sq"].values,
-            obj["soil_moist_max"].values,
-            obj["soil_rechr_max"].values,
-            obj["soil_type"].values,
-            obj["ag_soil_type"].values,
-            obj["ag_soil_moist_max"].values,
-            obj["ag_soil_rechr_max"].values,
-            obj["soil2gw_max"].values,
-            obj["ssr2gw_exp"].values,
-            obj["ssr2gw_rate"].values,
-            obj["pref_flow_max"].values,
-            obj["pref_flow_thrsh"].values,
-            obj["soil_lower_max"].values,
+            refs["ag_irrigation_add"],
+            refs["hru_type"],
+            refs["cov_type"],
+            refs["ag_cov_type"],
+            refs["fastcoef_lin"],
+            refs["fastcoef_sq"],
+            refs["hru_frac_perv"],
+            refs["ag_frac"],
+            refs["ag_area"],
+            refs["hru_area_perv"],
+            refs["_pref_flow_den"],
+            refs["pref_flow_infil_frac"],
+            refs["_sat_threshold"],
+            refs["slowcoef_lin"],
+            refs["slowcoef_sq"],
+            refs["soil_moist_max"],
+            refs["soil_rechr_max"],
+            refs["soil_type"],
+            refs["ag_soil_type"],
+            refs["ag_soil_moist_max"],
+            refs["ag_soil_rechr_max"],
+            refs["soil2gw_max"],
+            refs["ssr2gw_exp"],
+            refs["ssr2gw_rate"],
+            refs["pref_flow_max"],
+            refs["pref_flow_thrsh"],
+            refs["soil_lower_max"],
         )
 
     def _pre_kernel(self) -> None:
         """istep0 areas (once) + per-step area update + pre lines."""
-        obj = self._obj
-        self._update_areas(
-            obj["ag_area"].values,
-            obj["hru_area_perv"].values,
-            obj["hru_frac_perv"].values,
-            obj["ag_soil_moist"].values,
-            obj["ag_soil_rechr"].values,
-            obj["slow_stor"].values,
-            obj["soil_moist"].values,
-            obj["soil_rechr"].values,
-            obj["ag_frac"].values,
-            obj["hru_area"].values,
-            obj["hru_area_imperv"].values,
-            obj["dprst_frac"].values,
-            obj["hru_type"].values,
-        )
-        self._pre(
-            obj["soil_lower"].values,
-            obj["ag_soil_moist_redistribution"].values,
-            obj["ag_soil_rechr_redistribution"].values,
-            obj["soil_rechr_redistribution"].values,
-            obj["soil_lower_redistribution"].values,
-            obj["slow_stor_redistribution"].values,
-            obj["soil_moist"].values,
-            obj["soil_rechr"].values,
-            obj["ag_soil_moist"].values,
-            obj["ag_soil_rechr"].values,
-            obj["slow_stor"].values,
-            obj["soil_rechr_prev"].values,
-            obj["soil_lower_prev"].values,
-            obj["slow_stor_prev"].values,
-            obj["ag_soil_moist_prev"].values,
-            obj["ag_soil_rechr_prev"].values,
-        )
+        self._update_areas(*self._update_areas_args)
+        self._pre(*self._pre_args)
 
     def _istep0_areas(self) -> None:
         """upstream _initialize_soilzone_ag_data area block: runs at
         time zero in calculate() (ag_frac now fed); once-only numpy
         staging."""
-        obj = self._obj
-        hru_type = obj["hru_type"].values
-        hru_area = obj["hru_area"].values
+        refs = self._refs
+        hru_type = refs["hru_type"]
+        hru_area = refs["hru_area"]
 
         wh_no_ag = np.where((hru_type == _LAKE) | (hru_type == _INACTIVE))
         # GSFLOW zeroes ag_frac on this mask; upstream (and this port)
         # will NOT edit inputs -- assert instead
-        assert (obj["ag_frac"].values[wh_no_ag] == 0.0).all()
+        assert (refs["ag_frac"][wh_no_ag] == 0.0).all()
 
-        np.multiply(obj["ag_frac"].values, hru_area, out=obj["ag_area"].values)
-        hru_area_perv = obj["hru_area_perv"].values
-        hru_area_perv[:] = hru_area - obj["hru_area_imperv"].values
+        np.multiply(refs["ag_frac"], hru_area, out=refs["ag_area"])
+        hru_area_perv = refs["hru_area_perv"]
+        hru_area_perv[:] = hru_area - refs["hru_area_imperv"]
         wh_active = np.where(hru_type != _INACTIVE)
-        dprst_area_max = obj["dprst_frac"].values * hru_area
+        dprst_area_max = refs["dprst_frac"] * hru_area
         hru_area_perv[wh_active] = (
             hru_area_perv[wh_active]
             - dprst_area_max[wh_active]
-            - obj["ag_area"].values[wh_active]
+            - refs["ag_area"][wh_active]
         )
-        obj["hru_frac_perv"].values[:] = 0.0
-        obj["hru_frac_perv"].values[wh_active] = (
+        refs["hru_frac_perv"][:] = 0.0
+        refs["hru_frac_perv"][wh_active] = (
             hru_area_perv[wh_active] / hru_area[wh_active]
         )
-        obj["soil_moist_tot"].values[:] = (
-            obj["ssres_stor"].values
-            + obj["soil_moist"].values * obj["hru_frac_perv"].values
-            + obj["ag_soil_moist"].values * obj["ag_frac"].values
+        refs["soil_moist_tot"][:] = (
+            refs["ssres_stor"]
+            + refs["soil_moist"] * refs["hru_frac_perv"]
+            + refs["ag_soil_moist"] * refs["ag_frac"]
         )
 
     def _post_kernel(self) -> None:
-        obj = self._obj
-        self._post(
-            obj["pref_flow_stor_change"].values,
-            obj["soil_lower_change"].values,
-            obj["soil_rechr_change"].values,
-            obj["slow_stor_change"].values,
-            obj["soil_lower_change_hru"].values,
-            obj["soil_rechr_change_hru"].values,
-            obj["ag_soil_moist_change"].values,
-            obj["ag_soil_rechr_change"].values,
-            obj["ag_soil_lower_change"].values,
-            obj["ag_soil_moist_change_hru"].values,
-            obj["ag_soil_rechr_change_hru"].values,
-            obj["ag_soil_lower_change_hru"].values,
-            obj["sroff_vol"].values,
-            obj["ssres_flow_vol"].values,
-            obj["perv_infil_hru"].values,
-            obj["ag_infil_hru"].values,
-            obj["pref_flow_stor"].values,
-            obj["pref_flow_stor_prev"].values,
-            obj["soil_lower"].values,
-            obj["soil_lower_prev"].values,
-            obj["soil_lower_redistribution"].values,
-            obj["soil_rechr"].values,
-            obj["soil_rechr_prev"].values,
-            obj["soil_rechr_redistribution"].values,
-            obj["slow_stor"].values,
-            obj["slow_stor_prev"].values,
-            obj["slow_stor_redistribution"].values,
-            obj["hru_frac_perv"].values,
-            obj["ag_soil_moist"].values,
-            obj["ag_soil_moist_prev"].values,
-            obj["ag_soil_moist_redistribution"].values,
-            obj["ag_soil_rechr"].values,
-            obj["ag_soil_rechr_prev"].values,
-            obj["ag_soil_rechr_redistribution"].values,
-            obj["ag_frac"].values,
-            obj["sroff"].values,
-            obj["ssres_flow"].values,
-            obj["hru_in_to_cf"].values,
-            obj["infil"].values,
-            obj["infil_ag"].values,
-        )
+        self._post(*self._post_args)
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         if time.current_index == 0:
@@ -1651,23 +1679,26 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
 
     def initialize(self) -> None:
         super().initialize()
-        obj = self._obj
+        refs = self._refs
         for name in self._OBS_ZERO_VARS:
-            obj[name].values[:] = 0
-        # It0 iteration scratch (persistent; prime directive: memory)
-        nhru = obj["hru_area"].values.shape[0]
-        self._it0 = {
-            name: np.zeros(nhru, dtype=np.float64)
-            for name in (
-                "soil_moist",
-                "soil_rechr",
-                "ssres_stor",
-                "slow_stor",
-                "ag_soil_moist",
-                "ag_soil_rechr",
-                "pref_flow_stor",
-            )
-        }
+            refs[name][:] = 0
+        # It0 iteration scratch (persistent; prime directive: memory),
+        # one buffer per _IT0_NAMES entry, same order
+        nhru = refs["hru_area"].shape[0]
+        self._it0 = tuple(np.zeros(nhru, dtype=np.float64) for _ in _IT0_NAMES)
+        self._it0_state = self._hold(*_IT0_NAMES)
+        self._prep_aet_args = self._hold(
+            "AET_external",
+            "ag_irrigation_add",
+            "ag_irrigation_add_vol",
+            "ag_aet_external_vol",
+            "aet_observed",
+            "ag_frac",
+            "transp_on",
+        )
+        # parameters are frozen: the iteration caps, read once
+        self._max_iter = int(refs["max_soilzone_ag_iter"][0])
+        self._converge = float(refs["soilzone_aet_converge"][0])
 
     @staticmethod
     @numba.njit
@@ -1794,36 +1825,30 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
             ag_irrigation_hru_source[hh] = ag_irrigation_add[hh] * ag_frac[hh]
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
         if time.current_index == 0:
             self._istep0_areas()
         self._pre_kernel()
+        refs = self._refs
 
         # store initial values for iteration (Fortran It0 variables)
-        for name, buf in self._it0.items():
-            buf[:] = obj[name].values
+        for live, buf in zip(self._it0_state, self._it0, strict=True):
+            buf[:] = live
 
-        n_transp = self._prep_aet(
-            obj["AET_external"].values,
-            obj["ag_irrigation_add"].values,
-            obj["ag_irrigation_add_vol"].values,
-            obj["ag_aet_external_vol"].values,
-            obj["aet_observed"].values,
-            obj["ag_frac"].values,
-            obj["transp_on"].values,
-        )
+        n_transp = self._prep_aet(*self._prep_aet_args)
 
-        max_iter = int(obj["max_soilzone_ag_iter"].values[0])
-        converge = float(obj["soilzone_aet_converge"].values[0])
+        max_iter = self._max_iter
+        converge = self._converge
 
         keep_iterating = True
         soil_iter = 1
         while keep_iterating:
             if soil_iter > 1:
-                for name, buf in self._it0.items():
+                for name, live, buf in zip(
+                    _IT0_NAMES, self._it0_state, self._it0, strict=True
+                ):
                     if name == "pref_flow_stor" and not (self._pref_flow_flag):
                         continue
-                    obj[name].values[:] = buf
+                    live[:] = buf
 
             self._calculate_family(iter_aet_flag=True)
 
@@ -1832,17 +1857,17 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
                 _num_hrus_ag_iter,
                 _unsatisfied_big,
             ) = self._adjust_irrigation(
-                obj["ag_soilwater_deficit"].values,
-                obj["ag_irrigation_add"].values,
-                obj["unused_ag_et"].values,
-                obj["ag_soil_moist"].values,
-                obj["ag_soil_moist_max"].values,
-                obj["transp_on"].values,
-                obj["ag_area"].values,
+                refs["ag_soilwater_deficit"],
+                refs["ag_irrigation_add"],
+                refs["unused_ag_et"],
+                refs["ag_soil_moist"],
+                refs["ag_soil_moist_max"],
+                refs["transp_on"],
+                refs["ag_area"],
                 soil_iter,
                 max_iter,
                 converge,
-                obj["ag_soilwater_deficit_min"].values,
+                refs["ag_soilwater_deficit_min"],
             )
 
             if not add_estimated_irrigation:
@@ -1856,19 +1881,19 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         soil_iter -= 1
 
         self._iter_diag(
-            obj["iter_count"].values,
-            obj["iter_end_status"].values,
-            obj["ag_irrigation_add_vol"].values,
-            obj["ag_aet_external_vol"].values,
-            obj["ag_irrigation_hru_source"].values,
-            obj["ag_irrigation_add"].values,
-            obj["ag_actet"].values,
-            obj["ag_area"].values,
-            obj["ag_frac"].values,
-            obj["transp_on"].values,
-            obj["unused_ag_et"].values,
-            obj["ag_soilwater_deficit"].values,
-            obj["ag_soilwater_deficit_min"].values,
+            refs["iter_count"],
+            refs["iter_end_status"],
+            refs["ag_irrigation_add_vol"],
+            refs["ag_aet_external_vol"],
+            refs["ag_irrigation_hru_source"],
+            refs["ag_irrigation_add"],
+            refs["ag_actet"],
+            refs["ag_area"],
+            refs["ag_frac"],
+            refs["transp_on"],
+            refs["unused_ag_et"],
+            refs["ag_soilwater_deficit"],
+            refs["ag_soilwater_deficit_min"],
             soil_iter,
             max_iter,
             converge,

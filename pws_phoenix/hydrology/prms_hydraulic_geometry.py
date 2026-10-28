@@ -39,6 +39,7 @@ parameters_PRMSHydraulicGeometry*.nc.
 import numba
 import numpy as np
 
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -138,7 +139,7 @@ class PRMSHydraulicGeometryWidthOnly(Process):
     )
 
     def initialize(self) -> None:
-        obj = self._obj
+        refs = self._refs
         for name in (
             "seg_flow_width",
             "seg_flow_depth",
@@ -146,20 +147,20 @@ class PRMSHydraulicGeometryWidthOnly(Process):
             "seg_flow_velocity",
             "seg_res_time",
         ):
-            obj[name].values[:] = 0.0
+            refs[name][:] = 0.0
         self._set_depth_params()
 
     def _set_depth_params(self) -> None:
         """The strmflow_character defaults (Full overrides to no-op:
         its depth_alpha/depth_m are supplied parameters)."""
-        self._obj["depth_alpha"].values[:] = _DEPTH_ALPHA_DEFAULT
-        self._obj["depth_m"].values[:] = _DEPTH_M_DEFAULT
+        self._refs["depth_alpha"][:] = _DEPTH_ALPHA_DEFAULT
+        self._refs["depth_m"][:] = _DEPTH_M_DEFAULT
 
     def advance(self) -> None:
         pass  # no *_prev state
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # outputs (written in place)
         seg_flow_width: np.ndarray,
@@ -194,19 +195,19 @@ class PRMSHydraulicGeometryWidthOnly(Process):
                 ) / flow_cms
 
     def calculate(self, dt: np.float64, time: Time) -> None:
-        obj = self._obj
+        refs = self._refs
         self._calculate(
-            obj["seg_flow_width"].values,
-            obj["seg_flow_depth"].values,
-            obj["seg_flow_area"].values,
-            obj["seg_flow_velocity"].values,
-            obj["seg_res_time"].values,
-            obj["seg_outflow"].values,
-            obj["width_alpha"].values,
-            obj["width_m"].values,
-            obj["depth_alpha"].values,
-            obj["depth_m"].values,
-            obj["seg_length"].values,
+            refs["seg_flow_width"],
+            refs["seg_flow_depth"],
+            refs["seg_flow_area"],
+            refs["seg_flow_velocity"],
+            refs["seg_res_time"],
+            refs["seg_outflow"],
+            refs["width_alpha"],
+            refs["width_m"],
+            refs["depth_alpha"],
+            refs["depth_m"],
+            refs["seg_length"],
         )
 
 
