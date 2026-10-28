@@ -533,9 +533,30 @@ steps):** the Python between the kernels costs ~2 us in stream temp
 kernels (20.9 of 42.9 us: the Python obs-ET iteration and its `_it0`
 copies). So the one-kernel-per-leaf redesign is NOT a speed item;
 the `time_kernel` rows these four lack would show the same ~2 us
-gap. Next targets: `_shade_all` (43% of the whole step; the
-width-independent solar geometry may tabulate at `initialize` like
-`soltab`), and the obs-ET iteration into numba.
+gap. The obs-ET iteration into numba remains a (small) target.
+
+### Stream shade (Oct 27, 2026; same `--dry-run` method)
+
+A stub-each-helper split of the 267 us shade: `_rprnvg` (the two
+15-point vegetation quadratures, `seg_width`-dependent) 158 us, the
+`_solalt`/`_snr_sst` sunrise/sunset solvers 97 us, the rest 12. Two
+changes (`prms_stream_shade.py` module docstring; PORTS.md shade row):
+the solver half tabulated per (day of year, segment) at
+`PRMSStreamTemp.initialize` (5 x (366, 456) float64 = 6.7 MB;
+operation-identical, pinned exact by
+`test_tabulated_shade_is_exact`), and the quadrature's six trig calls
+per point reduced to one algebraically (agrees to rounding; the 5e-3
+shade and stream-temp pins hold).
+
+| benchmark | before | after |
+| --------- | ------ | ----- |
+| `ProcessLifecycle.time_calculate[prms_stream_temp]` | 350 us | 127 us |
+| `ProcessLifecycle.time_initialize[prms_stream_temp]` | 21.5 ms | 64.8 ms (the table build) |
+| `StepBreakdown.time_calculate_all` | 586 us | 330 us |
+| `ChainStep.time_chain_step` | 636 us | 396 us |
+
+The step is now 0.40 ms against 9.80 ms at the start of the day
+(`_refs` cache, framework cuts, shade): 25x.
 
 ## 6. asv.conf.json
 

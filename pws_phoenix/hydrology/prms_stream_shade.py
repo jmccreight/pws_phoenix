@@ -9,11 +9,23 @@ Upstream structures this as strategy OBJECTS (PRMSStreamShadeConstant
 / PRMSStreamShadeDynamic) composed into its stream-temperature
 Process; the actual physics is a set of scalar njit functions
 (_shday + _solalt + _snr_sst + _rprnvg + the 15-point Gaussian
-quadrature tables). This module carries THOSE, extracted VERBATIM
+quadrature tables). This module carries THOSE, extracted verbatim
 from upstream (only the parallel=True decorator dropped -- no
 threaded numba here, prange degrades to range) -- our stream-temp
 leaves call them directly, the same seam as the shared soilzone /
 runoff / starfit helpers (no strategy-object machinery needed).
+
+Two deliberate departures (Oct 2026; shade was 43% of the whole NHM
+step, 267 us/day on drb's 456 segments):
+- shday is SPLIT at its rprnvg call into _shday_statics (the
+  sunrise/sunset geometry: depends on latitude, declination = day of
+  year, azimuth and bank altitudes -- 36% of the cost, tabulated per
+  (day of year, segment) by PRMSStreamTemp.initialize) and
+  _shday_from_statics (the seg_width-dependent vegetation shade, per
+  step). _shday remains their composition, operation-identical to
+  upstream.
+- _rprnvg's per-point trig chain is reduced algebraically (its
+  docstring); results agree to rounding, not bit-for-bit.
 
 Modes (PRMS stream_temp_shade_flag): 0 = DYNAMIC (topography +
 vegetation via _shday; drb nhm_stream_temp runs this), 1 = CONSTANT
@@ -157,57 +169,22 @@ def _shday_vectorized(
 
 
 @nb.jit(nopython=True)
-def _shday(
-    seg_lat,
-    declination,
-    seg_width,
-    azrh,
-    alte,
-    altw,
-    vce,
-    voe,
-    vhe,
-    vdemx,
-    vdemn,
-    summer_flag,
-    vcw,
-    vow,
-    vhw,
-    vdwmx,
-    vdwmn,
-    maxiter_sntemp,
-):
-    """Compute daily shade from topography and vegetation.
+def _shday_statics(seg_lat, declination, azrh, alte, altw, maxiter_sntemp):
+    """The seg_width-INDEPENDENT half of shday: the level-plain and
+    topographic sunrise/sunset geometry of one segment on one solar
+    declination (= one day of year) -- everything upstream's shday
+    computes before its rprnvg call, operation for operation (the
+    _solalt / _snr_sst Newton solves live here).
 
-    This is the shday function from PRMS.
-
-    Args:
-        seg_lat: Segment latitude (radians)
-        declination: Solar declination (radians)
-        seg_width: Flow width for the segment (meters)
-        azrh: Stream azimuth angle (radians)
-        alte: East bank topographic altitude (radians)
-        altw: West bank topographic altitude (radians)
-        vce: East bank vegetation crown width (meters)
-        voe: East bank vegetation offset (meters)
-        vhe: East bank vegetation height (meters)
-        vdemx: Maximum east bank vegetation density
-        vdemn: Minimum east bank vegetation density
-        summer_flag: 1 for summer, 0 for winter
-        vcw: West bank vegetation crown width (meters)
-        vow: West bank vegetation offset (meters)
-        vhw: West bank vegetation height (meters)
-        vdwmx: Maximum west bank vegetation density
-        vdwmn: Minimum west bank vegetation density
-        maxiter_sntemp: Maximum iterations for convergence
-
-    Returns:
-        shade: Shade fraction (0-1)
-        svi: Vegetation shade index
+    Returns (hrsr, hrrh, hrss, sti, totsh): the sunrise, reach-sunrise
+    and sunset hour angles _rprnvg integrates between (hrrh is the
+    reach hour angle clipped to [hrsr, hrss] on topographic banks and
+    unclipped on level ones -- exactly the value upstream hands
+    rprnvg in each branch), the topographic shade and the level-plain
+    potential. Depends on nothing that changes within a run, so
+    PRMSStreamTemp tabulates it per (day of year, segment) at
+    initialize (Oct 2026) and the per-step work is _shday_from_statics.
     """
-    if seg_width <= 0.0:
-        return 0.0, 0.0
-
     coso = math.cos(seg_lat)
     if coso == 0.0:
         coso = NEARZERO
@@ -288,29 +265,7 @@ def _shday(
         hrsr = -hrso
         hrss = hrso
         sti = 0.0
-        svi = _rprnvg(
-            hrsr,
-            hrrs,
-            hrss,
-            sino,
-            coso,
-            sin_d,
-            cosod,
-            sinod,
-            vce,
-            voe,
-            vhe,
-            azrh,
-            vdemx,
-            vdemn,
-            seg_width,
-            summer_flag,
-            vcw,
-            vow,
-            vhw,
-            vdwmx,
-            vdwmn,
-        ) / (seg_width * totsh)
+        hrrh = hrrs
     else:
         if -azso <= azrh:
             altop_0 = alte
@@ -393,31 +348,73 @@ def _shday(
             )
             / (totsh)
         )
-        svi = (
-            _rprnvg(
-                hrsr,
-                hrrh,
-                hrss,
-                sino,
-                coso,
-                sin_d,
-                cosod,
-                sinod,
-                vce,
-                voe,
-                vhe,
-                azrh,
-                vdemx,
-                vdemn,
-                seg_width,
-                summer_flag,
-                vcw,
-                vow,
-                vhw,
-                vdwmx,
-                vdwmn,
-            )
-        ) / (seg_width * totsh)
+
+    return hrsr, hrrh, hrss, sti, totsh
+
+
+@nb.jit(nopython=True)
+def _shday_from_statics(
+    hrsr,
+    hrrh,
+    hrss,
+    sti,
+    totsh,
+    seg_lat,
+    declination,
+    seg_width,
+    vce,
+    voe,
+    vhe,
+    azrh,
+    vdemx,
+    vdemn,
+    summer_flag,
+    vcw,
+    vow,
+    vhw,
+    vdwmx,
+    vdwmn,
+):
+    """The seg_width-DEPENDENT half of shday: the riparian vegetation
+    shade (_rprnvg) between the tabulated hour angles, normalized and
+    clamped, plus the tabulated topographic shade. Returns
+    (shade, svi) as shday does."""
+    if seg_width <= 0.0:
+        return 0.0, 0.0
+
+    coso = math.cos(seg_lat)
+    if coso == 0.0:
+        coso = NEARZERO
+
+    sino = math.sin(seg_lat)
+    sin_d = math.sin(declination)
+    cos_d = math.cos(declination)
+    sinod = sino * sin_d
+    cosod = coso * cos_d
+
+    svi = _rprnvg(
+        hrsr,
+        hrrh,
+        hrss,
+        sino,
+        coso,
+        sin_d,
+        cosod,
+        sinod,
+        vce,
+        voe,
+        vhe,
+        azrh,
+        vdemx,
+        vdemn,
+        seg_width,
+        summer_flag,
+        vcw,
+        vow,
+        vhw,
+        vdwmx,
+        vdwmn,
+    ) / (seg_width * totsh)
 
     if sti < 0.0:
         sti = 0.0
@@ -431,6 +428,82 @@ def _shday(
     shade = sti + svi
 
     return shade, svi
+
+
+@nb.jit(nopython=True)
+def _shday(
+    seg_lat,
+    declination,
+    seg_width,
+    azrh,
+    alte,
+    altw,
+    vce,
+    voe,
+    vhe,
+    vdemx,
+    vdemn,
+    summer_flag,
+    vcw,
+    vow,
+    vhw,
+    vdwmx,
+    vdwmn,
+    maxiter_sntemp,
+):
+    """Compute daily shade from topography and vegetation.
+
+    This is the shday function from PRMS.
+
+    Args:
+        seg_lat: Segment latitude (radians)
+        declination: Solar declination (radians)
+        seg_width: Flow width for the segment (meters)
+        azrh: Stream azimuth angle (radians)
+        alte: East bank topographic altitude (radians)
+        altw: West bank topographic altitude (radians)
+        vce: East bank vegetation crown width (meters)
+        voe: East bank vegetation offset (meters)
+        vhe: East bank vegetation height (meters)
+        vdemx: Maximum east bank vegetation density
+        vdemn: Minimum east bank vegetation density
+        summer_flag: 1 for summer, 0 for winter
+        vcw: West bank vegetation crown width (meters)
+        vow: West bank vegetation offset (meters)
+        vhw: West bank vegetation height (meters)
+        vdwmx: Maximum west bank vegetation density
+        vdwmn: Minimum west bank vegetation density
+        maxiter_sntemp: Maximum iterations for convergence
+
+    Returns:
+        shade: Shade fraction (0-1)
+        svi: Vegetation shade index
+    """
+    hrsr, hrrh, hrss, sti, totsh = _shday_statics(
+        seg_lat, declination, azrh, alte, altw, maxiter_sntemp
+    )
+    return _shday_from_statics(
+        hrsr,
+        hrrh,
+        hrss,
+        sti,
+        totsh,
+        seg_lat,
+        declination,
+        seg_width,
+        vce,
+        voe,
+        vhe,
+        azrh,
+        vdemx,
+        vdemn,
+        summer_flag,
+        vcw,
+        vow,
+        vhw,
+        vdwmx,
+        vdwmn,
+    )
 
 
 @nb.jit(nopython=True)
@@ -677,7 +750,21 @@ def _rprnvg(
 
     Returns:
         Total vegetation shade (sum of east and west bank contributions)
+
+    DEPARTURE from verbatim (Oct 2026, a deliberate speed change): each
+    quadrature point's six trig calls (cos, arcsin, cos, sin, arccos,
+    sin) are reduced to one (cos of the hour angle) by taking sin/cos
+    of the solar altitude and azimuth algebraically from the quantities
+    whose arcsin/arccos upstream evaluates -- the same functions of the
+    same inputs, so the results agree to rounding (last-bit, not
+    exact); stream shade's pins are 5e-3 (tests/test_prms_stream_shade.py).
+    One guard upstream lacks: cos(als) == 0 -> NEARZERO (upstream's
+    cos(arcsin(1)) is 6e-17, never exactly 0).
     """
+    # cos/sin of the reach azimuth, once per call (see the point loop)
+    cosazrh = math.cos(azrh)
+    sinazrh = math.sin(azrh)
+
     # Determine seasonal shade
     if hrsr == hrss:
         svri = 0.0
@@ -691,15 +778,18 @@ def _rprnvg(
             for n in range(15):
                 hrs = hrsr + (EPSLON[n] * delhsr)
                 coshrs = np.cos(hrs)
-                # sinhrs = np.sin(hrs)
-                temp = sinod + (cosod * coshrs)
-                if temp > 1.0:
-                    temp = 1.0
-                als = np.arcsin(temp)
-                cosals = np.cos(als)
-                sinals = np.sin(als)
+                # sin of the solar altitude als directly: upstream takes
+                # arcsin then sin/cos of it; cos(als) = sqrt(1 - sin^2)
+                # (als in [0, pi/2]); the (1-x)(1+x) form keeps precision
+                # near 1
+                sinals = sinod + (cosod * coshrs)
+                if sinals > 1.0:
+                    sinals = 1.0
+                cosals = math.sqrt((1.0 - sinals) * (1.0 + sinals))
                 if sinals == 0.0:
                     sinals = NEARZERO
+                if cosals == 0.0:
+                    cosals = NEARZERO
 
                 temp = ((sino * sinals) - sin_d) / (coso * cosals)
 
@@ -708,15 +798,17 @@ def _rprnvg(
                 elif temp < -1.0:
                     temp = -1.0
 
-                azs = np.arccos(temp)
-                if azs < 0.0:
-                    azs = HALF_PI - azs
+                # solar azimuth azs = arccos(temp) in [0, pi] (upstream's
+                # `if azs < 0` branch can never fire); hrs < 0 negates
+                # azs, i.e. negates sin(azs) only. The |sin(azs - azrh)|
+                # factor expands with the per-call cos/sin of azrh.
+                cosazs = temp
+                sinazs = math.sqrt((1.0 - temp) * (1.0 + temp))
                 if hrs < 0.0:
-                    azs = -azs
+                    sinazs = -sinazs
+                sin_azs_azrh = (sinazs * cosazrh) - (cosazs * sinazrh)
 
-                bs = (
-                    (vhe * (cosals / sinals)) * abs(np.sin(azs - azrh))
-                ) + vco
+                bs = ((vhe * (cosals / sinals)) * abs(sin_azs_azrh)) + vco
                 if bs < 0.0:
                     bs = 0.0
                 if bs > seg_width:
@@ -737,15 +829,18 @@ def _rprnvg(
             for n in range(15):
                 hrs = hrrs + (EPSLON[n] * delhss)
                 coshrs = np.cos(hrs)
-                # sinhrs = np.sin(hrs)
-                temp = sinod + (cosod * coshrs)
-                if temp > 1.0:
-                    temp = 1.0
-                als = np.arcsin(temp)
-                cosals = np.cos(als)
-                sinals = np.sin(als)
+                # sin of the solar altitude als directly: upstream takes
+                # arcsin then sin/cos of it; cos(als) = sqrt(1 - sin^2)
+                # (als in [0, pi/2]); the (1-x)(1+x) form keeps precision
+                # near 1
+                sinals = sinod + (cosod * coshrs)
+                if sinals > 1.0:
+                    sinals = 1.0
+                cosals = math.sqrt((1.0 - sinals) * (1.0 + sinals))
                 if sinals == 0.0:
                     sinals = NEARZERO
+                if cosals == 0.0:
+                    cosals = NEARZERO
 
                 temp = ((sino * sinals) - sin_d) / (coso * cosals)
 
@@ -754,15 +849,17 @@ def _rprnvg(
                 elif temp < -1.0:
                     temp = -1.0
 
-                azs = np.arccos(temp)
-                if azs < 0.0:
-                    azs = HALF_PI - azs
+                # solar azimuth azs = arccos(temp) in [0, pi] (upstream's
+                # `if azs < 0` branch can never fire); hrs < 0 negates
+                # azs, i.e. negates sin(azs) only. The |sin(azs - azrh)|
+                # factor expands with the per-call cos/sin of azrh.
+                cosazs = temp
+                sinazs = math.sqrt((1.0 - temp) * (1.0 + temp))
                 if hrs < 0.0:
-                    azs = -azs
+                    sinazs = -sinazs
+                sin_azs_azrh = (sinazs * cosazrh) - (cosazs * sinazrh)
 
-                bs = (
-                    (vhw * (cosals / sinals)) * abs(np.sin(azs - azrh))
-                ) + vco
+                bs = ((vhw * (cosals / sinals)) * abs(sin_azs_azrh)) + vco
                 if bs < 0.0:
                     bs = 0.0
                 if bs > seg_width:

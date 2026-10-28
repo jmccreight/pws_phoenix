@@ -71,7 +71,10 @@ import numba as nb
 import numpy as np
 
 from pws_phoenix.clock import Time
-from pws_phoenix.hydrology.prms_stream_shade import _shday
+from pws_phoenix.hydrology.prms_stream_shade import (
+    _shday_from_statics,
+    _shday_statics,
+)
 from pws_phoenix.process import DataArrayMeta, Process
 
 # pywatershed constants (constants.py + prms_stream_temp.py)
@@ -868,19 +871,61 @@ def _reset_water_temp(
 
 
 @nb.jit(nopython=True)
+def _shade_statics_table(
+    # (ndoy, nsegment) tables, written in place
+    hrsr: np.ndarray,
+    hrrh: np.ndarray,
+    hrss: np.ndarray,
+    sti: np.ndarray,
+    totsh: np.ndarray,
+    # (ndoy,) declination; (nsegment,) geometry parameters
+    declination: np.ndarray,
+    seg_lat_rad: np.ndarray,
+    azrh: np.ndarray,
+    alte: np.ndarray,
+    altw: np.ndarray,
+    maxiter_sntemp: int,
+) -> None:
+    """_shday_statics for every (day of year, segment): the
+    seg_width-independent sunrise/sunset geometry, computed once at
+    initialize (the Newton solves were 36% of the per-step shade)."""
+    for dd in range(declination.shape[0]):
+        for ss in range(seg_lat_rad.shape[0]):
+            (
+                hrsr[dd, ss],
+                hrrh[dd, ss],
+                hrss[dd, ss],
+                sti[dd, ss],
+                totsh[dd, ss],
+            ) = _shday_statics(
+                seg_lat_rad[ss],
+                declination[dd],
+                azrh[ss],
+                alte[ss],
+                altw[ss],
+                maxiter_sntemp,
+            )
+
+
+@nb.jit(nopython=True)
 def _shade_all(
-    # written in place (allocation-free _shday_vectorized)
+    # written in place
     seg_shade: np.ndarray,
     seg_svi: np.ndarray,
     # per-day scalars
+    iday: int,
     declination: float,
     summer_flag: int,
+    # the (ndoy, nsegment) tables of _shade_statics_table
+    hrsr: np.ndarray,
+    hrrh: np.ndarray,
+    hrss: np.ndarray,
+    sti: np.ndarray,
+    totsh: np.ndarray,
     # arrays
     seg_lat_rad: np.ndarray,
     seg_flow_width: np.ndarray,
     azrh: np.ndarray,
-    alte: np.ndarray,
-    altw: np.ndarray,
     vce: np.ndarray,
     voe: np.ndarray,
     vhe: np.ndarray,
@@ -891,19 +936,21 @@ def _shade_all(
     vhw: np.ndarray,
     vdwmx: np.ndarray,
     vdwmn: np.ndarray,
-    maxiter_sntemp: int,
 ) -> None:
     for ss in range(seg_shade.shape[0]):
-        seg_shade[ss], seg_svi[ss] = _shday(
+        seg_shade[ss], seg_svi[ss] = _shday_from_statics(
+            hrsr[iday, ss],
+            hrrh[iday, ss],
+            hrss[iday, ss],
+            sti[iday, ss],
+            totsh[iday, ss],
             seg_lat_rad[ss],
             declination,
             seg_flow_width[ss],
-            azrh[ss],
-            alte[ss],
-            altw[ss],
             vce[ss],
             voe[ss],
             vhe[ss],
+            azrh[ss],
             vdemx[ss],
             vdemn[ss],
             summer_flag,
@@ -912,7 +959,6 @@ def _shade_all(
             vhw[ss],
             vdwmx[ss],
             vdwmn[ss],
-            maxiter_sntemp,
         )
 
 
@@ -1214,7 +1260,7 @@ class PRMSStreamTempBase(Process):
         # (upstream: zero each step; skipped segments keep 0.0)
         refs["seg_tave_upstream"][:] = 0.0
 
-        self._compute_shade(declination, summer_flag)
+        self._compute_shade(doy, declination, summer_flag)
 
         _reset_water_temp(refs["segment_order"], refs["seg_tave_water"])
 
@@ -1254,9 +1300,11 @@ class PRMSStreamTempBase(Process):
             1.0,  # atmos_exchange_factor (upstream default)
         )
 
-    def _compute_shade(self, declination: float, summer_flag: int) -> None:
+    def _compute_shade(
+        self, doy: int, declination: float, summer_flag: int
+    ) -> None:
         """Write seg_shade (and the _seg_svi scratch) in place for the
-        current day. Leaves supply the shade source."""
+        current day (doy 1-based). Leaves supply the shade source."""
         raise NotImplementedError(
             "PRMSStreamTempBase is abstract: use PRMSStreamTemp "
             "(dynamic shade) or PRMSStreamTempConstantShade."
@@ -1284,9 +1332,11 @@ class PRMSStreamTempBase(Process):
 
 class PRMSStreamTemp(PRMSStreamTempBase):
     """The core with DYNAMIC shade (stream_temp_shade_flag = 0, the
-    drb configuration): per-day per-segment shday
-    (prms_stream_shade._shday) from the vegetation/topography
-    parameters."""
+    drb configuration): per-day per-segment shday from the
+    vegetation/topography parameters -- its sunrise/sunset geometry
+    tabulated per (day of year, segment) at initialize
+    (prms_stream_shade._shday_statics), the seg_width-dependent
+    vegetation shade per step (_shday_from_statics)."""
 
     # -- dynamic shade parameters (PRMS stream_temp shday) --
     azrh = _meta("parameter", "Stream azimuth angle [radians]")
@@ -1303,18 +1353,52 @@ class PRMSStreamTemp(PRMSStreamTempBase):
     vdwmx = _meta("parameter", "Max west bank vegetation density [-]")
     vdwmn = _meta("parameter", "Min west bank vegetation density [-]")
 
-    def _compute_shade(self, declination: float, summer_flag: int) -> None:
+    def initialize(self) -> None:
+        super().initialize()
+        # the seg_width-independent shade geometry per (day of year,
+        # segment): 5 x (366, nsegment) float64 = 6.7 MB on drb, the
+        # same order as the gw/ss silos above; rebuilt by initialize
+        # like the other statics (not restart state)
+        refs = self._refs
+        nsegment = refs["seg_length"].shape[0]
+        shape = (MAX_DAYS_PER_YEAR, nsegment)
+        self._sh_hrsr = np.zeros(shape, dtype=np.float64)
+        self._sh_hrrh = np.zeros(shape, dtype=np.float64)
+        self._sh_hrss = np.zeros(shape, dtype=np.float64)
+        self._sh_sti = np.zeros(shape, dtype=np.float64)
+        self._sh_totsh = np.zeros(shape, dtype=np.float64)
+        _shade_statics_table(
+            self._sh_hrsr,
+            self._sh_hrrh,
+            self._sh_hrss,
+            self._sh_sti,
+            self._sh_totsh,
+            self._declination,
+            refs["_seg_lat_rad"],
+            refs["azrh"],
+            refs["alte"],
+            refs["altw"],
+            self._maxiter,
+        )
+
+    def _compute_shade(
+        self, doy: int, declination: float, summer_flag: int
+    ) -> None:
         refs = self._refs
         _shade_all(
             refs["seg_shade"],
             self._seg_svi,
+            doy - 1,
             declination,
             summer_flag,
+            self._sh_hrsr,
+            self._sh_hrrh,
+            self._sh_hrss,
+            self._sh_sti,
+            self._sh_totsh,
             refs["_seg_lat_rad"],
             refs["seg_flow_width"],
             refs["azrh"],
-            refs["alte"],
-            refs["altw"],
             refs["vce"],
             refs["voe"],
             refs["vhe"],
@@ -1325,7 +1409,6 @@ class PRMSStreamTemp(PRMSStreamTempBase):
             refs["vhw"],
             refs["vdwmx"],
             refs["vdwmn"],
-            self._maxiter,
         )
 
 
@@ -1344,7 +1427,9 @@ class PRMSStreamTempConstantShade(PRMSStreamTempBase):
         "parameter", "Total winter vegetation shade fraction [-]"
     )
 
-    def _compute_shade(self, declination: float, summer_flag: int) -> None:
+    def _compute_shade(
+        self, doy: int, declination: float, summer_flag: int
+    ) -> None:
         refs = self._refs
         if summer_flag == 1:
             refs["seg_shade"][:] = refs["segshade_sum"]

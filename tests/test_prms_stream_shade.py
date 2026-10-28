@@ -15,6 +15,12 @@ Fortran-vs-python trig/iteration noise upstream describes (the
 answers are Fortran shday). This pins the shade physics in isolation
 before PRMSStreamTemp composes it (stage 3).
 
+test_tabulated_shade_is_exact pins the Oct 2026 split of shday
+(prms_stream_shade module docstring): PRMSStreamTemp's per-step path
+-- the (day of year, segment) tables of _shday_statics +
+_shade_all -- must equal _shday_vectorized bit for bit, since the two
+run the same operations in the same order.
+
 Requires drb_2yr with GENERATED nhm_stream_temp answers; skips with a
 clear reason if absent.
 """
@@ -24,6 +30,10 @@ import pytest
 import xarray as xr
 from conftest import PWS_TEST_DATA
 from pws_phoenix.hydrology.prms_stream_shade import _shday_vectorized
+from pws_phoenix.hydrology.prms_stream_temp import (
+    _shade_all,
+    _shade_statics_table,
+)
 
 DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output_stream_temp"
@@ -119,3 +129,80 @@ def test_shday_all_days_all_segments():
         atol=ATOL,
         err_msg="seg_shade differs from pywatershed",
     )
+
+
+def test_tabulated_shade_is_exact():
+    """The tabulated per-step path == the verbatim composition, exactly,
+    on four days of year spanning the year (both summer-flag states,
+    both solstice sides), each with some row of the answers' flow
+    widths (any row serves: the check is path-vs-path, not vs answers)."""
+    params = xr.load_dataset(
+        DOMAIN_DIR / "parameters_PRMSStreamShadeDynamic.nc"
+    )
+    dis_seg = xr.load_dataset(DOMAIN_DIR / "parameters_dis_seg.nc")
+    seg_flow_width = xr.load_dataarray(GEN_DIR / "seg_flow_width.nc")
+
+    seg_lat_rad = dis_seg["seg_lat"].values * (np.pi / 180.0)
+    maxiter = int(params["maxiter_sntemp"].values[0])
+    names = (
+        "azrh",
+        "alte",
+        "altw",
+        "vce",
+        "voe",
+        "vhe",
+        "vdemx",
+        "vdemn",
+        "vcw",
+        "vow",
+        "vhw",
+        "vdwmx",
+        "vdwmn",
+    )
+    pp = {nn: params[nn].values for nn in names}
+    nseg = seg_lat_rad.shape[0]
+
+    # the PRMSStreamTemp.initialize recipe: the (366,) declination
+    # table, then the five (366, nseg) tables
+    kk = np.arange(366) + 1.0
+    declination = 0.40928 * np.cos(((2.0 * np.pi) / _DAYS_YR) * (172.0 - kk))
+    tables = [np.zeros((366, nseg)) for _ in range(5)]
+    _shade_statics_table(
+        *tables,
+        declination,
+        seg_lat_rad,
+        pp["azrh"],
+        pp["alte"],
+        pp["altw"],
+        maxiter,
+    )
+
+    seg_shade = np.zeros(nseg)
+    seg_svi = np.zeros(nseg)
+    for tt, doy in ((0, 274), (91, 1), (182, 92), (273, 183)):
+        summer_flag = 1 if 121 <= doy <= 273 else 0
+        width = seg_flow_width.values[tt, :]
+        veg = tuple(pp[nn] for nn in names)
+        _shade_all(
+            seg_shade,
+            seg_svi,
+            doy - 1,
+            float(declination[doy - 1]),
+            summer_flag,
+            *tables,
+            seg_lat_rad,
+            width,
+            pp["azrh"],
+            *veg[3:],
+        )
+        shades, svis = _shday_vectorized(
+            seg_lat_rad,
+            float(declination[doy - 1]),
+            width,
+            *veg[:8],
+            summer_flag,
+            *veg[8:],
+            maxiter,
+        )
+        np.testing.assert_array_equal(seg_shade, shades)
+        np.testing.assert_array_equal(seg_svi, svis)
