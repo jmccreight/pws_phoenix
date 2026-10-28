@@ -601,6 +601,7 @@ class Model:
                     f"Map '{map_name}': source variable '{mm.source_var}' "
                     f"not found on grid '{mm.source_grid}'."
                 )
+            mm.bind(source_ds)
             # grid_sizes overrides a grid's dataset size for the weights
             # shape check (ModelMPI passes the GLOBAL size of the
             # decomposed grid; its dataset only knows the rank-local
@@ -699,7 +700,7 @@ class Model:
         later consumers re-read the same target buffer."""
         for proc_name, vv in self.model_dict.items():
             for mm in self._proc_maps[proc_name]:
-                mm.apply(self.discretizations[mm.source_grid].dataset)
+                mm.apply()
             vv.calculate(dt, self.time)
 
     def run(self, dt: np.float64, n_steps: np.int32) -> None:
@@ -710,8 +711,8 @@ class Model:
         start = self._start_index
         for tt in range(start, start + int(n_steps)):
             self.current_time_index[0] = tt
-            self.current_time[0] = self.times[tt].values
             self.time.set_index(tt)
+            self.current_time[0] = self.time.current
             self.advance()
             self.calculate(dt=dt)
             if self.output is not None:
@@ -1356,7 +1357,7 @@ class ModelMPI(Model):
                 proc.advance()
             for proc_name, proc in self.model_dict.items():
                 for mm in self._proc_maps[proc_name]:
-                    mm.apply(self.discretizations[mm.source_grid].dataset)
+                    mm.apply()
                 proc.calculate(dt, self.time)
             # Record state into the streaming output slab(s) and write.
             # Every step lands on disk (no values_on_disk subset at

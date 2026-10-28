@@ -116,9 +116,10 @@ would fail them.
 
 1. **Never rebind a name to a new array after assembly.** Anything that
    must change a buffer's contents writes in place (`arr[:] = ...`):
-   input refills, Map targets (`Map.apply` already writes into
-   `target_values`), restart restores (`_restore_grid_var`), warm-start
-   seeding. Assigning `ds[name] = new_da` after bind is a bug.
+   input refills, Map targets (`Map.apply` writes into `target_values`;
+   `Map.bind`, called from `_resolve_maps`, holds the source and
+   target ndarrays the same way a process holds `_refs`), restart
+   restores (`_restore_grid_var`), warm-start seeding. Assigning `ds[name] = new_da` after bind is a bug.
 2. **The cache is captured ONCE, at bind, and NOT at the MPI rebind**
    (`proc._obj = step` in `ModelMPI.run` only re-points the dataset).
    Recapturing would re-pay the lookups every step; the invariant

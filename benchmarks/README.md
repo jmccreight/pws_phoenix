@@ -384,7 +384,19 @@ they join `KERNEL_ROWS`.
 | `track_step_alloc_bytes` | 5 more warm steps, then `tracemalloc` around `get_model().run(DT, np.int32(30))` | net bytes retained over 30 steps, byte-exact (numpy reports to tracemalloc) -- THE prime-directive number; expected ~0. First run (Oct 2026): 7.9 MB when measured from step 2 = late numba compiles of branches first reached after step 1; a few kB from step 6 |
 
 `time_chain_step` minus the sum of the nine `time_advance +
-time_calculate` = the framework overhead (Maps, Inputs, loop).
+time_calculate` = the framework overhead (Maps, Inputs, loop). The
+`StepBreakdown` rows split it (all on the warm model, `number = 10`,
+none consuming the time axis):
+
+| benchmark             | the call                                                                                        |
+| --------------------- | ----------------------------------------------------------------------------------------------- |
+| `time_maps`           | the 13 `mm.apply(...)` exactly as `Model.calculate` issues them, no process `calculate`         |
+| `time_inputs_advance` | `ii.set_index(current); ii.advance()` per `Input` -- the rewind makes it drift-free             |
+| `time_clock`          | `Time.set_index` + `current_time[0] = time.current` + `month/year/day_of_month/doy/dowy` once each |
+| `time_advance_all`    | the nine `pp.advance()`                                                                          |
+| `time_calculate_all`  | the nine `vv.calculate(dt, time)`, no Maps                                                       |
+
+`time_chain_step` minus the five = the loop residual.
 
 Step budget: the shared model cannot be rewound and drb_2yr has 731
 steps, so `time_chain_step` must consume fewer than that over its
@@ -493,9 +505,37 @@ slower/faster.
 | `track_step_alloc_bytes` | 6.75 kB | 6.71 kB | -- | no new per-step allocation |
 | `ModelBuild`, `PeakMemory`, `OutputZarr` | | | within noise | |
 
-Next targets, in order of size: the ~1.3 ms framework share of the
-chain step; the four multi-kernel processes (stream temp 362 us has no
-kernel row yet).
+### After the framework cuts (Oct 27, 2026; `--dry-run` runs of `bench_model.(StepBreakdown|ChainStep)`, uncommitted tree)
+
+The `StepBreakdown` rows attributed the ~1.3 ms, three cuts followed,
+each measured in turn (`time_chain_step` after each: 1.91 -> 1.56 ->
+1.07 -> 0.73 -> 0.64 ms):
+
+| piece | before | after | the cut |
+| ----- | ------ | ----- | ------- |
+| `time_maps` (13 Maps) | 822 us | 12.4 us | `Map.bind` holds the source/target ndarrays (-283 us, the 13 Dataset lookups); then `_apply_sparse`, an njit row-compressed product over the nonzeros, replaces the dense `np.matmul` over (456 x 765) mostly-zero weights (-527 us) |
+| `time_inputs_advance` (3 CBH) | 309 us | 2.8 us | `Input.advance` copies between held ndarrays when the data are in memory (`Variable._in_memory`); the lazy file-backed path still reads one slice through xarray |
+| `time_clock` | 72 us | 1.8 us | `Time.set_index` derives the five calendar fields once per step from one `datetime` conversion; the loop reads `time.current` instead of `self.times[tt].values` |
+| `time_advance_all` | 2.8 us | 3.2 us | -- |
+| `time_calculate_all` | 556 us | 586 us | -- (run-to-run) |
+| `ChainStep.time_chain_step` | 1.91 ms | 0.64 ms | the five rows sum to 606 us; loop residual ~30 us |
+
+All suites green after each cut (the sparse product sums each row's
+~1.7 nonzeros in column order where BLAS used its own blocked order;
+the 1e-13 flow checks did not move).
+
+**The multi-kernel processes, measured (same evening; a one-off
+wrapper timing each njit call inside `calculate()` over 200 warm
+steps):** the Python between the kernels costs ~2 us in stream temp
+(350 us: `_shade_all` 274, `_compute_water_temp` 60,
+`_update_running_avg_temp` 12), atmosphere (18.9) and RunoffAg
+(25.3); only PRMSSoilzoneAgObsET has a real share outside its
+kernels (20.9 of 42.9 us: the Python obs-ET iteration and its `_it0`
+copies). So the one-kernel-per-leaf redesign is NOT a speed item;
+the `time_kernel` rows these four lack would show the same ~2 us
+gap. Next targets: `_shade_all` (43% of the whole step; the
+width-independent solar geometry may tabulate at `initialize` like
+`soltab`), and the obs-ET iteration into numba.
 
 ## 6. asv.conf.json
 

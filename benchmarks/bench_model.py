@@ -23,7 +23,20 @@
                                                   the prime directive says ~0
 
 time_chain_step minus the nine (time_advance + time_calculate) of
-bench_process = the framework overhead (Maps, Inputs, loop).
+bench_process = the framework overhead (Maps, Inputs, loop). The
+StepBreakdown rows split it, each on the warm model, number = 10,
+none consuming the time axis:
+
+    time_maps            the 13 mm.apply(...) as Model.calculate issues
+                         them (no process calculate)
+    time_inputs_advance  Input.set_index(current) + Input.advance() per
+                         Input: the rewind makes it drift-free
+    time_clock           Time.set_index + current_time[0] = time.current
+                         + the five calendar properties once each
+    time_advance_all     the nine pp.advance()
+    time_calculate_all   the nine vv.calculate(dt, time), no Maps
+
+time_chain_step - (the five) = the loop residual.
 
 Step budget: the shared model cannot be rewound and drb_2yr has 731
 steps. time_chain_step consumes number x (warm-up iterations + repeat)
@@ -48,6 +61,48 @@ class ChainStep:
 
     def time_chain_step(self):
         get_model().run(DT, np.int32(1))
+
+
+class StepBreakdown:
+    """The framework share of time_chain_step, piece by piece (module
+    docstring). Every row runs on the warm shared model and leaves its
+    time index where it found it."""
+
+    number = 10
+    repeat = TIMING_ATTRS["repeat"]
+    rounds = TIMING_ATTRS["rounds"]
+    warmup_time = TIMING_ATTRS["warmup_time"]
+    timeout = TIMING_ATTRS["timeout"]
+
+    def time_maps(self):
+        model = get_model()
+        for proc_name in model.model_dict:
+            for mm in model._proc_maps[proc_name]:
+                mm.apply()
+
+    def time_inputs_advance(self):
+        model = get_model()
+        idx = model.time.current_index
+        for ii in model.inputs_dict.values():
+            ii.set_index(idx)
+            ii.advance()
+
+    def time_clock(self):
+        model = get_model()
+        tt = model.time.current_index
+        model.time.set_index(tt)
+        model.current_time[0] = model.time.current
+        time = model.time
+        _ = (time.month, time.year, time.day_of_month, time.doy, time.dowy)
+
+    def time_advance_all(self):
+        for pp in get_model().model_dict.values():
+            pp.advance()
+
+    def time_calculate_all(self):
+        model = get_model()
+        for vv in model.model_dict.values():
+            vv.calculate(DT, model.time)
 
 
 class ModelBuild:

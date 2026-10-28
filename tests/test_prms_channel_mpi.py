@@ -304,7 +304,9 @@ def mpi_run(mpi_paths, weights):
             for nn in ("seg_outflow", "seg_inflow")
         },
         # each MapMPI holds exactly this rank's weight columns
-        "map_local_cols": [mm._weights_local.shape[1] for mm in maps.values()],
+        "map_local_cols": [
+            mm._local[1] - mm._local[0] for mm in maps.values()
+        ],
         "local_n": local_n,
         "derived_frozen": not channel["c0"].values.flags.writeable,
     }
