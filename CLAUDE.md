@@ -275,11 +275,14 @@ open_writer → declare buffers → create → iterate → write`.
 
 ## Known mpixarray limits (Phase 1)
 
-- Pre-1.0.0, a 2nd `to_file=True` streaming-output var tripped a "cannot
-  pickle 'module' object" deepcopy. 1.0.0's `file_io/writer_handle.py`
-  defines `__deepcopy__`, so the limit is probably lifted -- untested here;
-  we still stream only `flow` and validate `storage_previous` from final
-  in-memory state.
+- (RESOLVED Oct 28, 2026) Multiple `to_file=True` streaming-output vars:
+  pre-1.0.0 a 2nd one tripped a deepcopy; in 1.0.0 a 2nd `(time, grid)`
+  declaration replaced the `time` coord with a copy lacking
+  `__mpi_parent` (`MPI_Dataset.__setitem__` let the incoming array's
+  coords win; fixed in the mpixarray clone with a `drop_vars` of shared
+  coords, reported upstream). `tests/test_prms_groundwater_mpi.py`
+  streams two; `mpi_model_from_control` now injects the PRMS control's
+  output request per destination.
 - `as_iterable` requires the streaming dim to be a real dim-coordinate.
 - A non-`time` extra dim on a resident var (e.g. a `(month, space)` cyclic
   time-varying parameter) is assumed to survive `as_iterable` untouched (it is
@@ -343,9 +346,9 @@ the `epiweeks` dep).
 - `ModelInputs` / `input_spec()` / `resolve_inputs()` / `init_run_phase()` lazy
   lifecycle (`get_inputs()` is already classmethod-level; streaming's `create()`
   is a latent `init_run_phase`).
-- Multi-output-var streaming: try under mpixarray 1.0.0 (see Known limits).
-  (Cyclic-monthly time-varying parameters are implemented -- see "Variable
-  taxonomy".) Coarse-linear (e.g. per-(year,month)) time-varying params remain.
+- Coarse-linear (e.g. per-(year,month)) time-varying params remain
+  (cyclic-monthly ones are implemented -- see "Variable taxonomy";
+  multi-output-var streaming is resolved -- see Known limits).
 - Deferred review minors (July 2026): generalize `Output` beyond 1-D
   spatial vars (only when a real multi-dim output var exists -- it fails
   loudly today); rename `map.py`/`globals.py` (they shadow builtins) when

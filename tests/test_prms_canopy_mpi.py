@@ -39,7 +39,7 @@ INPUT_NAMES = (
     "potet",
     "pptmix",
 )
-STREAMED_NAME = "net_rain"  # the one to_netcdf var (mpixarray limit)
+STREAMED_NAME = "net_rain"  # validated from the stream; others: final state
 FINAL_STATE_NAMES = (
     "net_ppt",
     "net_snow",

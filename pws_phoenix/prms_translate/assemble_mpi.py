@@ -20,12 +20,14 @@ rank. So the parallel path has two halves:
 
 Required control keys beyond the serial dict: ``input_file`` (from
 the prep half) and ``output_parallel_netcdf`` (the parallel stream);
-``mpi_grid`` defaults to ``"nhru"``. NOTE the known mpixarray limit:
-at most ONE distributed-grid variable may be streamed to disk
-(``output_var_names``); serial-grid output goes to the rank-0 zarr
-(``output_serial_zarr``) as usual. PRMS-control output names are NOT
-auto-injected on the MPI path -- give ``output_var_names``
-explicitly.
+``mpi_grid`` defaults to ``"nhru"``. Output: with no
+``output_var_names`` of your own, the control file's ``*OutVar_names``
+are injected PER DESTINATION -- distributed-grid names stream to
+``output_parallel_netcdf`` (any number; the one-variable mpixarray
+limit fell Oct 28, 2026), serial-grid names go to the rank-0 zarr only
+if ``output_serial_zarr`` was supplied (else they are left out). An
+explicit list wins verbatim. Dropped names are not reported here (no
+ModelKit is returned; see assemble_from_control).
 """
 
 import pathlib as pl
@@ -36,7 +38,11 @@ import xarray as xr
 
 from pws_phoenix.maps import MapMPI
 from pws_phoenix.model import ModelMPI
-from pws_phoenix.prms_translate.assemble import ModelKit, assemble_from_control
+from pws_phoenix.prms_translate.assemble import (
+    ModelKit,
+    assemble_from_control,
+    requested_output_names,
+)
 
 
 def write_mpi_input_file(
@@ -116,15 +122,16 @@ def mpi_model_from_control(
         else:
             process_dict[slot] = entry
 
-    streamed = [
-        nn for nn in control.get("output_var_names", ()) if nn in mpi_vars
-    ]
-    if len(streamed) > 1:
-        raise NotImplementedError(
-            "mpixarray streams at most ONE distributed-grid output "
-            f"variable today; requested {streamed}. Serial-grid "
-            "variables (the rank-0 zarr) are not limited."
-        )
+    # The control file's output request, per destination (the mirror of
+    # the serial gate "injected only when a store was supplied"): the
+    # parallel NetCDF is mandatory, the serial zarr is the caller's.
+    if "output_var_names" not in control and kit.config.output_var_names:
+        kept, _dropped = requested_output_names(kit.config, kit.process_dict)
+        control["output_var_names"] = [
+            nn
+            for nn in kept
+            if nn in mpi_vars or "output_serial_zarr" in control
+        ]
 
     maps = {
         name: MapMPI(

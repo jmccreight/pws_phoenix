@@ -919,11 +919,12 @@ class ModelMPI(Model):
     "discretization" + their data); distributed-grid entries need only
     {"class": ...} -- their data come from input_file.
 
-    NOTE: pre-1.0.0 mpixarray, declaring a 2nd ``to_file=True`` variable
-    tripped a "cannot pickle 'module' object" deepcopy. 1.0.0's writer
-    handle defines ``__deepcopy__``, so the limit is probably lifted --
-    untested here. Phase 1 still streams ONE output var to disk; validate
-    any others from final in-memory state.
+    Any number of distributed-grid variables may stream to disk. (The
+    pre-1.0.0 "one ``to_file=True`` var" deepcopy limit, and its 1.0.0
+    successor -- a 2nd ``(time, grid)`` declaration replaced the ``time``
+    coord with a copy lacking ``__mpi_parent`` in mpixarray's
+    ``MPI_Dataset.__setitem__`` -- were both fixed in mpixarray by
+    Oct 28, 2026; ``tests/test_prms_groundwater_mpi.py`` streams two.)
 
     Usage:
         with ModelMPI(process_dict, control, maps=maps) as model:

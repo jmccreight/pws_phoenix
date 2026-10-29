@@ -62,7 +62,7 @@ GEN_DIR = DOMAIN_DIR / "output"
 
 # the ONLY time-varying inputs: the raw CBH files
 CBH_NAMES = ("prcp", "tmax", "tmin")
-STREAMED_NAME = "gwres_flow"  # the one to_netcdf var (mpixarray limit)
+STREAMED_NAME = "gwres_flow"  # validated from the stream; others: final state
 ANSWER_NAMES = (
     "seg_lateral_inflow",
     "seg_upstream_inflow",

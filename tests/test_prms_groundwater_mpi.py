@@ -39,9 +39,9 @@ DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
 
 INPUT_NAMES = ("soil_to_gw", "ssr_to_gw", "dprst_seep_hru")
-STREAMED_NAME = "gwres_flow"  # the one to_netcdf var (mpixarray limit)
+# two streamed vars: pins multi-variable streaming (mpixarray fix, Oct 2026)
+STREAMED_NAMES = ("gwres_flow", "gwres_stor")
 FINAL_STATE_NAMES = (
-    "gwres_stor",
     "gwres_sink",
     "gwres_stor_change",
     "gwres_flow_vol",
@@ -54,7 +54,7 @@ _needed = [
     DOMAIN_DIR / "parameters_dis_hru.nc",
 ] + [
     GEN_DIR / f"{nn}.nc"
-    for nn in INPUT_NAMES + FINAL_STATE_NAMES + (STREAMED_NAME,)
+    for nn in INPUT_NAMES + FINAL_STATE_NAMES + STREAMED_NAMES
 ]
 _missing = [str(ff) for ff in _needed if not ff.exists()]
 pytestmark = pytest.mark.skipif(
@@ -116,7 +116,7 @@ def mpi_paths():
 def answers():
     """Ground truth read straight from pywatershed's answer files --
     collective-free, every rank reads identically."""
-    names = FINAL_STATE_NAMES + (STREAMED_NAME,)
+    names = FINAL_STATE_NAMES + STREAMED_NAMES
     return {nn: xr.load_dataarray(GEN_DIR / f"{nn}.nc") for nn in names}
 
 
@@ -133,7 +133,7 @@ def mpi_run(mpi_paths):
     control = {
         "input_file": mpi_paths["input_file"],
         "output_parallel_netcdf": mpi_paths["output_file"],
-        "output_var_names": [STREAMED_NAME],
+        "output_var_names": list(STREAMED_NAMES),
         "mpi_grid": "nhru",
     }
     model = ModelMPI(process_dict, control)
@@ -154,18 +154,22 @@ def mpi_run(mpi_paths):
 
 @pytest.mark.mpi(min_size=2)
 class TestPRMSGroundwaterMPI:
-    # -- streamed gwres_flow over all timesteps (global, rank 0) --
-    def test_streamed_gwres_flow_all_timesteps(self, mpi_run, answers):
+    # -- both streamed vars over all timesteps (global, rank 0) --
+    def test_streamed_all_timesteps(self, mpi_run, answers):
         if MPI.COMM_WORLD.rank != 0:
             return
         with xr.load_dataset(mpi_run["output_file"]) as ds_out:
-            flow_out = ds_out[f"{STREAMED_NAME}_out"].values
-        np.testing.assert_allclose(
-            flow_out,
-            answers[STREAMED_NAME].values,
-            rtol=RTOL,
-            atol=ATOL,
-        )
+            streamed = {
+                nn: ds_out[f"{nn}_out"].values for nn in STREAMED_NAMES
+            }
+        for nn, vals in streamed.items():
+            np.testing.assert_allclose(
+                vals,
+                answers[nn].values,
+                rtol=RTOL,
+                atol=ATOL,
+                err_msg=f"streamed variable '{nn}' differs",
+            )
 
     # -- final state of everything else, gathered globally --
     def test_final_state_gathered(self, mpi_run, answers):
