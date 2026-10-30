@@ -46,7 +46,7 @@ deliberately unused, see above).
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE
+from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -297,7 +297,7 @@ class PRMSCanopy(Process):
         refs["hru_intcpstor_old"][:] = refs["hru_intcpstor"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         # in/out state + outputs (written in place)
         net_ppt: np.ndarray,
@@ -333,7 +333,7 @@ class PRMSCanopy(Process):
         potet_sublim: np.ndarray,
     ) -> None:
         nhru = net_ppt.shape[0]
-        for ii in range(nhru):
+        for ii in numba.prange(nhru):
             netrain = hru_rain[ii]
             netsnow = hru_snow[ii]
 

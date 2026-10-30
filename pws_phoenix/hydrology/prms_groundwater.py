@@ -51,7 +51,7 @@ ride in the combined input file instead.
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE
+from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -166,7 +166,7 @@ class PRMSGroundwaterNoDprst(Process):
         self._refs["gwres_stor_old"][:] = self._refs["gwres_stor"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         gwres_stor: np.ndarray,
         gwres_flow: np.ndarray,
@@ -181,7 +181,7 @@ class PRMSGroundwaterNoDprst(Process):
         gwflow_coef: np.ndarray,
         gwsink_coef: np.ndarray,
     ) -> None:
-        for ii in range(gwres_stor.shape[0]):
+        for ii in numba.prange(gwres_stor.shape[0]):
             area = hru_area[ii]
             # to volume (acre-inches); the dprst kernel below with a
             # zero dprst_seep_hru reduces to exactly this sum
@@ -235,7 +235,7 @@ class PRMSGroundwater(PRMSGroundwaterNoDprst):
     )
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         gwres_stor: np.ndarray,
         gwres_flow: np.ndarray,
@@ -251,7 +251,7 @@ class PRMSGroundwater(PRMSGroundwaterNoDprst):
         gwflow_coef: np.ndarray,
         gwsink_coef: np.ndarray,
     ) -> None:
-        for ii in range(gwres_stor.shape[0]):
+        for ii in numba.prange(gwres_stor.shape[0]):
             area = hru_area[ii]
             # to volume (acre-inches); element-wise operation order
             # matches pywatershed's _calculate_numpy exactly

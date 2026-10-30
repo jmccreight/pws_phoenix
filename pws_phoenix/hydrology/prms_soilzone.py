@@ -84,7 +84,7 @@ values, one shared field per grid).
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE
+from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -1030,7 +1030,7 @@ class PRMSSoilzoneNoDprst(Process):
         refs["slow_stor_prev"][:] = refs["slow_stor"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         # in/out state + outputs (written in place)
         cap_infil_tot: np.ndarray,
@@ -1115,7 +1115,7 @@ class PRMSSoilzoneNoDprst(Process):
         nhru = soil_moist.shape[0]
         gwin = 0.0  # GSFLOW upslope inflow, hardwired zero upstream
 
-        for hh in range(nhru):
+        for hh in numba.prange(nhru):
             # upstream pre-loop array lines, per element: diagnostic
             # resets, snow_free, and the hru_actet seed
             soil_to_gw[hh] = 0.0
@@ -1476,7 +1476,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
     # ------------------------------------------------------------------
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         # in/out state + outputs (written in place)
         cap_infil_tot: np.ndarray,
@@ -1559,7 +1559,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
         nhru = soil_moist.shape[0]
         gwin = 0.0  # GSFLOW upslope inflow, hardwired zero upstream
 
-        for hh in range(nhru):
+        for hh in numba.prange(nhru):
             # upstream pre-loop array lines, per element: diagnostic
             # resets, snow_free, and the hru_actet seed (dprst ACTIVE)
             soil_to_gw[hh] = 0.0

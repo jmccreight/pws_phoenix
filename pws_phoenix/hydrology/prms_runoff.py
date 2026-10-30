@@ -72,7 +72,7 @@ parameters_PRMSRunoff.nc.
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE
+from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -1279,7 +1279,7 @@ class PRMSRunoffNoDprst(Process):
         refs["hru_impervstor_old"][:] = refs["hru_impervstor"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -1332,7 +1332,7 @@ class PRMSRunoffNoDprst(Process):
         # shared kernel under dprst_flag == OFF); everything else
         # identical, same shared njit helpers
         nhru = sroff.shape[0]
-        for ii in range(nhru):
+        for ii in numba.prange(nhru):
             # pywatershed allocates soil_moist_prev = lower + rechr as
             # an array pre-loop; scalar per element, same op order
             soil_moist_prev = soil_lower_prev[ii] + soil_rechr_prev[ii]
@@ -1916,7 +1916,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         refs["dprst_stor_hru_old"][:] = refs["dprst_stor_hru"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -1997,7 +1997,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         intcp_changeover_in_net_rain: bool,
     ) -> None:
         nhru = sroff.shape[0]
-        for ii in range(nhru):
+        for ii in numba.prange(nhru):
             # pywatershed allocates soil_moist_prev = lower + rechr as
             # an array pre-loop; scalar per element, same op order
             soil_moist_prev = soil_lower_prev[ii] + soil_rechr_prev[ii]
@@ -2407,7 +2407,7 @@ class PRMSRunoffAg(PRMSRunoff):
     # ------------------------------------------------------------------
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -2491,7 +2491,7 @@ class PRMSRunoffAg(PRMSRunoff):
         # post-kernel array lines live in _post_areas (they must see
         # the UPDATED areas)
         nhru = sroff.shape[0]
-        for ii in range(nhru):
+        for ii in numba.prange(nhru):
             soil_moist_prev = soil_lower_prev[ii] + soil_rechr_prev[ii]
 
             runoff = 0.0

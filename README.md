@@ -95,6 +95,22 @@ in `tests/prms_oracle.toml`; a session aborts when the tree's
 `.oracle_ikey` / `.oracle_okey` / `.derived_okey` markers disagree
 with the pins, so a regenerated oracle shows up as a reviewed key bump.
 
+### Run-time switches (environment variables, read at import)
+
+- `PWS_NUMBA_CACHE` (default `1`): numba keeps compiled kernels on disk
+  beside the source, so a second Python process (a notebook, each MPI
+  rank) skips the compile. `0` turns it off; the tests always run with
+  it off. Rules and what invalidates it: `DEVELOPER.md` "Numba cache".
+- `PWS_NUMBA_PARALLEL` (default `0`): `1` threads the per-HRU element
+  loops with numba `prange` (every hru-grid process's main kernel:
+  atmosphere, canopy, snow, runoff, soilzone, groundwater and the
+  NoDprst/Ag variants; light helper loops and the sequential segment
+  kernels stay single-threaded). Results are bit-identical. The thread count is numba's `NUMBA_NUM_THREADS`, which
+  defaults to every logical core; under `mpirun` set it so that
+  ranks x threads fits the machine, e.g. `NUMBA_NUM_THREADS=3 mpirun -n
+  4 ...` on 14 cores. Pays off only for large domains (thousands of
+  HRUs per process); measurements: `DEVELOPER.md` "Numba threading".
+
 ## Internal design considerations
 
 See CLAUDE.md for design notes and discussion (incl. the xarray-simlab /
