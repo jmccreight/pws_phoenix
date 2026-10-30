@@ -174,19 +174,20 @@ global it reads (numba freezes module globals as constants).
 not discovered by the caller.** Edit `prms_stream_shade.py`: its own
 helpers' entries invalidate, but `prms_stream_temp.py`'s `.nbc` still
 contains the old shade code and runs it -- wrong numbers, no error.
-The same for a constant imported from another module
-(`prms_atmosphere` freezes `solar_constants.solf`). Hence the rule:
+The same for a constant imported from another module (which is why
+`prms_atmosphere` keeps its `_SOLF` table in its own file rather
+than in `solar_constants.py`). Hence the rule:
 
 - opt in (`cache=NUMBA_CACHE`) only where every jitted callee and
   every captured constant lives in the kernel's own file:
   groundwater, runoff (+Ag, +NoDprst), soilzone (+NoDprst), canopy,
-  snow, channel, hydraulic geometry, stream shade, `maps.py`,
-  `processes_concrete.py`;
+  snow, channel, hydraulic geometry, stream shade, atmosphere,
+  `maps.py`, `processes_concrete.py`;
 - leave plain `@numba.njit`, with a comment naming the callee file:
   `prms_stream_temp` (-> stream shade), `prms_soilzone_ag` (->
   soilzone), `starfit_source_sink_flow_node` and
-  `starfit_daily_flow_node` (-> starfit_flow_node), `prms_atmosphere`
-  (-> solar_constants), and the FlowGraph kernel (built per
+  `starfit_daily_flow_node` (-> starfit_flow_node), and the
+  FlowGraph kernel (built per
   composition; closes over the node types' Dispatcher tuples).
 
 Helpers may be cached freely: a stale helper entry is only ever read
@@ -210,5 +211,6 @@ content; a partial file is never visible. No coordination needed.
 `benchmarks/_common.get_model()` (the drb stream-temperature chain:
 build + one step, every kernel compiled), LaNueva, Oct 28, 2026,
 import time excluded: **5.1 s cold** (cache wiped) -> **1.9 s warm**.
-The warm 1.9 s still holds the uncached atmosphere and stream-
-temperature compiles plus the data loading and assembly.
+The warm 1.9 s still held the uncached atmosphere (since opted in,
+Oct 30, 2026: its `solf` table moved in-file) and stream-temperature
+compiles plus the data loading and assembly.

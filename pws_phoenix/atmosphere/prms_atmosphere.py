@@ -70,9 +70,21 @@ values).
 import numba
 import numpy as np
 
-from pws_phoenix.atmosphere.solar_constants import solf as _SOLF
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
+
+# degree-day solar fraction table (PRMS c_solar_radiation_degday.f90).
+# Kept in THIS file: the kernels below freeze it, and numba's on-disk
+# cache is invalidated only by this file's mtime (DEVELOPER.md "Numba
+# cache").
+_SOLF = np.array(
+    [
+        0.20, 0.35, 0.45, 0.51, 0.56, 0.59, 0.62, 0.64, 0.655,
+        0.67, 0.682, 0.69, 0.70, 0.71, 0.715, 0.72, 0.722, 0.724,
+        0.726, 0.728, 0.73, 0.734, 0.738, 0.742, 0.746, 0.75,
+    ]
+)  # fmt: skip
 
 # pywatershed constants
 _NEARZERO = 1.0e-6  # nearzero
@@ -407,11 +419,8 @@ class PRMSAtmosphereBase(Process):
     def advance(self) -> None:
         pass  # transp_on/tmax_sum/transp_check persist; no *_prev vars
 
-    # NOT cache=True: the kernels freeze _SOLF from solar_constants.py; a
-    # cached caller never notices an edited constant (DEVELOPER.md
-    # "Numba cache").
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _calculate(
         # outputs + state (written in place)
         tmaxf: np.ndarray,
@@ -623,7 +632,7 @@ class PRMSAtmosphereBase(Process):
         )
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _compute_ccov_hru(
         # output (written in place)
         ccov_hru: np.ndarray,
@@ -728,7 +737,7 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
             ) + 32.0
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _transp_tindex(
         transp_on: np.ndarray,
         tmax_sum: np.ndarray,
@@ -827,7 +836,7 @@ class PRMSAtmosphereTranspFrost(PRMSAtmosphereBase):
     )
 
     @staticmethod
-    @numba.njit
+    @numba.njit(cache=NUMBA_CACHE)
     def _transp_frost(
         transp_on: np.ndarray,
         spring_frost: np.ndarray,
