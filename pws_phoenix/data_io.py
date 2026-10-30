@@ -19,8 +19,7 @@ from typing import Any, Dict, List, Union
 
 import numpy as np
 import xarray as xr
-
-# Output needs no zarr import of its own -- xarray's zarr backend does the IO.
+import zarr
 
 
 def open_xr(
@@ -104,18 +103,22 @@ class Input:
 class Output:
     """Buffered, time-chunked serial writer to a single zarr store.
 
-    Buffers each tracked variable in memory for time_chunk_size steps, then
-    APPENDS the chunk to the store along `time` (the first append creates
-    the store, with time chunks of time_chunk_size); a partial tail is
-    appended at finalize. Peak memory = the per-variable chunk buffers; the
-    store is never pre-sized or materialized in memory (see "Prime
-    directive: memory" in pws_phoenix/CLAUDE.md). Adapted from pywatershed's
-    chunked zarr writer.
+    The store is created ONCE at initialize_variable_tracking: xarray writes
+    the coordinates (the full `time` axis, the spatial dim-coordinates) and
+    each variable is then declared with zarr at its full (n_time, space)
+    shape, time-chunked by time_chunk_size. Declaring is free -- a zarr
+    chunk exists on disk only once written -- so peak memory = the
+    per-variable chunk buffers; nothing is materialized (see "Prime
+    directive: memory" in pws_phoenix/CLAUDE.md). Each full buffer is
+    written as a region `arr[start:end] = buffer` (no xarray in the loop;
+    the earlier `to_zarr(append_dim="time")` cost ~2 s of store
+    re-validation per append, independent of data size); a partial tail is
+    written at finalize. Adapted from pywatershed's chunked zarr writer.
 
     Serial only. The MPI path streams output through mpixarray
     (as_iterable + iterate + .mpi.write) and does not use this class.
-    (Append-along-time is sufficient here BECAUSE the writer is serial;
-    concurrent writers would need a pre-sized store + region writes.)
+    (Pre-sized store + region writes is also the shape concurrent writers
+    would need.)
     """
 
     def __init__(
@@ -129,13 +132,13 @@ class Output:
 
         Args:
             time_chunk_size: Number of time steps to buffer in memory before
-                a chunk is appended. Also the store's time chunk size.
+                a chunk is written. Also the store's time chunk size.
             variable_names: Variables to write -- one data_var each in the
                 single output store.
             output_store: Path to the (single) zarr store directory; must
                 carry the ".zarr" suffix and is used verbatim.
-            time_values: 1-D datetime coordinate for the full run (sliced
-                per appended chunk).
+            time_values: 1-D datetime coordinate for the full run (sizes
+                the store's time axis).
 
         Note:
             Tailored to read Model.model_dict (key -> Process instance),
@@ -157,13 +160,13 @@ class Output:
         self.variable_refs: Dict[str, xr.DataArray] = {}
         self.process_map: Dict[str, str] = {}  # var_name -> process_name
         self.data_buffers: Dict[str, np.ndarray] = {}
+        self._arrays: Dict[str, zarr.Array] = {}  # var_name -> store array
         self.current_time_step = 0
-        self._store_created = False
 
     def initialize_variable_tracking(self, model_dict: Dict[str, Any]) -> None:
-        """Reference the requested variables on their processes and allocate
-        buffers. The zarr store is created lazily on the first write. Must be
-        called after model processes are initialized.
+        """Reference the requested variables on their processes, allocate
+        buffers and create the (pre-sized, unmaterialized) zarr store. Must
+        be called after model processes are initialized.
 
         Raises:
             ValueError: If any requested variable is not found in any process.
@@ -183,6 +186,35 @@ class Output:
                 )
 
         self._initialize_buffers()
+        self._create_store()
+
+    def _create_store(self) -> None:
+        """Create the store: coordinates via xarray (so `time` round-trips
+        as datetime64), then each variable declared at full shape with
+        zarr. No data chunk is written here."""
+        coords: dict = {"time": self.time_values}
+        for var_ref in self.variable_refs.values():
+            spatial_dim = str(var_ref.dims[0])
+            # Carry the spatial dim-coordinate (e.g. "space") if present.
+            if spatial_dim in var_ref.coords and spatial_dim not in coords:
+                coords[spatial_dim] = (
+                    spatial_dim,
+                    var_ref.coords[spatial_dim].values,
+                )
+        xr.Dataset(coords=coords).to_zarr(
+            self.output_store, mode="w", consolidated=False
+        )
+        group = zarr.open_group(self.output_store, mode="r+")
+        n_time = len(self.time_values)
+        for var_name, var_ref in self.variable_refs.items():
+            # One chunk spans the full spatial extent; time chunked by buffer.
+            self._arrays[var_name] = group.create_array(
+                var_name,
+                shape=(n_time,) + var_ref.shape,
+                chunks=(self.time_chunk_size,) + var_ref.shape,
+                dtype=var_ref.dtype,
+                dimension_names=("time", str(var_ref.dims[0])),
+            )
 
     def _initialize_buffers(self) -> None:
         """Initialize numpy arrays to store time chunk data for each variable."""
@@ -194,7 +226,7 @@ class Output:
             )
 
     def collect_current_timestep(self, time_index: int) -> None:
-        """Buffer this step's values; append a full chunk when the buffer
+        """Buffer this step's values; write a full chunk when the buffer
         fills.
 
         Args:
@@ -208,52 +240,25 @@ class Output:
         self.current_time_step += 1
 
         if self.current_time_step % self.time_chunk_size == 0:
-            self._append_chunk(self.time_chunk_size)
+            self._write_chunk(self.time_chunk_size)
 
-    def _append_chunk(self, n_valid: int) -> None:
-        """Append the first n_valid buffered steps to the store along `time`.
-        The first append creates the store (chunk encoding set there); no
-        data beyond the chunk itself is ever materialized."""
+    def _write_chunk(self, n_valid: int) -> None:
+        """Write the first n_valid buffered steps to their time region."""
         chunk_end = self.current_time_step
         chunk_start = chunk_end - n_valid
-        data_vars: dict = {}
-        encoding: dict = {}
-        coords: dict = {"time": self.time_values[chunk_start:chunk_end]}
-        for var_name, var_ref in self.variable_refs.items():
-            spatial_dim = str(var_ref.dims[0])
-            data_vars[var_name] = (
-                ["time", spatial_dim],
-                self.data_buffers[var_name][:n_valid],
-            )
-            # Carry the spatial dim-coordinate (e.g. "space") if present.
-            if spatial_dim in var_ref.coords and spatial_dim not in coords:
-                coords[spatial_dim] = (
-                    spatial_dim,
-                    var_ref.coords[spatial_dim].values,
-                )
-            # One chunk spans the full spatial extent; time chunked by buffer.
-            encoding[var_name] = {
-                "chunks": (self.time_chunk_size,) + var_ref.shape
-            }
-
-        ds = xr.Dataset(data_vars, coords=coords)
-        if not self._store_created:
-            ds.to_zarr(
-                self.output_store,
-                mode="w",
-                encoding=encoding,
-                consolidated=False,
-            )
-            self._store_created = True
-        else:
-            ds.to_zarr(
-                self.output_store,
-                append_dim="time",
-                consolidated=False,
-            )
+        for var_name, buffer in self.data_buffers.items():
+            self._arrays[var_name][chunk_start:chunk_end] = buffer[:n_valid]
 
     def finalize(self) -> None:
-        """Append any remaining partial buffer."""
+        """Write any remaining partial buffer, then shrink the store's time
+        axis to the steps actually written (a run may stop short of
+        time_values; resize is metadata-only, dropping any chunk beyond)."""
         remaining = self.current_time_step % self.time_chunk_size
         if remaining > 0:
-            self._append_chunk(remaining)
+            self._write_chunk(remaining)
+        n_written = self.current_time_step
+        if n_written < len(self.time_values):
+            group = zarr.open_group(self.output_store, mode="r+")
+            group["time"].resize((n_written,))
+            for arr in self._arrays.values():
+                arr.resize((n_written,) + arr.shape[1:])

@@ -235,12 +235,14 @@ The process holds `time` and does the lookup; `_calculate` receives raw numpy
   from pywatershed `base/output.py`): one store at
   `control["output_serial_zarr"]` (a `.zarr` path, used verbatim -- what
   you write in the control dict is what appears on disk), all output vars
-  as data_vars, full-chunk
-  **appends** along `time` (the
-  first append creates the store; it is never pre-sized/materialized -- peak
-  memory = the chunk buffers) + a partial tail at `finalize`. Appends
-  suffice BECAUSE this writer is serial; concurrent writers would need a
-  pre-sized store + region writes. (netCDF4 was dropped.)
+  as data_vars. The store is created ONCE at init, pre-sized along `time`
+  (coords via xarray, arrays declared with zarr -- a chunk exists on disk
+  only once written, so nothing is materialized; peak memory = the chunk
+  buffers); each full buffer is a **region write** `arr[start:end] =
+  buffer` + a partial tail at `finalize`. Replaced `to_zarr(
+  append_dim="time")` Oct 30, 2026: each append cost ~2 s of store
+  re-validation regardless of data size (ucb_2yr: 12 extra appends = 26 s
+  of a 32.6 s run). (netCDF4 was dropped.)
 
 ## MPI path (`ModelMPI` in `model.py`) — single-decomposition streaming
 
