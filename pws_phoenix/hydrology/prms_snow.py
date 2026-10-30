@@ -60,7 +60,7 @@ in parameters_PRMSSnow.nc.
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE
+from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -1897,7 +1897,7 @@ class PRMSSnow(Process):
         refs["pk_ice_prev"][:] = refs["pk_ice"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE)
+    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
     def _calculate(
         # in/out state + outputs (written in place)
         ai: np.ndarray,
@@ -1986,7 +1986,7 @@ class PRMSSnow(Process):
         nhru = pkwater_equiv.shape[0]
         month_ind = current_month - 1
 
-        for jj in range(nhru):
+        for jj in numba.prange(nhru):
             # upstream pre-loop array staging, per element (applies to
             # ALL HRUs, before the lake/no-snow continues)
             newsnow[jj] = net_snow[jj] > 0.0
@@ -2257,7 +2257,7 @@ class PRMSSnow(Process):
 
         # upstream post-loop array staging, per element (a SECOND loop:
         # the continues above skip to here; applies to ALL HRUs)
-        for jj in range(nhru):
+        for jj in numba.prange(nhru):
             freeh2o_change[jj] = freeh2o[jj] - freeh2o_prev[jj]
             pk_ice_change[jj] = pk_ice[jj] - pk_ice_prev[jj]
 
