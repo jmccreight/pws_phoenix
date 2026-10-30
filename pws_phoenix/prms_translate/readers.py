@@ -188,6 +188,38 @@ _AG_CONTROL_METADATA = {
     ),
 }
 
+# control keys PRMS 5.2.1 reads past without acting on, found in
+# calibration control files handed down from GSFLOW setups (and one
+# misspelling, nhruout_freq). pyPRMS refuses any key outside its
+# metadata; these entries let such files load unchanged.
+_LEGACY_CONTROL_METADATA = {
+    "stats_output_file": (
+        "string",
+        np.str_("stats.out"),
+        "Pathname of the statistics output file (unused by PRMS 5)",
+    ),
+    "map_resultsON_OFF": (
+        "int32",
+        np.int32(0),
+        "GSFLOW map results flag (ignored by PRMS)",
+    ),
+    "gsf_rpt": (
+        "int32",
+        np.int32(0),
+        "GSFLOW report flag (ignored by PRMS)",
+    ),
+    "rpt_days": (
+        "int32",
+        np.int32(0),
+        "GSFLOW report interval (ignored by PRMS)",
+    ),
+    "nhruout_freq": (
+        "int32",
+        np.int32(1),
+        "Misspelling of nhruOut_freq seen in the wild (ignored by PRMS)",
+    ),
+}
+
 
 def _ensure_f64_parse() -> None:
     """Patch pyPRMS to parse PRMS type-F (float) parameter text as
@@ -235,7 +267,10 @@ def prms_metadata(version: str = PRMS_VERSION) -> dict:
         },
     )
     md["control"]["param_file"]["context"] = "array"
-    for name, (dtype, default, desc) in _AG_CONTROL_METADATA.items():
+    for name, (dtype, default, desc) in {
+        **_AG_CONTROL_METADATA,
+        **_LEGACY_CONTROL_METADATA,
+    }.items():
         md["control"][name] = {
             "datatype": dtype,
             "description": desc,
