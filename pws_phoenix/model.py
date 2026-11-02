@@ -30,15 +30,9 @@ from pws_phoenix.discretization import Discretization
 from pws_phoenix.clock import Time
 from pws_phoenix.process import _FILL_VALUE, _dict_of_kind
 
-# Optional MPI support -- present when mpixarray is installed. The serial Model
-# never needs it; ModelMPI does, and fails at construction if it is absent.
-try:
-    import mpix
-    from mpixarray import open_dataset as mpi_open_dataset
-
-    MPI_AVAILABLE = True
-except ImportError:
-    MPI_AVAILABLE = False
+# The MPI stack (mpix + mpixarray, ~0.6 s to import) is loaded inside
+# ModelMPI._build, the only place it is used: the serial Model never pays
+# for it, and ModelMPI fails at build if it is absent.
 
 
 class Model:
@@ -1008,6 +1002,13 @@ class ModelMPI(Model):
         # ---- Distributed grid: open + decompose once over mpi_grid ----
         # 1.0.0: open_dataset no longer returns a comm; bind the world comm
         # here and pass it explicitly to every mpixarray call downstream.
+        try:
+            import mpix
+            from mpixarray import open_dataset as mpi_open_dataset
+        except ImportError as err:
+            raise ImportError(
+                "ModelMPI requires mpix + mpixarray (README 'Installation')"
+            ) from err
         comm = mpix.world_comm()
         ds_input = mpi_open_dataset(input_file, comm=comm)
         self._ds_input = ds_input
