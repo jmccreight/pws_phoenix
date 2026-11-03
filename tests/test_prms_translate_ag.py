@@ -301,6 +301,7 @@ def test_transp_on_exact_full_window(config, tmp_path):
         "output_var_names": ["transp_on"],
         "output_serial_zarr": tmp_path / f"transp_{config}.zarr",
         "time_chunk_size": 123,
+        "budget": "error",
     }
     discretizations = {"nhru": kit.discretizations["nhru"]}
     with Model(
@@ -322,7 +323,9 @@ def test_transp_on_exact_full_window(config, tmp_path):
 @fgr_skipif
 @pytest.mark.parametrize("config", ["spinup", "analysis"])
 def test_fgr_one_liner_runs(config):
-    model = model_from_control(FGR_DIR / f"{config}.control")
+    model = model_from_control(
+        FGR_DIR / f"{config}.control", control={"budget": "error"}
+    )
     model.run(DT, np.int32(3))
     soilzone = model.model_dict["prms_soilzone"]
     assert np.isfinite(soilzone["ag_soil_moist"].values).all()
@@ -335,7 +338,9 @@ def test_fgr_one_liner_runs(config):
 def test_ucb_one_liner_runs():
     """The multi-param_file control end-to-end: build, run 5 days,
     transp_on exact vs the generated answers."""
-    model = model_from_control(UCB_DIR / "nhm_transp_frost.control")
+    model = model_from_control(
+        UCB_DIR / "nhm_transp_frost.control", control={"budget": "error"}
+    )
     model.run(DT, np.int32(5))
     answers = xr.load_dataarray(
         UCB_DIR / "output_transp_frost" / "transp_on.nc"

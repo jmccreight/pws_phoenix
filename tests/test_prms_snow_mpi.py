@@ -54,6 +54,11 @@ FINAL_STATE_NAMES = ("iso", "snow_evap")
 # pywatershed's own snow autotest comparison standard
 RTOL = ATOL = 1.0e-3
 
+# generated mass-budget variables; roundoff on inches-scale terms
+RESIDUAL_NAME = "PRMSSnow_mass_residual"
+RESIDUAL_ACCUM_NAME = "PRMSSnow_mass_residual_accum"
+BUDGET_TOL = 1.0e-12
+
 _needed = [
     DOMAIN_DIR / "parameters_PRMSSnow.nc",
     DOMAIN_DIR / "parameters_dis_hru.nc",
@@ -139,6 +144,8 @@ def mpi_run(mpi_paths):
         "output_parallel_netcdf": mpi_paths["output_file"],
         "output_var_names": [STREAMED_NAME],
         "mpi_grid": "nhru",
+        # error mode = the per-step Allreduce(MAX) agreement path
+        "budget": "error",
     }
     model = ModelMPI(process_dict, control)
     model.run(np.float64(1.0))
@@ -151,7 +158,7 @@ def mpi_run(mpi_paths):
                 ).copy()
             )
         )
-        for nn in FINAL_STATE_NAMES
+        for nn in FINAL_STATE_NAMES + (RESIDUAL_NAME, RESIDUAL_ACCUM_NAME)
     }
     model.finalize()
     comm.Barrier()  # output file fully flushed before reads
@@ -175,11 +182,19 @@ class TestPRMSSnowMPI:
 
     # -- final state, gathered globally --
     def test_final_state_gathered(self, mpi_run, answers):
-        for nn, vals in mpi_run["final"].items():
+        for nn in FINAL_STATE_NAMES:
             np.testing.assert_allclose(
-                vals,
+                mpi_run["final"][nn],
                 answers[nn].values[-1, :],
                 rtol=RTOL,
                 atol=ATOL,
                 err_msg=f"variable '{nn}' final state differs",
             )
+
+    # -- mass budget: the run already passed error mode every step --
+    def test_mass_budget_gathered(self, mpi_run):
+        final = mpi_run["final"]
+        assert final[RESIDUAL_NAME].shape == final["snow_evap"].shape
+        assert np.all(np.abs(final[RESIDUAL_NAME]) < BUDGET_TOL)
+        # two years of roundoff-scale residual
+        assert np.all(np.abs(final[RESIDUAL_ACCUM_NAME]) < 1.0e-9)

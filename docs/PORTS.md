@@ -67,11 +67,11 @@ relies on Model/ModelMPI running ALL `advance()` hooks before any
 |---|---|---|---|
 | PRMSGroundwater | `hydrology/prms_groundwater.py` | 1e-13 (upstream's own) | First real port; dis-first parameter sourcing |
 | PRMSChannel | `hydrology/prms_channel.py` | 1e-13; `seg_stor_change` (1e-7, 1e-4) cancellation carve-out | hru→segment aggregation externalized to Maps; muskingum coefficients = `parameter_internal` |
-| FlowGraph (6 node types) | `flow_graph.py` + `hydrology/*_flow_node.py` | 1e-7…1e-10 per mode | Registry dispatch via `literal_unroll`; hourly + daily STARFIT; io_in_cfs |
+| FlowGraph (6 node types) | `flow_graph.py` + `hydrology/*_flow_node.py` | 1e-7…1e-10 per mode; per-node mass budget 1e-8/1e-9 | Registry dispatch via `literal_unroll`; hourly + daily STARFIT; io_in_cfs |
 | PRMSRunoff | `hydrology/prms_runoff.py` | 1e-10 (upstream's own) | dprst-ACTIVE path; `basin_init`/`dprst_init` → `initialize()` + `parameter_internal` |
 | PRMSSoilzone | `hydrology/prms_soilzone.py` | 1e-10 observed (upstream's own is 5e-6) | First `mutable_input` (`sroff`/`sroff_vol`: dunnian added in place) |
-| PRMSCanopy | `hydrology/prms_canopy.py` | 1e-12 (upstream's own) | `pptmix` = written-never-read mutable input; hru_type hardwired all-LAND upstream |
-| PRMSSnow | `hydrology/prms_snow.py` | **bit-identical** to upstream's numpy path (A/B); 1e-3 on upstream's own 5-var list vs answers | See "The snow story" below |
+| PRMSCanopy | `hydrology/prms_canopy.py` | 1e-12 (upstream's own); mass budget 1e-12 | `pptmix` = written-never-read mutable input; hru_type hardwired all-LAND upstream |
+| PRMSSnow | `hydrology/prms_snow.py` | **bit-identical** to upstream's numpy path (A/B) except on the 9 hrus of the one deliberate departure (freeh2o accumulated, not overwritten, on rain into a cold pack); 1e-3 on upstream's own 5-var list vs answers; mass budget 1e-12 | See "The snow story" below |
 | PRMSSolarGeometry | `atmosphere/prms_solar_geometry.py` | 1e-10 (upstream's PRMS 5.2.1 standard) | A parameter FACTORY, not a Process (static (ndoy, nhru) tables) |
 | PRMSAtmosphere | `atmosphere/prms_atmosphere.py` | 1e-5 (upstream's own) | Per-step port of upstream's all-time-vectorized preprocessing |
 | NoDprst variants (runoff, soilzone, gw) | same modules as their full classes | bit-identical to the full class with dprst disabled by data (`tests/test_prms_no_dprst.py`); answer parity vs the nhm_no_dprst answers (`tests/test_prms_no_dprst_parity.py`) | The ADDITIVE inversion of upstream's subtractive subclassing -- see "How variants are done here" |
@@ -110,10 +110,11 @@ end in `tests/test_prms_channel{,_mpi}.py`.
   muskingum coefficients, solar tables) → `initialize()` +
   `kind="parameter_internal"` (frozen after) or the factory pattern;
   init-time numpy staging is fine there.
-- **NOT ported, everywhere**: Budget/ConservativeProcess (backlogged
-  design pass), adapters, restart, `calc_method` switch (numba is THE
-  path), `verbose`, `fastmath=True` (strict IEEE here — see below),
-  unused declared parameters, dead upstream code.
+- **NOT ported, everywhere**: adapters, `calc_method` switch (numba is
+  THE path), `verbose`, `fastmath=True` (strict IEEE here — see below),
+  unused declared parameters, dead upstream code. (Budget and restart
+  arrived later in pws_phoenix form — budgets Oct 2026, see "Framework
+  findings"; only groundwater declares one so far.)
 - **Upstream edits of true parameters** (runoff's clos-flag zeroing,
   soilzone's `soil_moist_max` clamp, channel's `seg_slope` clamp,
   snow's nonzero-`snowpack_init` block) are either proven no-ops and
@@ -141,10 +142,31 @@ against its own answers.
 
 Our snow port is **bit-identical to pywatershed's strict-IEEE numpy
 path** (`tests/test_prms_snow_ab_numpy.py`: 120-day A/B, 14 state
-variables, exact equality). That A/B carries the precision guarantee;
+variables, exact equality) on every hru untouched by the ONE
+deliberate departure below. That A/B carries the precision guarantee;
 the answers-based test mirrors upstream's own 5-variable/1e-3 list
 with an outlier-fraction criterion for the knife-edge-amplified
 `tcal`/`through_rain`.
+
+**The one departure from PRMS (Oct 2026, found by the mass budget).**
+`calc_ppt_to_pack` 1.1.3 (rain in excess of a cold pack's heat
+deficit) in PRMS/pywatershed OVERWRITES free water, `freeh2o =
+net_rain - pndz`, on the assumption that a pack with a heat deficit
+holds none. A cold pack can carry a trace of `freeh2o`; the overwrite
+dropped it from `pk_ice + freeh2o` while `pkwater_equiv` (tracked
+separately, `+= net_rain`) kept it, so the budget opened by exactly
+`freeh2o_prev` (drb: 9 hru-days in 2 years, <= 1.2e-7 inches) and
+closed again when the pack died (`snowmelt += pkwater_equiv` refunds
+it). Ours accumulates: `freeh2o = freeh2o + net_rain - pndz`; residual
+floor drops from 1.1e-7 to 8e-15. Consequences: the trace leaves as
+melt the same day, which on the affected hrus flips knife edges
+(tcal O(100), albedo 0.4, a day's rain between through_rain and
+snowmelt) — so the A/B locates those hrus from the data (rain on a
+cold pack holding free water; 9 of 765 on drb, count pinned) and
+excludes them. Against pywatershed's answers the fix is a slight
+step AWAY, not toward (pkwater_equiv max 1.6e-10 -> 6.5e-8;
+through_rain 0 -> 5e-6 of hru-days flipped) — the answers carry the
+overwrite. Mass conservation was the point, not agreement.
 
 Downstream consequence: with snow live, the seasonal 1e-8 noise feeds
 every flux and muskingum smears it (measured: 15%/1.6%/0.015% of
@@ -184,6 +206,79 @@ chain" below.
   (open-load-close). Past ~128 open netCDF handles, xarray's
   file-manager LRU churns reopen/evict on every access — a de-facto
   hang at 255% CPU.
+- Budgets (Oct 2026, `budget.py`): pywatershed's Budget as DATA — a
+  process declares `budgets = {name: {inputs, outputs,
+  storage_changes, [exchanges]}}` over its own fields (all with
+  `units=`, agreeing); the `*_sum` / `residual` / `residual_accum`
+  variables are GENERATED (class-name prefixed, `residual_accum`
+  restartable) and ride the normal output/restart/MPI paths; one njit
+  pass, zero allocation. The process owns the check (local count);
+  the Model owns when, and `control["budget"]` None|warn|error — error
+  under MPI = `allreduce(MAX)` first so every rank raises together.
+  Groundwater finding: pywatershed's term list omits `gwres_sink`,
+  which the kernel removes from storage — its own drb answers only
+  close with the sink as an output. Soilzone (Oct 21, 2026; the
+  NoDprst/full pair and the Ag/ObsET pair): pywatershed's lists plus
+  `swale_actet` as an output (`slow_stor[hh] -= swale_actet[hh]` in
+  the swale branch; zero on LAND hrus, so invisible on the swale-free
+  test domains — a kernel-read correction, not a data-caught one);
+  ObsET adds `ag_irrigation_hru_source` to inputs as upstream does.
+  Runoff (Oct 21, 2026; NoDprst/full/Ag): pywatershed's lists
+  verbatim (kernel-checked: on a swale `hru_flag == 0`, so every
+  input stays in infil / imperv_stor and the lists close there too);
+  `intcp_changeover_budget` IS ported for PRMSRunoffAg (upstream
+  verbatim: zero when `_intcp_changeover_in_net_rain`, else a copy of
+  intcp_changeover) so the static declaration stays right whichever
+  way a variant sets that flag.
+  Snow (Oct 22, 2026): pywatershed's list verbatim; the first budget
+  that caught a REAL leak — the residual came out 1.1e-7 in
+  equal-and-opposite pairs per hru, traced to the `freeh2o = net_rain
+  - pndz` overwrite in `calc_ppt_to_pack` 1.1.3 and FIXED (the one
+  departure from PRMS; "The snow story"). Still open in that kernel:
+  the `avail_et < 0` correction at the end of `calc_snowevap` moves
+  mass into `pkwater_equiv` but not `pk_ice`/`freeh2o` — dead under
+  valid parameters, kept verbatim, the budget is its detector
+  (`docs/MAINTENANCE.md`).
+  Canopy (Oct 22, 2026): pywatershed's list verbatim (its "?? always
+  zero" on `intcp_changeover` is wrong — nonzero on season-flip days
+  when `covden_sum != covden_win`); closes to roundoff at HRU scale
+  through intercept, the trace-snow-to-rain move, evaporation + its
+  potet cap and all three changeover branches. Two dead branches
+  would open it — a BARESOIL hru with stored water books
+  `extra_water = intcp_stor[ii]` per-canopy (not `* cov`), a LAKE hru
+  zeroes the store with no output term — unreachable on nhm (bare
+  soil never intercepts; hru_type hardwired LAND), kept verbatim,
+  logged in `docs/MAINTENANCE.md`. Green first run serial + MPI.
+  Channel (Oct 23, 2026): NOT declared, by decision. pywatershed's is
+  the one `basis="global"` budget; muskingum has no storage state and
+  `seg_stor_change` is defined as the imbalance, so the per-segment
+  form (written out, with its `exchanges` term and the algebra, in the
+  `prms_channel.py` docstring) is an identity, and the global content
+  (routing telescopes) is fatal or definitional before a budget runs
+  and pinned by the 1e-13 `seg_outflow` parity.
+  FlowGraph (Oct 23, 2026): pywatershed's global-basis list
+  re-expressed PER NODE on every composed class -- inputs
+  `node_lateral_inflow` + `node_upstream_inflows`, output
+  `node_outflows`, storage `node_storage_changes`, and
+  `node_sink_source` as the first real `exchanges` term (pywatershed
+  negates it into storage_changes); units stamped `"cfs"`/`"cms"`
+  from `io_in_cfs` at composition. Content: the HOURLY STARFIT
+  family, whose `node_storage_changes` is pywatershed's own STATE
+  delta (`lake_storage_sub - lake_storage_old_sub`, redefined after
+  the march); channel, pass-through, obsin, source_sink and the daily
+  STARFIT node are identities by definition. It CAUGHT the second
+  departure: pywatershed's SourceSinkFlowNode harvests `outflow` as
+  the LAST substep's value beside mean inputs -- the one type whose
+  outflow varies within a day yet reports the last (4.5 cfs residual
+  on drb day 1 when spliced into muskingum); fixed to the substep
+  mean (`source_sink_outflow_sum`), routing untouched. Obsin's
+  last-substep harvest is kept verbatim (constant within a day, so
+  last == mean). All five graph tests run in error mode; residual
+  pinned 1e-9 (STARFIT cms/cfs matrix) and 1e-8 (mixed ucb graph,
+  cfs x 24 substeps).
+  Error mode also warns per rank (date, max |residual|, first
+  indices) before the collective raise. Budgets run only under the
+  Model: drive a lone process as a one-process Model.
 
 ## drb_2yr domain facts the tests rely on
 
@@ -242,8 +337,10 @@ external comparison, relying on its mass budget instead. Mirrored
 here: `tests/test_prms_soilzone_ag_obs_et.py` (analysis) excludes the
 five; `tests/test_prms_soilzone_ag.py` (spinup, static ag_frac ->
 redistributions identically zero) still compares all five -- a
-stronger pin upstream doesn't have. When the Budget design pass lands
-(backlog), these variables get their mass-budget validation here too.
+stronger pin upstream doesn't have. Validated Oct 2026:
+`tests/test_prms_soilzone_ag_obs_et.py` runs with `control["budget"]
+= "error"` (the five enter the budget as its storage-change terms)
+and asserts the written residual < 1e-12 under dynamic `ag_frac`.
 
 Also mirrored from upstream's ag tests: the pervious-zone variable
 list compared only on non-ag HRUs (upstream's mask; note its
@@ -567,7 +664,11 @@ flow-driven variables see the knife-edge cascade).
   (`test_data/drb_2yr/output_no_dprst/`, generated with
   `generate_test_data.py --domain=drb_2yr --control_pattern=nhm_no_dprst`;
   green at each process's own tolerance, Oct 2026).
-- Budget / ConservativeProcess: a deliberate later design pass.
+- Budgets: declared on the groundwater, soilzone and runoff families,
+  snow, canopy and every composed FlowGraph (Oct 2026); channel
+  deliberately not (identity -- `prms_channel.py` docstring). The
+  declaration sweep is COMPLETE. Not ported from pywatershed's
+  Budget: `global` basis, per-term accumulations, `ignore_nans`.
 - Southern-hemisphere domains (atmosphere `is_summer`).
 - Nonzero `snowpack_init` (upstream's implementation is faulty).
 - Annual (1-month) CBH-adjustment parameter variants.

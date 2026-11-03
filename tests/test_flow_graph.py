@@ -34,6 +34,7 @@ absent.
 
 from typing import Any
 
+import numba
 import numpy as np
 import pytest
 import xarray as xr
@@ -75,21 +76,15 @@ INSERT_TYPES: dict[str, Any] = {
 }
 
 
-@pytest.fixture(
-    scope="module",
-    params=["pure_channel", *INSERT_TYPES.keys()],
-)
-def graph_run(
-    request,
-    pyws_domain,
-    tmp_path_factory,
-):
-    drb = pyws_domain(DOMAIN)
+def build_graph_run(drb, insert_class, out_dir, class_name):
+    """Assemble one scenario (pure channel when insert_class is None,
+    else the splice/headwater insertion of that type): returns
+    (process_dict, control, discretizations, info) for a Model. Split
+    from the graph_run fixture so a test can compose the same graph
+    with a PATCHED node type (test_budget_detects_last_substep_harvest)."""
     dis_seg_ds = drb["dis_seg_ds"]
     channel_params_ds = drb["channel_params_ds"]
-    insert_class = INSERT_TYPES.get(request.param)
     insert = insert_class is not None
-    out_dir = tmp_path_factory.mktemp(f"flow_graph_{request.param}")
     n_seg = dis_seg_ds.sizes["nsegment"]
     n_nodes = n_seg + 1 if insert else n_seg
 
@@ -106,8 +101,7 @@ def graph_run(
     )
     if insert_class is not None:
         graph_class = make_flow_graph(
-            (PRMSChannelFlowNode, insert_class),
-            class_name=f"Drb{insert_class.__name__}Graph",
+            (PRMSChannelFlowNode, insert_class), class_name=class_name
         )
         node_type = np.full(
             n_nodes,
@@ -135,7 +129,7 @@ def graph_run(
             to_graph_index[wh_below] = n_seg
     else:
         graph_class = make_flow_graph(
-            (PRMSChannelFlowNode,), class_name="DrbChannelFlowGraph"
+            (PRMSChannelFlowNode,), class_name=class_name
         )
         node_type = np.full(
             n_nodes,
@@ -215,13 +209,9 @@ def graph_run(
         "output_var_names": ["node_outflows"],
         "output_serial_zarr": out_dir / "flow_graph.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
-    with Model(
-        process_dict, control, discretizations=discretizations
-    ) as model:
-        model.run(S_PER_TIME, np.int32(model.ntime))
-    return {
-        "model": model,
+    info = {
         "control": control,
         "class": graph_class,
         "n_seg": n_seg,
@@ -229,6 +219,35 @@ def graph_run(
         "insert_class": insert_class,
         "answers": drb["seg_outflow"],
     }
+    return process_dict, control, discretizations, info
+
+
+@pytest.fixture(
+    scope="module",
+    params=["pure_channel", *INSERT_TYPES.keys()],
+)
+def graph_run(
+    request,
+    pyws_domain,
+    tmp_path_factory,
+):
+    insert_class = INSERT_TYPES.get(request.param)
+    class_name = (
+        "DrbChannelFlowGraph"
+        if insert_class is None
+        else f"Drb{insert_class.__name__}Graph"
+    )
+    process_dict, control, discretizations, info = build_graph_run(
+        pyws_domain(DOMAIN),
+        insert_class,
+        tmp_path_factory.mktemp(f"flow_graph_{request.param}"),
+        class_name,
+    )
+    with Model(
+        process_dict, control, discretizations=discretizations
+    ) as model:
+        model.run(S_PER_TIME, np.int32(model.ntime))
+    return {"model": model, **info}
 
 
 class TestFlowGraph:
@@ -296,3 +315,41 @@ class TestFlowGraph:
 
         with pytest.raises(ValueError, match="contract attribute"):
             make_flow_graph((BogusFlowNode,))
+
+
+@numba.njit
+def _finalize_last_substep(inode, n_sub, state):
+    """pywatershed's source_sink harvest (departure #2 REVERTED): the
+    LAST substep's outflow beside substep-MEAN inputs."""
+    state.node_outflows[inode] = state.node_outflow_substep[inode]
+    state.node_storage_changes[inode] = 0.0
+    state.node_storages[inode] = np.nan
+    state.node_sink_source[inode] = state.source_sink_sum[inode] / n_sub
+
+
+def test_budget_detects_last_substep_harvest(
+    pyws_domain, tmp_path, monkeypatch
+):
+    """The budget must still catch what it caught: with pywatershed's
+    harvest restored on the spliced source_sink node (below varying
+    muskingum flow, so last != mean: 4.5 cfs on day 1), error mode
+    raises. Patched BEFORE composition -- make_flow_graph binds each
+    type's finalize into the kernel at factory time, so the patch is
+    order-independent. (The snow freeh2o departure is NOT reverted
+    this way: PRMSSnow._calculate binds calc_ppt_to_pack at its first
+    compile, so a patch is inert after any earlier snow test.)"""
+    monkeypatch.setattr(SourceSinkFlowNode, "finalize", _finalize_last_substep)
+    process_dict, control, discretizations, info = build_graph_run(
+        pyws_domain(DOMAIN),
+        SourceSinkFlowNode,
+        tmp_path,
+        class_name="DrbSourceSinkRevertedGraph",
+    )
+    # the one imbalanced location is the inserted node (index n_seg)
+    at_inserted = rf"1 location\(s\).*first indices \[{info['n_seg']}\]"
+    with pytest.raises(ValueError, match="budget imbalanced"):
+        with pytest.warns(UserWarning, match=at_inserted):
+            with Model(
+                process_dict, control, discretizations=discretizations
+            ) as model:
+                model.run(S_PER_TIME, np.int32(model.ntime))

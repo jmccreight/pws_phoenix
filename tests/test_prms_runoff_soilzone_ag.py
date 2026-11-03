@@ -228,6 +228,7 @@ def model_run(tmp_path_factory):
         ),
         "output_serial_zarr": out_dir / "runoff_soilzone_ag.zarr",
         "time_chunk_size": 61,
+        "budget": "error",
     }
     discretizations = {
         "nhru": Discretization(

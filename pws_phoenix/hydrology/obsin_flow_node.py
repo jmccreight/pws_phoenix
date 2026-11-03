@@ -63,8 +63,11 @@ def _substep(istep, inode, state, tctx, n_sub):
 
 @numba.njit
 def _finalize(inode, n_sub, state):
-    # harvest: outflow = the LAST substep's outflow (not a mean --
-    # pywatershed node semantics); sink_source = substep mean
+    # harvest: outflow = the LAST substep's outflow (pywatershed node
+    # semantics) -- equal to the substep mean here because an obsin
+    # outflow is CONSTANT within a day (obs >= 0: obs; obs < 0: the
+    # latched first inflow), so the mass budget closes without the
+    # source_sink node's departure; sink_source = substep mean
     state.node_outflows[inode] = state.node_outflow_substep[inode]
     state.node_storage_changes[inode] = 0.0
     state.node_storages[inode] = np.nan

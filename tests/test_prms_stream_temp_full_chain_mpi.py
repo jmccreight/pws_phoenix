@@ -317,6 +317,7 @@ def mpi_run(mpi_paths):
         "output_serial_zarr": mpi_paths["output_zarr"],
         "time_chunk_size": 61,
         "mpi_grid": "nhru",
+        "budget": "error",
     }
     model = ModelMPI(
         process_dict,

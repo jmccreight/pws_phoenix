@@ -79,6 +79,7 @@ def run_graph(node_type_class, n_nodes, out_dir, **process_entries):
         "output_var_names": OUTPUT_VARS,
         "output_serial_zarr": out_dir / "graph.zarr",
         "time_chunk_size": 2,
+        "budget": "error",
     }
     with Model(
         process_dict, control, discretizations=discretizations

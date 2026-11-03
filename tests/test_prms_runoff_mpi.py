@@ -69,6 +69,10 @@ FINAL_STATE_NAMES = (
 )
 # pywatershed's own runoff autotest comparison standard
 RTOL = ATOL = 1.0e-10
+# generated mass-budget variables; roundoff on inches-scale terms
+RESIDUAL_NAME = "PRMSRunoff_mass_residual"
+RESIDUAL_ACCUM_NAME = "PRMSRunoff_mass_residual_accum"
+BUDGET_TOL = 1.0e-12
 
 _needed = [
     DOMAIN_DIR / "parameters_PRMSRunoff.nc",
@@ -153,6 +157,8 @@ def mpi_run(mpi_paths):
         "output_parallel_netcdf": mpi_paths["output_file"],
         "output_var_names": [STREAMED_NAME],
         "mpi_grid": "nhru",
+        # error mode = the per-step Allreduce(MAX) agreement path
+        "budget": "error",
     }
     model = ModelMPI(process_dict, control)
     model.run(np.float64(1.0))
@@ -163,7 +169,7 @@ def mpi_run(mpi_paths):
         nn: np.concatenate(
             comm.allgather(model._ds_mpi_stream[nn].values.copy())
         )
-        for nn in FINAL_STATE_NAMES
+        for nn in FINAL_STATE_NAMES + (RESIDUAL_NAME, RESIDUAL_ACCUM_NAME)
     }
     model.finalize()
     comm.Barrier()  # output file fully flushed before reads
@@ -187,7 +193,8 @@ class TestPRMSRunoffMPI:
 
     # -- final state of everything else, gathered globally --
     def test_final_state_gathered(self, mpi_run, answers):
-        for nn, vals in mpi_run["final"].items():
+        for nn in FINAL_STATE_NAMES:
+            vals = mpi_run["final"][nn]
             np.testing.assert_allclose(
                 vals,
                 answers[nn].values[-1, :],
@@ -195,3 +202,11 @@ class TestPRMSRunoffMPI:
                 atol=ATOL,
                 err_msg=f"variable '{nn}' final state differs",
             )
+
+    # -- mass budget: the run already passed error mode every step --
+    def test_mass_budget_gathered(self, mpi_run):
+        final = mpi_run["final"]
+        assert final[RESIDUAL_NAME].shape == final["infil"].shape
+        assert np.all(np.abs(final[RESIDUAL_NAME]) < BUDGET_TOL)
+        # two years of roundoff-scale residual
+        assert np.all(np.abs(final[RESIDUAL_ACCUM_NAME]) < 1.0e-9)
