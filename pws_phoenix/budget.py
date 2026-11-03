@@ -101,9 +101,9 @@ def _balance(
 class Budget:
     """One named budget of one Process: the term names per component and
     the names of its generated variables. Holds NO array references --
-    ``calculate`` reads them off the bound dataset each call, exactly
-    as a Process's ``calculate`` does (the MPI path rebinds the dataset
-    every step)."""
+    ``initialize``/``calculate`` read them off the owning process's
+    ``_refs`` dict (name -> ndarray, captured once at bind) each call,
+    exactly as a Process's ``calculate`` does."""
 
     def __init__(
         self, class_name: str, budget_name: str, terms: dict[str, tuple]
@@ -130,33 +130,38 @@ class Budget:
             self.residual_accum_name,
         )
 
-    def initialize(self, dataset) -> None:
+    def initialize(self, refs: dict[str, np.ndarray]) -> None:
         """Zero the accumulator (allocated nan-filled like any variable).
         Called by the Model before any restart restore, which may then
         overwrite it."""
-        dataset[self.residual_accum_name].values[:] = 0.0
+        refs[self.residual_accum_name][:] = 0.0
 
     def calculate(
-        self, dataset, rtol: float, atol: float, warn: bool, time
+        self,
+        refs: dict[str, np.ndarray],
+        rtol: float,
+        atol: float,
+        warn: bool,
+        time,
     ) -> int:
         """Sum the terms, update residual/residual_accum in place, return
         the LOCAL count of imbalanced locations (warned about here when
         ``warn``; raising is the Model's, collectively under MPI)."""
         for cc, sum_name in self.sum_names.items():
             _sum_terms(
-                dataset[sum_name].values,
-                tuple(dataset[tt].values for tt in self.terms[cc]),
+                refs[sum_name],
+                tuple(refs[tt] for tt in self.terms[cc]),
             )
-        residual = dataset[self.residual_name].values
-        inputs_sum = dataset[self.sum_names["inputs"]].values
+        residual = refs[self.residual_name]
+        inputs_sum = refs[self.sum_names["inputs"]]
         n_bad, max_abs = _balance(
             residual,
-            dataset[self.residual_accum_name].values,
+            refs[self.residual_accum_name],
             inputs_sum,
-            dataset[self.sum_names["outputs"]].values,
-            dataset[self.sum_names["storage_changes"]].values,
+            refs[self.sum_names["outputs"]],
+            refs[self.sum_names["storage_changes"]],
             # any same-shaped array when there are no exchanges (unread)
-            dataset[self.sum_names["exchanges"]].values
+            refs[self.sum_names["exchanges"]]
             if self.has_exchanges
             else inputs_sum,
             self.has_exchanges,
@@ -166,8 +171,8 @@ class Budget:
         if n_bad and warn:
             # Failure path only: the index lookup allocates.
             rhs = (
-                dataset[self.sum_names["outputs"]].values
-                + dataset[self.sum_names["storage_changes"]].values
+                refs[self.sum_names["outputs"]]
+                + refs[self.sum_names["storage_changes"]]
             )
             close = np.abs(residual) <= atol + rtol * np.abs(rhs)
             where = np.flatnonzero(~close)

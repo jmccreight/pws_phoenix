@@ -318,7 +318,7 @@ class Process(ABC):
         """Zero the budget accumulators. Called by the Model with the
         initialize() hooks, before any restart restore."""
         for bb in self._budgets.values():
-            bb.initialize(self._obj)
+            bb.initialize(self._refs)
 
     def check_budgets(
         self, rtol: float, atol: float, warn: bool, time: Time
@@ -329,7 +329,7 @@ class Process(ABC):
         raising is the Model's call (collective under MPI)."""
         n_bad = 0
         for bb in self._budgets.values():
-            n_bad += bb.calculate(self._obj, rtol, atol, warn, time)
+            n_bad += bb.calculate(self._refs, rtol, atol, warn, time)
         return n_bad
 
     def __getitem__(self, key: str) -> xr.DataArray:
