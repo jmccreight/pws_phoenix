@@ -89,7 +89,7 @@ OUTPUT_VARS = [
     "lake_spill",
 ]
 # per-node mass budget (cfs terms, 24 substeps): error mode at
-# pywatershed's 1e-5; the written residual is pinned at roundoff
+# the default 1e-10; the written residual is pinned at roundoff
 BUDGET_TOL = 1.0e-8
 
 _needed = [GRAND_PARAM_FILE, *pyws_domain_files(DOMAIN)]

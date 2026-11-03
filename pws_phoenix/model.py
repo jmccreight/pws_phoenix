@@ -442,8 +442,12 @@ class Model:
         """control["budget"]: None (default; budgets are still computed
         and written, never judged), "warn" (per-rank warnings), or
         "error" (per-rank warnings, then raise -- collectively under
-        MPI). Tolerances
-        control["budget_rtol"/"budget_atol"] default to pywatershed's."""
+        MPI). Tolerances control["budget_rtol"/"budget_atol"] default to
+        1e-10 (pywatershed's are 1e-5): every port closes at 1e-12 except
+        the STARFIT family, whose storage term is a difference of
+        reservoir storages (MCM) -- roundoff of up to ~3e4 MCM, scaled
+        to flow units, puts its floor at max |res| / (1 + |rhs|) =
+        1.4e-12 (cms) / 1.0e-11 (cfs); measured Nov 2026."""
         mode = control.get("budget")
         if mode not in (None, "warn", "error"):
             raise ValueError(
@@ -451,8 +455,8 @@ class Model:
                 f"got {mode!r}."
             )
         self._budget_mode = mode
-        self._budget_rtol = float(control.get("budget_rtol", 1e-5))
-        self._budget_atol = float(control.get("budget_atol", 1e-5))
+        self._budget_rtol = float(control.get("budget_rtol", 1e-10))
+        self._budget_atol = float(control.get("budget_atol", 1e-10))
 
     def _check_budgets(self, proc: Any) -> None:
         """Run a process's budgets for the step just calculated; judge

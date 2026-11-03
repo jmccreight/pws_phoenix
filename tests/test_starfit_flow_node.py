@@ -73,7 +73,7 @@ OUTPUT_VARS = ["lake_storage", "lake_release", "lake_spill"]
 # pywatershed's own autotest tolerance for this comparison
 RTOL = ATOL = 1.0e-7
 # per-node mass budget (cms/cfs flow terms): the run is in error mode
-# at pywatershed's 1e-5; the written residual is pinned at roundoff
+# at the default 1e-10; the written residual is pinned at roundoff
 BUDGET_TOL = 1.0e-9
 S_PER_TIME = np.float64(60.0 * 60.0 * 24.0)
 

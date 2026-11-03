@@ -11,7 +11,7 @@ pywatershed/autotest/test_prms_canopy.py).
 intcp_transp_on has no generated answer file (excluded); pptmix is
 compared as an output (input + recomputed edits).
 
-The run is in budget error mode (pywatershed's 1e-5); the written
+The run is in budget error mode (the default 1e-10); the written
 residual is pinned at roundoff.
 
 Requires GENERATED pywatershed test data; skips with a reason if
@@ -152,8 +152,8 @@ class TestPRMSCanopy:
 
     def test_mass_budget(self, model_run):
         """The written residual is roundoff every step (the run itself
-        already passed control["budget"] = "error" at pywatershed's
-        1e-5); the accumulator equals the residual's time sum."""
+        already passed control["budget"] = "error" at the
+        default 1e-10); the accumulator equals the residual's time sum."""
         output_ds = xr.open_zarr(
             model_run["control"]["output_serial_zarr"], consolidated=False
         )

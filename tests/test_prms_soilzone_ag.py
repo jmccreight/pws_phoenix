@@ -282,8 +282,8 @@ class TestPRMSSoilzoneAg:
 
     def test_mass_budget(self, model_run):
         """The written residual is roundoff every step (the run itself
-        already passed control["budget"] = "error" at pywatershed's
-        1e-5); the accumulator equals the residual's time sum."""
+        already passed control["budget"] = "error" at the
+        default 1e-10); the accumulator equals the residual's time sum."""
         output_ds = xr.load_dataset(
             model_run["control"]["output_serial_zarr"],
             engine="zarr",

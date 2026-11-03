@@ -379,7 +379,10 @@ the `epiweeks` dep).
   (`_raise_if_imbalanced`; ModelMPI first `allreduce(MAX)` of the
   local count so every rank raises together -- a lone raise hangs the
   others at the next collective). Tolerances `budget_rtol/atol`
-  default 1e-5 (pywatershed's). NOT ported: `global` basis (sum the
+  default 1e-10 (Nov 2026 limbo: every port closes at 1e-12; the
+  STARFIT family's storage term is a difference of reservoir
+  storages (MCM), floor max|res|/(1+|rhs|) = 1.4e-12 cms / 1.0e-11
+  cfs; pywatershed's is 1e-5). NOT ported: `global` basis (sum the
   written per-unit residual offline), per-term accumulations, the
   netCDF writer, `__repr__`, `ignore_nans`. Declared:
   PRMSGroundwater{,NoDprst} (`gwres_sink` as an OUTPUT --
