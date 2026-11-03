@@ -33,6 +33,7 @@ from mpi4py import MPI
 
 pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
 
+from conftest import PWS_TEST_DATA
 from pws_phoenix.prms_translate import (  # noqa: E402
     assemble_from_control,
     model_from_control,
@@ -40,8 +41,7 @@ from pws_phoenix.prms_translate import (  # noqa: E402
     write_mpi_input_file,
 )
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-FGR_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "fgr_ag_2yr"
+FGR_DIR = PWS_TEST_DATA / "fgr_ag_2yr"
 CONTROL_FILE = FGR_DIR / "analysis.control"
 
 # Jan 1 -> mid-July 2000: well into the growing season, so the AET

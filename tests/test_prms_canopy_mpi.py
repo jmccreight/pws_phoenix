@@ -24,11 +24,11 @@ import numpy as np
 import pytest
 import xarray as xr
 from mpi4py import MPI
+from conftest import PWS_TEST_DATA
 from pws_phoenix.hydrology.prms_canopy import PRMSCanopy
 from pws_phoenix.model import ModelMPI
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
 
 INPUT_NAMES = (
@@ -41,7 +41,7 @@ INPUT_NAMES = (
     "potet",
     "pptmix",
 )
-STREAMED_NAME = "net_rain"  # the one to_netcdf var (mpixarray limit)
+STREAMED_NAME = "net_rain"  # validated from the stream; others: final state
 FINAL_STATE_NAMES = (
     "net_ppt",
     "net_snow",

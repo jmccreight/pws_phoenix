@@ -16,7 +16,7 @@ Scope:
     dis_hru/dis_seg split (utils/separate_nhm_params.py). Passed at
     construction (``parameters=``); the Model seeds each grid's shared
     dataset from here FIRST (dis is the first-priority parameter source),
-    so processes read dis variables uniformly via ``self._obj[name]``.
+    so processes read dis variables uniformly via ``self._refs[name]``.
   - Derived topology (July 2026): ``topological_order`` -- a GENERIC
     to-index ordering (Discretization stays the uniform, no-subclass
     object), replicating pywatershed PRMSChannel's networkx construction

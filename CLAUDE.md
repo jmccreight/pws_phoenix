@@ -99,7 +99,13 @@ branch `1.0.0`, mpix `main`** (Oct 2026; the old `pws` branch API is
 gone). `pwpx` has
 everything: pytest (+-mpi), mypy, ruff, and the pywatershed import-chain
 deps for the parity tests (pywatershed itself is used from the mpix-root
-clone via sys.path). Run tests from the repo root:
+clone via sys.path). Test data = the pywatershed clone's `test_data/`,
+populated + derived from the pws-prms-oracle by pywatershed's
+`oracle_populate.py` (Oct 2026); `PWS_TEST_DATA` overrides the root
+(`tests/conftest.py`); answer keys are PINNED in
+`tests/prms_oracle.toml` (macos-arm64 only so far) and checked at
+session start -- a regenerated oracle = a reviewed key bump, never a
+silent shift. Run tests from the repo root:
 `./tests/run_tests.sh` (serial + MPI, no skips allowed) or
 `pytest tests/ -q --ignore-glob='tests/*_mpi.py'` (serial only).
 
@@ -129,6 +135,14 @@ Keep the memory footprint lean and OBVIOUS. Concretely:
 3. Watch for hidden copies and call them out in review: deepcopy,
    np.asarray/astype on existing arrays, fancy indexing, xarray ops that
    materialize (selection on lazy datasets -- see test_ref_behaviors.py).
+4. The same principle in TIME: a process holds its fields' ndarray
+   references and never does `self._obj[name].values` inside a step
+   (`xr.Dataset.__getitem__` builds a DataArray per call, ~8-20 us; the
+   lookups were measured at 82-99% of every process step). Implemented
+   Oct 2026 as `Process._refs` (captured once at bind; `refs[name]` in
+   every step method) -- `DEVELOPER.md` "Per-step data access"
+   has the numbers, the one-ndarray-per-name invariant (serial and MPI)
+   and the rules it imposes.
 
 # pws_phoenix package design notes
 
@@ -223,12 +237,14 @@ The process holds `time` and does the lookup; `_calculate` receives raw numpy
   from pywatershed `base/output.py`): one store at
   `control["output_serial_zarr"]` (a `.zarr` path, used verbatim -- what
   you write in the control dict is what appears on disk), all output vars
-  as data_vars, full-chunk
-  **appends** along `time` (the
-  first append creates the store; it is never pre-sized/materialized -- peak
-  memory = the chunk buffers) + a partial tail at `finalize`. Appends
-  suffice BECAUSE this writer is serial; concurrent writers would need a
-  pre-sized store + region writes. (netCDF4 was dropped.)
+  as data_vars. The store is created ONCE at init, pre-sized along `time`
+  (coords via xarray, arrays declared with zarr -- a chunk exists on disk
+  only once written, so nothing is materialized; peak memory = the chunk
+  buffers); each full buffer is a **region write** `arr[start:end] =
+  buffer` + a partial tail at `finalize`. Replaced `to_zarr(
+  append_dim="time")` Oct 30, 2026: each append cost ~2 s of store
+  re-validation regardless of data size (ucb_2yr: 12 extra appends = 26 s
+  of a 32.6 s run). (netCDF4 was dropped.)
 
 ## MPI path (`ModelMPI` in `model.py`) — single-decomposition streaming
 
@@ -263,11 +279,14 @@ open_writer → declare buffers → create → iterate → write`.
 
 ## Known mpixarray limits (Phase 1)
 
-- Pre-1.0.0, a 2nd `to_file=True` streaming-output var tripped a "cannot
-  pickle 'module' object" deepcopy. 1.0.0's `file_io/writer_handle.py`
-  defines `__deepcopy__`, so the limit is probably lifted -- untested here;
-  we still stream only `flow` and validate `storage_previous` from final
-  in-memory state.
+- (RESOLVED Oct 28, 2026) Multiple `to_file=True` streaming-output vars:
+  pre-1.0.0 a 2nd one tripped a deepcopy; in 1.0.0 a 2nd `(time, grid)`
+  declaration replaced the `time` coord with a copy lacking
+  `__mpi_parent` (`MPI_Dataset.__setitem__` let the incoming array's
+  coords win; fixed in the mpixarray clone with a `drop_vars` of shared
+  coords, reported upstream). `tests/test_prms_groundwater_mpi.py`
+  streams two; `mpi_model_from_control` now injects the PRMS control's
+  output request per destination.
 - `as_iterable` requires the streaming dim to be a real dim-coordinate.
 - A non-`time` extra dim on a resident var (e.g. a `(month, space)` cyclic
   time-varying parameter) is assumed to survive `as_iterable` untouched (it is
@@ -331,9 +350,9 @@ the `epiweeks` dep).
 - `ModelInputs` / `input_spec()` / `resolve_inputs()` / `init_run_phase()` lazy
   lifecycle (`get_inputs()` is already classmethod-level; streaming's `create()`
   is a latent `init_run_phase`).
-- Multi-output-var streaming: try under mpixarray 1.0.0 (see Known limits).
-  (Cyclic-monthly time-varying parameters are implemented -- see "Variable
-  taxonomy".) Coarse-linear (e.g. per-(year,month)) time-varying params remain.
+- Coarse-linear (e.g. per-(year,month)) time-varying params remain
+  (cyclic-monthly ones are implemented -- see "Variable taxonomy";
+  multi-output-var streaming is resolved -- see Known limits).
 - Deferred review minors (July 2026): generalize `Output` beyond 1-D
   spatial vars (only when a real multi-dim output var exists -- it fails
   loudly today). (The `map.py`/`globals.py` builtin-shadowing rename is

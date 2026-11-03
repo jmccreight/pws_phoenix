@@ -110,6 +110,20 @@ class ModelKit:
         )
 
 
+def requested_output_names(
+    cfg: PrmsRunConfig, process_dict: dict[str, dict[str, Any]]
+) -> tuple[list[str], list[str]]:
+    """Split the control file's output REQUEST into the names this model
+    has a variable for (kept, request order) and the rest (dropped:
+    PRMS-only diagnostics etc.)."""
+    available: set[str] = set()
+    for entry in process_dict.values():
+        available |= set(entry["class"].get_var_names())
+    kept = [nn for nn in cfg.output_var_names if nn in available]
+    dropped = [nn for nn in cfg.output_var_names if nn not in available]
+    return kept, dropped
+
+
 def assemble_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
@@ -320,13 +334,9 @@ def assemble_from_control(
         and "output_serial_zarr" in kit_control
         and "output_var_names" not in kit_control
     ):
-        available: set[str] = set()
-        for entry in process_dict.values():
-            available |= set(entry["class"].get_var_names())
-        kit_control["output_var_names"] = [
-            nn for nn in cfg.output_var_names if nn in available
-        ]
-        dropped = [nn for nn in cfg.output_var_names if nn not in available]
+        kit_control["output_var_names"], dropped = requested_output_names(
+            cfg, process_dict
+        )
 
     return ModelKit(
         process_dict=process_dict,

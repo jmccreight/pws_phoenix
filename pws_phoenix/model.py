@@ -30,15 +30,9 @@ from pws_phoenix.discretization import Discretization
 from pws_phoenix.clock import Time
 from pws_phoenix.process import _FILL_VALUE, _dict_of_kind
 
-# Optional MPI support -- present when mpixarray is installed. The serial Model
-# never needs it; ModelMPI does, and fails at construction if it is absent.
-try:
-    import mpix
-    from mpixarray import open_dataset as mpi_open_dataset
-
-    MPI_AVAILABLE = True
-except ImportError:
-    MPI_AVAILABLE = False
+# The MPI stack (mpix + mpixarray, ~0.6 s to import) is loaded inside
+# ModelMPI._build, the only place it is used: the serial Model never pays
+# for it, and ModelMPI fails at build if it is absent.
 
 
 class Model:
@@ -434,13 +428,13 @@ class Model:
                 self._add_process_fields(kk, grid, grid_ds)
             self.discretizations[grid].dataset = grid_ds
 
+        self._validate_inputs_resolved()
         # Bind in process_dict order (assembly above groups by grid, but the
         # author's order IS the execution schedule).
         for kk in self._process_dict:
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
 
-        self._validate_inputs_resolved()
         self._run_initialize_hooks()
         self._resolve_maps()
 
@@ -505,11 +499,14 @@ class Model:
         dataset after assembly -- supplied in the process_dict entry, produced
         by a process on the same grid, or fed by a registered Map. Fail fast
         here; a missing input would otherwise surface as a KeyError
-        mid-calculate (or silently read a stale variable)."""
-        for proc_name, proc in self.model_dict.items():
+        mid-calculate (or silently read a stale variable). Runs BEFORE
+        binding: Process.__init__ captures every declared field's ndarray
+        and would raise a bare KeyError on the same gap."""
+        for proc_name, vv in self._process_dict.items():
+            cls = vv["class"]
             grid = self._proc_grid[proc_name]
             grid_ds = self.discretizations[grid].dataset
-            needed = proc.get_inputs() + proc.get_mutable_inputs()
+            needed = cls.get_inputs() + cls.get_mutable_inputs()
             missing = [ii for ii in needed if ii not in grid_ds]
             if missing:
                 raise ValueError(
@@ -655,6 +652,7 @@ class Model:
                     f"Map '{map_name}': source variable '{mm.source_var}' "
                     f"not found on grid '{mm.source_grid}'."
                 )
+            mm.bind(source_ds)
             # grid_sizes overrides a grid's dataset size for the weights
             # shape check (ModelMPI passes the GLOBAL size of the
             # decomposed grid; its dataset only knows the rank-local
@@ -753,7 +751,7 @@ class Model:
         later consumers re-read the same target buffer."""
         for proc_name, vv in self.model_dict.items():
             for mm in self._proc_maps[proc_name]:
-                mm.apply(self.discretizations[mm.source_grid].dataset)
+                mm.apply()
             vv.calculate(dt, self.time)
             self._check_budgets(vv)
 
@@ -765,8 +763,8 @@ class Model:
         start = self._start_index
         for tt in range(start, start + int(n_steps)):
             self.current_time_index[0] = tt
-            self.current_time[0] = self.times[tt].values
             self.time.set_index(tt)
+            self.current_time[0] = self.time.current
             self.advance()
             self.calculate(dt=dt)
             if self.output is not None:
@@ -973,11 +971,12 @@ class ModelMPI(Model):
     "discretization" + their data); distributed-grid entries need only
     {"class": ...} -- their data come from input_file.
 
-    NOTE: pre-1.0.0 mpixarray, declaring a 2nd ``to_file=True`` variable
-    tripped a "cannot pickle 'module' object" deepcopy. 1.0.0's writer
-    handle defines ``__deepcopy__``, so the limit is probably lifted --
-    untested here. Phase 1 still streams ONE output var to disk; validate
-    any others from final in-memory state.
+    Any number of distributed-grid variables may stream to disk. (The
+    pre-1.0.0 "one ``to_file=True`` var" deepcopy limit, and its 1.0.0
+    successor -- a 2nd ``(time, grid)`` declaration replaced the ``time``
+    coord with a copy lacking ``__mpi_parent`` in mpixarray's
+    ``MPI_Dataset.__setitem__`` -- were both fixed in mpixarray by
+    Oct 28, 2026; ``tests/test_prms_groundwater_mpi.py`` streams two.)
 
     Usage:
         with ModelMPI(process_dict, control, maps=maps) as model:
@@ -1062,6 +1061,13 @@ class ModelMPI(Model):
         # ---- Distributed grid: open + decompose once over mpi_grid ----
         # 1.0.0: open_dataset no longer returns a comm; bind the world comm
         # here and pass it explicitly to every mpixarray call downstream.
+        try:
+            import mpix
+            from mpixarray import open_dataset as mpi_open_dataset
+        except ImportError as err:
+            raise ImportError(
+                "ModelMPI requires mpix + mpixarray (README 'Installation')"
+            ) from err
         comm = mpix.world_comm()
         ds_input = mpi_open_dataset(input_file, comm=comm)
         self._ds_input = ds_input
@@ -1294,6 +1300,7 @@ class ModelMPI(Model):
                 self._add_process_fields(kk, grid, grid_ds)
             self.discretizations[grid].dataset = grid_ds
 
+        self._validate_inputs_resolved()
         # ---- Bind in process_dict (author) order; distributed-grid
         #      processes are rebound to each streaming step in run(). ----
         for kk, vv in self._process_dict.items():
@@ -1301,7 +1308,6 @@ class ModelMPI(Model):
                 self.discretizations[self._proc_grid[kk]].dataset
             )
 
-        self._validate_inputs_resolved()
         # Per-process init hooks are LOCAL (collective-free) by contract,
         # so running them inside SPMD assembly is safe.
         self._run_initialize_hooks()
@@ -1418,7 +1424,7 @@ class ModelMPI(Model):
                 proc.advance()
             for proc_name, proc in self.model_dict.items():
                 for mm in self._proc_maps[proc_name]:
-                    mm.apply(self.discretizations[mm.source_grid].dataset)
+                    mm.apply()
                 proc.calculate(dt, self.time)
                 self._check_budgets(proc)
             # Record state into the streaming output slab(s) and write.

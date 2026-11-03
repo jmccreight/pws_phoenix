@@ -8,7 +8,6 @@ parameter forward-fill) -- pywatershed appears here ONLY as the test
 oracle, never as a prms_translate dependency.
 """
 
-import pathlib as pl
 import sys
 
 import numpy as np
@@ -17,6 +16,7 @@ import xarray as xr
 
 pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
 
+from conftest import PWS_TEST_DATA, PYWS_ROOT
 from pws_phoenix.prms_translate import (  # noqa: E402
     assemble_from_control,
     from_control,
@@ -31,10 +31,8 @@ from pws_phoenix.prms_translate import (  # noqa: E402
 )
 from pws_phoenix.prms_translate.dyn_param import forward_fill  # noqa: E402
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-PYWS_ROOT = MPIX_ROOT / "pywatershed"
-DRB_DIR = PYWS_ROOT / "test_data" / "drb_2yr"
-FGR_DIR = PYWS_ROOT / "test_data" / "fgr_ag_2yr"
+DRB_DIR = PWS_TEST_DATA / "drb_2yr"
+FGR_DIR = PWS_TEST_DATA / "fgr_ag_2yr"
 
 # ctl.modules as pyPRMS normalizes the drb NHM control
 NHM_MODULES = {
@@ -464,3 +462,27 @@ def test_dyn_param_matches_pywatershed():
     idx = np.searchsorted(theirs_dates, times, side="right") - 1
     idx = np.clip(idx, 0, len(theirs_dates) - 1)
     np.testing.assert_array_equal(filled.values, dp.data[idx, :])
+
+
+def test_legacy_control_keys_load(tmp_path):
+    """Control keys PRMS 5.2.1 reads past without acting on (GSFLOW
+    leftovers, one misspelling) load through the injected metadata
+    instead of tripping pyPRMS's unknown-key check."""
+    extra = [
+        ("stats_output_file", 4, "stats.out"),
+        ("map_resultsON_OFF", 1, "0"),
+        ("gsf_rpt", 1, "1"),
+        ("rpt_days", 1, "7"),
+        ("nhruout_freq", 1, "1"),
+    ]
+    text = (DRB_DIR / "nhm.control").read_text()
+    if not text.endswith("\n"):
+        text += "\n"
+    for name, ptype, value in extra:
+        text += f"####\n{name}\n1\n{ptype}\n{value}\n"
+    path = tmp_path / "legacy.control"
+    path.write_text(text)
+    ctl = load_control(path)
+    assert ctl.get("gsf_rpt").values == 1
+    assert ctl.get("rpt_days").values == 7
+    assert str(ctl.get("stats_output_file").values) == "stats.out"

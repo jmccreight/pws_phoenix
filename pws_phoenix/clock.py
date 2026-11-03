@@ -16,6 +16,8 @@ Model drives the loop and sets it; in the MPI path mpixarray owns the time
 the same way -- e.g. `time.month` for a time-varying parameter lookup.
 """
 
+import datetime
+
 import numpy as np
 import xarray as xr
 
@@ -38,6 +40,7 @@ class Time:
         self._times: np.ndarray = np.asarray(arr)
         self.n_time: int = len(self._times)
         self.current_index: int = 0
+        self.set_index(0)
 
     @property
     def current(self) -> np.datetime64:
@@ -47,34 +50,27 @@ class Time:
     @property
     def month(self) -> int:
         """Calendar month (1-12) of the current model time."""
-        return int(self.current.astype("datetime64[M]").astype(int) % 12 + 1)
+        return self._month
 
     @property
     def year(self) -> int:
         """Calendar year of the current model time."""
-        return int(self.current.astype("datetime64[Y]").astype(int) + 1970)
+        return self._year
 
     @property
     def day_of_month(self) -> int:
         """Day of month (1-based) of the current model time."""
-        day = self.current.astype("datetime64[D]")
-        mstart = self.current.astype("datetime64[M]").astype("datetime64[D]")
-        return int((day - mstart).astype(int) + 1)
+        return self._day_of_month
 
     @property
     def doy(self) -> int:
         """Day of year (1-based) of the current model time."""
-        year_start = self.current.astype("datetime64[Y]")
-        delta = (self.current - year_start).astype("timedelta64[D]")
-        return int(delta.astype(int) + 1)
+        return self._doy
 
     @property
     def dowy(self) -> int:
         """Day of water year (1-based, Oct 1 start) of the current time."""
-        year = self.year - (1 if self.month < 10 else 0)
-        wy_start = np.datetime64(f"{year}-10-01")
-        delta = (self.current - wy_start).astype("timedelta64[D]")
-        return int(delta.astype(int) + 1)
+        return self._dowy
 
     @property
     def jsol(self) -> int:
@@ -93,16 +89,23 @@ class Time:
         pywatershed utils/time_utils.datetime_epiweek). Lazy-imports
         `epiweeks` -- only seasonal params (STARFIT) need it, so a run
         without them never requires the package."""
-        import datetime as _datetime
-
         import epiweeks
 
-        val = self.current.astype("datetime64[s]").astype(_datetime.datetime)
+        val = self.current.astype("datetime64[s]").astype(datetime.datetime)
         return int(epiweeks.Week.fromdate(val).week)
 
     def set_index(self, index: int) -> None:
-        """Point the clock at a specific timestep index."""
+        """Point the clock at a specific timestep index and derive the
+        calendar fields once (the properties then cost an attribute
+        read; processes ask for them several times a step)."""
         self.current_index = index
+        date = self.current.astype("datetime64[s]").astype(datetime.datetime)
+        self._year: int = date.year
+        self._month: int = date.month
+        self._day_of_month: int = date.day
+        self._doy: int = date.timetuple().tm_yday
+        wy_start = datetime.date(date.year - (date.month < 10), 10, 1)
+        self._dowy: int = (date.date() - wy_start).days + 1
 
     def __repr__(self) -> str:
         return (

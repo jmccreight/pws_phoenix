@@ -32,11 +32,10 @@ guarantees live in the standalone tests (physics 5e-3 vs Fortran with
 answers-fed inputs; aggregation weights == kernels at 1e-12).
 """
 
-import pathlib as pl
-
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA
 from pws_phoenix.atmosphere.prms_atmosphere import PRMSAtmosphere
 from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
 from pws_phoenix.discretization import Discretization
@@ -58,8 +57,7 @@ from pws_phoenix.maps import Map
 from pws_phoenix.model import Model
 from pws_phoenix.process import DataArrayMeta, Process
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"  # the chain answers (skip-check only)
 GEN_DIR_ST = DOMAIN_DIR / "output_stream_temp"  # the stream-temp answers
 

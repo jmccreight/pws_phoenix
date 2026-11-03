@@ -53,7 +53,7 @@ import pytest
 import xarray as xr
 from conftest import (
     PYWS_INPUT_VOL_NAMES,
-    PYWS_TEST_DATA,
+    PWS_TEST_DATA,
     pyws_domain_files,
 )
 from pws_phoenix.discretization import Discretization
@@ -69,7 +69,7 @@ from pws_phoenix.hydrology.starfit_flow_node import (
 from pws_phoenix.model import Model
 
 DOMAIN = "ucb_2yr"
-GRAND_PARAM_FILE = PYWS_TEST_DATA / "starfit" / "istarf_conus_grand.nc"
+GRAND_PARAM_FILE = PWS_TEST_DATA / "starfit" / "istarf_conus_grand.nc"
 BIG_SANDY_GRAND_ID = 419
 NHM_SEG_RESERVOIR_ABOVE = 44426  # PT2 -> STARFIT -> PT3 -> this seg
 NHM_SEG_PASS_THROUGH_ABOVE = 44409  # PT1 -> this seg

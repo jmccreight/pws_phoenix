@@ -22,14 +22,13 @@ the ag process physics is already pinned at 1e-5 by the disk-driven
 tests in test_prms_*_ag*.py).
 """
 
-import pathlib as pl
-
 import numpy as np
 import pytest
 import xarray as xr
 
 pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
 
+from conftest import PWS_TEST_DATA
 from pws_phoenix.atmosphere.prms_atmosphere import (  # noqa: E402
     PRMSAtmosphereTranspFrost,
     PRMSAtmosphereTranspFrostDyn,
@@ -51,10 +50,8 @@ from pws_phoenix.prms_translate.dyn_param import (  # noqa: E402
     load_dynamic_parameter,
 )
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-PYWS_ROOT = MPIX_ROOT / "pywatershed"
-FGR_DIR = PYWS_ROOT / "test_data" / "fgr_ag_2yr"
-UCB_DIR = PYWS_ROOT / "test_data" / "ucb_2yr"
+FGR_DIR = PWS_TEST_DATA / "fgr_ag_2yr"
+UCB_DIR = PWS_TEST_DATA / "ucb_2yr"
 
 # ctl.modules as pyPRMS normalizes the fgr controls
 AG_MODULES = {

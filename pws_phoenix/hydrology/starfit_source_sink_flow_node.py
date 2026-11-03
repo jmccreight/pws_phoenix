@@ -58,6 +58,8 @@ from pws_phoenix.hydrology.starfit_flow_node import (
 from pws_phoenix.process import DataArrayMeta
 
 
+# NOT cache=True: these call starfit_flow_node.py's jitted helpers; a
+# cached caller never notices an edited callee (DEVELOPER.md "Numba cache").
 @numba.njit
 def _prepare(inode, state):
     # base STARFIT prepare + the sink/source accumulator (pywatershed

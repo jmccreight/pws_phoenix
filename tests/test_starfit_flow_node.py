@@ -47,13 +47,12 @@ Requires pywatershed test_data/starfit files; skips with a reason if
 absent.
 """
 
-import pathlib as pl
 from typing import Any
 
 import numpy as np
 import pytest
 import xarray as xr
-from conftest import STARFIT_INDS_TEST
+from conftest import PWS_TEST_DATA, STARFIT_INDS_TEST
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.flow_graph import make_flow_graph
 from pws_phoenix.hydrology.starfit_flow_node import (
@@ -65,8 +64,7 @@ from pws_phoenix.hydrology.starfit_source_sink_flow_node import (
 )
 from pws_phoenix.model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-STARFIT_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "starfit"
+STARFIT_DIR = PWS_TEST_DATA / "starfit"
 PARAM_FILE = STARFIT_DIR / "starfit_original_parameters.nc"
 INFLOW_FILE = STARFIT_DIR / "lake_inflow.nc"
 ANSWER_FILE = STARFIT_DIR / "starfit_mean_output_1995-2001.nc"

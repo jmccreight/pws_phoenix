@@ -126,9 +126,9 @@ class TestTwoGrid:
                 super().__init__(**kwargs)
                 self.n_applies = 0
 
-            def apply(self, source_ds):
+            def apply(self):
                 self.n_applies += 1
-                super().apply(source_ds)
+                super().apply()
 
         # A 2nd process on "segment" consuming `flow` (same class: its state
         # vars are structurally shared with "lower", which is fine here --

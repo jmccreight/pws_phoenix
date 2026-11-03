@@ -23,20 +23,19 @@ The additive-structure consistency is already pinned bit-for-bit
 without external answers in test_prms_no_dprst.py.
 """
 
-import pathlib as pl
 from typing import Any
 
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.hydrology.prms_groundwater import PRMSGroundwaterNoDprst
 from pws_phoenix.hydrology.prms_runoff import PRMSRunoffNoDprst
 from pws_phoenix.hydrology.prms_soilzone import PRMSSoilzoneNoDprst
 from pws_phoenix.model import Model
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output_no_dprst"
 
 CASES: dict[str, dict[str, Any]] = {

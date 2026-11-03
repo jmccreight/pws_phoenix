@@ -3,6 +3,11 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
+  # ASV (airspeed velocity) performance benchmarks -- asv.conf.json
+  # + benchmarks/ at the repo root; run against THIS env with
+  # `asv run --python=same` (environment_type "existing"), no
+  # ASV-managed envs. (Entry inherited from pywatershed's env, Apr
+  # 2026; put to use Oct 2026.)
   - asv
   - click != 8.1.0
   # contextily + tqdm: pywatershed import-chain deps (parity tests;

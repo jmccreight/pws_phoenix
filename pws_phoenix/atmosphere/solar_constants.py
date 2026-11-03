@@ -43,11 +43,7 @@ r0 = 2.0
 # Solar constant for 60 minutes
 r1 = (60.0 * r0) / (obliquity**2)
 
-# degree-day solar fraction table (c_solar_radiation_degday.f90)
-solf = np.array(
-    [
-        0.20, 0.35, 0.45, 0.51, 0.56, 0.59, 0.62, 0.64, 0.655,
-        0.67, 0.682, 0.69, 0.70, 0.71, 0.715, 0.72, 0.722, 0.724,
-        0.726, 0.728, 0.73, 0.734, 0.738, 0.742, 0.746, 0.75,
-    ]
-)  # fmt: skip
+# The degree-day solar fraction table (solf) lives in prms_atmosphere.py,
+# the only module that reads it: its kernels freeze the table, and a
+# cached kernel only notices edits to its OWN file (DEVELOPER.md "Numba
+# cache").

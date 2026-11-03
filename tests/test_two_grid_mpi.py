@@ -286,3 +286,111 @@ class TestTwoGridMPI:
         ) as ds_out:
             storage_out = ds_out["storage"].values  # (n_time, n_segment)
         np.testing.assert_allclose(storage_out, answers["storage"], rtol=1e-12)
+
+
+# -- buffer identity across streaming rebinds ---------------------------------
+#
+# What is tested here, and why (DEVELOPER.md "Per-step data access"):
+# a process reads its fields through `self._obj[name].values`, where
+# `self._obj` is the grid dataset. Under MPI the Model rebinds every
+# distributed-grid process to each streaming window (`proc._obj =
+# step`, model.py run loop), so `self._obj` is a DIFFERENT Dataset
+# object each step. The question is whether the ndarray BEHIND each
+# name is the same one all run -- the precondition for a process to
+# fetch its buffers once and keep the references (a Dataset lookup
+# costs ~10-20 us; the kernels cost less than all the lookups). It
+# should hold because mpixarray's `iterate` re-points only
+# time-dimensioned file variables (which ModelMPI shadows with
+# (hru,) buffers refilled IN PLACE from `step.mpi.src`) and leaves
+# RAM-only buffers alone ("keeps its state across steps",
+# mpixarray/iterable.py), and the per-step `assign_coords` is a
+# shallow copy. This pins that reading of the two codebases: the
+# probe records the memory address of every declared field it reads,
+# every step, through the normal path; each name must map to ONE
+# address. A failure means a buffer was reallocated under a name --
+# a reference cache would then compute on stale data.
+
+
+class UpperProbe(Upper):
+    """Upper that records the address of each field buffer it reads,
+    every step (class-level: the record outlives the rebinding)."""
+
+    addresses: dict[str, set[int]] = {}
+    n_steps: int = 0
+
+    def calculate(self, dt, time):
+        names = (
+            self.get_parameters()
+            + self.get_inputs()
+            + tuple(self.get_variables())
+        )
+        for name in names:
+            self.addresses.setdefault(name, set()).add(
+                self._obj[name].values.ctypes.data
+            )
+        UpperProbe.n_steps += 1
+        super().calculate(dt, time)
+
+
+@pytest.fixture(scope="module")
+def buffer_probe_run(mpi_paths, two_grid_toy, two_grid_weights):
+    """Build + run + finalize ONCE with UpperProbe on the distributed
+    grid ("mixed" style; probe-suffixed outputs). Every collective
+    lives here."""
+    toy = two_grid_toy
+    data_dir = mpi_paths["data_dir"]
+    process_dict = {
+        "upper": {"class": UpperProbe, "discretization": "hru"},
+        "lower": {
+            "class": Lower,
+            "discretization": "segment",
+            "parameters": toy["low_params"],
+            "forcing_low": toy["forcing_low"],
+            "storage_initial": toy["low_storage_initial"],
+        },
+    }
+    maps = {
+        "hru_to_seg": MapMPI(
+            weights=two_grid_weights,
+            grid={"hru": "segment"},
+            variable={"flow": "flow"},
+        )
+    }
+    control = {
+        "input_file": mpi_paths["input_file"],
+        "output_parallel_netcdf": data_dir / "hru_output_probe.nc",
+        "output_serial_zarr": data_dir / "segment_output_probe.zarr",
+        "output_var_names": ["flow", "storage"],
+        "time_chunk_size": 10,
+        "mpi_grid": "hru",
+    }
+    UpperProbe.addresses.clear()
+    UpperProbe.n_steps = 0
+    model = ModelMPI(process_dict, control, maps=maps)
+    model.run(np.float64(1.0))
+    model.finalize()
+    MPI.COMM_WORLD.Barrier()
+    return {
+        "addresses": {kk: set(vv) for kk, vv in UpperProbe.addresses.items()},
+        "n_steps": UpperProbe.n_steps,
+    }
+
+
+@pytest.mark.mpi(min_size=2)
+def test_step_buffers_persist_across_rebinds(buffer_probe_run):
+    """Every buffer a distributed-grid process reads is ONE ndarray for
+    the whole run: inputs (refilled in place), parameters, state."""
+    assert buffer_probe_run["n_steps"] > 1
+    assert set(buffer_probe_run["addresses"]) >= {
+        "param_up_0",
+        "param_up_1",
+        "forcing_up",
+        "flow",
+        "flow_previous",
+    }
+    moved = {
+        name: len(addrs)
+        for name, addrs in buffer_probe_run["addresses"].items()
+        if len(addrs) != 1
+    }
+    assert not moved, f"buffers reallocated across steps: {moved}"

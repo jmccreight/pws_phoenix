@@ -31,6 +31,7 @@ import numpy as np
 import pytest
 import xarray as xr
 from mpi4py import MPI
+from conftest import PWS_TEST_DATA
 from pws_phoenix.atmosphere.prms_atmosphere import PRMSAtmosphere
 from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
 from pws_phoenix.discretization import Discretization
@@ -52,8 +53,7 @@ from pws_phoenix.maps import MapMPI
 from pws_phoenix.model import ModelMPI
 from pws_phoenix.process import DataArrayMeta, Process
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "drb_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR_ST = DOMAIN_DIR / "output_stream_temp"
 
 CBH_NAMES = ("prcp", "tmax", "tmin")

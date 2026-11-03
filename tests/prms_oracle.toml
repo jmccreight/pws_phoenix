@@ -1,0 +1,39 @@
+# Pinned pws-prms-oracle answer keys (tests/conftest.py checks them at
+# session start against the markers in PWS_TEST_DATA). Keys are the
+# oracle's content keys: an inputs key per domain (.oracle_ikey) and,
+# per answer directory, an outputs key per platform (.oracle_okey;
+# platforms differ -- snow knife-edges). Bumping a key is a reviewed
+# commit: the place where answer changes become visible. Only the
+# answer sets the tests read are pinned; the comment names the control.
+
+[inputs]
+drb_2yr = "19f6e77bb6f4b748"
+ucb_2yr = "54cb23af4448606b"
+fgr_ag_2yr = "c3ceb0ae8cb990dc"
+
+[outputs."drb_2yr/output"]  # nhm.control
+macos-arm64 = "db45d990c56696b2"
+
+[outputs."drb_2yr/output_no_dprst"]  # nhm_no_dprst.control
+macos-arm64 = "c02081648c2282af"
+
+[outputs."drb_2yr/output_stream_temp"]  # nhm_stream_temp.control
+macos-arm64 = "f104762e447ade61"
+
+[outputs."drb_2yr/output_stream_temp_seg_humid_matrix"]
+macos-arm64 = "564906aa79b596bb"
+
+[outputs."drb_2yr/output_stream_temp_seg_humid_scalar"]
+macos-arm64 = "934f65134e765980"
+
+[outputs."ucb_2yr/output"]  # nhm.control
+macos-arm64 = "545f23872fadcc48"
+
+[outputs."ucb_2yr/output_transp_frost"]  # nhm_transp_frost.control
+macos-arm64 = "0f3e5c710876e78b"
+
+[outputs."fgr_ag_2yr/output_spinup"]  # spinup.control
+macos-arm64 = "81ec6c9b8e9e7c55"
+
+[outputs."fgr_ag_2yr/output_analysis"]  # analysis.control
+macos-arm64 = "b1863e271f4fae01"

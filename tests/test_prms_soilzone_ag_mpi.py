@@ -26,11 +26,11 @@ import numpy as np
 import pytest
 import xarray as xr
 from mpi4py import MPI
+from conftest import PWS_TEST_DATA
 from pws_phoenix.hydrology.prms_soilzone_ag import PRMSSoilzoneAg
 from pws_phoenix.model import ModelMPI
 
-MPIX_ROOT = pl.Path(__file__).parents[2]
-DOMAIN_DIR = MPIX_ROOT / "pywatershed" / "test_data" / "fgr_ag_2yr"
+DOMAIN_DIR = PWS_TEST_DATA / "fgr_ag_2yr"
 GEN_DIR = DOMAIN_DIR / "output_spinup"
 
 DISK_INPUT_NAMES = (
