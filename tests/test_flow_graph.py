@@ -81,7 +81,14 @@ def build_graph_run(drb, insert_class, out_dir, class_name):
     else the splice/headwater insertion of that type): returns
     (process_dict, control, discretizations, info) for a Model. Split
     from the graph_run fixture so a test can compose the same graph
-    with a PATCHED node type (test_budget_detects_last_substep_harvest)."""
+    with a PATCHED node type (test_budget_detects_last_substep_harvest).
+
+    Deliberately HAND-BUILT (not flow_graph_build.splice_flow_graph):
+    the obsin scenario is a HEADWATER insertion -- a new node feeding
+    1829 that intercepts nothing -- which is not a pywatershed
+    construct, so the helper has no mode for it. The pass-through
+    splice built here is pinned equal to the helper's in
+    tests/test_flow_graph_build.py."""
     dis_seg_ds = drb["dis_seg_ds"]
     channel_params_ds = drb["channel_params_ds"]
     insert = insert_class is not None

@@ -56,10 +56,8 @@ from conftest import (
     PWS_TEST_DATA,
     pyws_domain_files,
 )
-from pws_phoenix.discretization import Discretization
-from pws_phoenix.flow_graph import make_flow_graph
+from pws_phoenix.flow_graph_build import NewNode, splice_flow_graph
 from pws_phoenix.hydrology.pass_through_flow_node import PassThroughFlowNode
-from pws_phoenix.hydrology.prms_channel_flow_node import PRMSChannelFlowNode
 from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import (
     _OMEGA,
@@ -75,7 +73,6 @@ NHM_SEG_RESERVOIR_ABOVE = 44426  # PT2 -> STARFIT -> PT3 -> this seg
 NHM_SEG_PASS_THROUGH_ABOVE = 44409  # PT1 -> this seg
 
 NODE_INPUT_NAMES = {nn: f"node_{nn}" for nn in PYWS_INPUT_VOL_NAMES}
-DIS_FLOAT_VARS = ("seg_length", "seg_slope", "seg_depth")
 N_SUBSTEPS = 24
 # unaffected segments: pywatershed's own scalar-node standard;
 # structural identities at the reservoir: tighter
@@ -158,90 +155,6 @@ def graph_run(request, pyws_domain, big_sandy, tmp_path_factory):
     channel_params_ds = ucb["channel_params_ds"]
     out_dir = tmp_path_factory.mktemp(f"mixed_starfit_{mode}")
     n_seg = dis_seg_ds.sizes["nsegment"]
-    # new nodes appended in this order (pywatershed's scenario)
-    i_starfit = n_seg
-    i_pt1 = n_seg + 1  # -> 44409 (independent)
-    i_pt2 = n_seg + 2  # -> starfit (above)
-    i_pt3 = n_seg + 3  # starfit -> pt3 -> 44426 (below)
-    n_nodes = n_seg + 4
-
-    def pad(vals, fill):
-        tail = np.full(4, fill, dtype=vals.dtype)
-        return np.concatenate([vals, tail])
-
-    # -- topology: base network + the two INTERCEPTING insertions --
-    to_graph_index = np.full(n_nodes, -1, dtype=np.int64)
-    to_graph_index[:n_seg] = (
-        dis_seg_ds["tosegment"].values.astype(np.int64) - 1
-    )
-    nhm_seg = dis_seg_ds["nhm_seg"].values
-
-    def splice_chain(nhm_target, chain):
-        """Redirect the target seg's upstreams into chain[0]; wire
-        chain[...] -> target (the pywatershed helper semantics)."""
-        wh_target = int(np.where(nhm_seg == nhm_target)[0][0])
-        wh_ups = np.where(to_graph_index[:n_seg] == wh_target)[0]
-        to_graph_index[wh_ups] = chain[0]
-        for from_node, to_node in zip(chain[:-1], chain[1:], strict=True):
-            to_graph_index[from_node] = to_node
-        to_graph_index[chain[-1]] = wh_target
-        return wh_target
-
-    wh_44426 = splice_chain(NHM_SEG_RESERVOIR_ABOVE, [i_pt2, i_starfit, i_pt3])
-    splice_chain(NHM_SEG_PASS_THROUGH_ABOVE, [i_pt1])
-
-    graph_class = make_flow_graph(
-        (PRMSChannelFlowNode, PassThroughFlowNode, starfit_class),
-        class_name=f"UcbBigSandy_{mode}_Graph",
-        n_substeps=N_SUBSTEPS,
-        io_in_cfs=True,
-    )
-    node_type = np.full(
-        n_nodes, graph_class.node_type_code("prms_channel"), dtype=np.int64
-    )
-    node_type[[i_pt1, i_pt2, i_pt3]] = graph_class.node_type_code(
-        "pass_through"
-    )
-    node_type[i_starfit] = graph_class.node_type_code(starfit_class.type_name)
-
-    # -- the nnodes dis --
-    graph_dis_vars = {
-        "to_graph_index": ("nnodes", to_graph_index),
-        "node_type": ("nnodes", node_type),
-        "segment_type": (
-            "nnodes",
-            pad(dis_seg_ds["segment_type"].values, 0),
-        ),
-    }
-    for vv in DIS_FLOAT_VARS:
-        graph_dis_vars[vv] = ("nnodes", pad(dis_seg_ds[vv].values, np.nan))
-    discretizations = {
-        "nnodes": Discretization(
-            ["nnodes"],
-            parameters=xr.Dataset(graph_dis_vars),
-            topo_order={"node_order": "to_graph_index"},
-            topo_one_based=False,
-        ),
-    }
-
-    # -- process parameters: channel (padded) + Big Sandy on the
-    # starfit row (nan elsewhere; types only read their own rows) --
-    graph_params = xr.Dataset(
-        {
-            vv: ("nnodes", pad(channel_params_ds[vv].values, np.nan))
-            for vv in ("mann_n", "x_coef")
-        }
-    )
-    starfit_param_names = [
-        nn
-        for nn, mm in StarfitFlowNode.fields.items()
-        if mm.kind == "parameter"
-    ]
-    for nn in starfit_param_names:
-        vals = np.full(n_nodes, np.nan)
-        if nn != "initial_storage":
-            vals[i_starfit] = float(big_sandy[nn])
-        graph_params[nn] = ("nnodes", vals)
 
     # inputs (zero columns for the 4 new nodes)
     node_inputs = {
@@ -251,9 +164,15 @@ def graph_run(request, pyws_domain, big_sandy, tmp_path_factory):
         for nn in PYWS_INPUT_VOL_NAMES
     }
 
-    # Big Sandy nan initial_storage -> NOR midpoint at the epiweek of
-    # one day BEFORE the first timestep (pywatershed's control init
-    # time), supplied in io units (cfs graph: MCM -> Mcf)
+    # -- Big Sandy's row: the GRAND parameters + the nan initial_storage
+    # -> NOR midpoint at the epiweek of one day BEFORE the first
+    # timestep (pywatershed's control init time), in io units (cfs
+    # graph: MCM -> Mcf) --
+    starfit_params = {
+        nn: float(big_sandy[nn])
+        for nn, mm in StarfitFlowNode.fields.items()
+        if mm.kind == "parameter" and nn != "initial_storage"
+    }
     time0 = node_inputs["node_sroff_vol"]["time"].values[0]
     init_date = (
         (time0 - np.timedelta64(1, "D"))
@@ -261,15 +180,36 @@ def graph_run(request, pyws_domain, big_sandy, tmp_path_factory):
         .astype(datetime.datetime)
     )
     init_stor_mcm = nor_midpoint_initial_storage(big_sandy, init_date)
-    graph_params["initial_storage"].values[i_starfit] = (
+    starfit_params["initial_storage"] = (
         init_stor_mcm * cms_to_cfs  # cm_to_cf == cms_to_cfs
     )
+
+    # -- the two INTERCEPTING insertions, collated in pywatershed's
+    # scenario order (rows n_seg..n_seg+3): starfit, pt1, pt2, pt3 --
+    pt3 = NewNode(PassThroughFlowNode, NHM_SEG_RESERVOIR_ABOVE, 9003)
+    starfit = NewNode(starfit_class, pt3, 999, starfit_params)
+    pt1 = NewNode(PassThroughFlowNode, NHM_SEG_PASS_THROUGH_ABOVE, 9001)
+    pt2 = NewNode(PassThroughFlowNode, starfit, 9002)
+    graph = splice_flow_graph(
+        dis_seg_ds,
+        channel_params_ds,
+        [starfit, pt1, pt2, pt3],
+        n_substeps=N_SUBSTEPS,
+        io_in_cfs=True,
+        class_name=f"UcbBigSandy_{mode}_Graph",
+    )
+    graph_class = graph.graph_class
+    i_starfit, _, i_pt2, i_pt3 = graph.new_node_rows
+    wh_44426 = int(
+        np.where(dis_seg_ds["nhm_seg"].values == NHM_SEG_RESERVOIR_ABOVE)[0][0]
+    )
+    discretizations = {"nnodes": graph.discretization}
 
     process_dict = {
         "flow_graph": {
             "class": graph_class,
             "discretization": "nnodes",
-            "parameters": graph_params,
+            "parameters": graph.parameters,
             **node_inputs,
         },
     }

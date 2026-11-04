@@ -1027,8 +1027,20 @@ directive. The phoenix version keeps the CONCEPT, re-expressed as data:
   above nhm_seg 1829, 457 nodes) vs same answers on non-inserted
   nodes. Tolerance **1e-10 = pywatershed's OWN standard** for
   scalar-node-vs-array muskingum. Graph-building arithmetic
-  (splice/pad) stays test-side; helper (a la
-  prms_channel_flow_graph_to_model_dict) when it stabilizes.
+  (splice/pad) is now a library helper (Nov 2026):
+  `flow_graph_build.splice_flow_graph(dis_seg, channel_params,
+  [NewNode(...)])` -> `FlowGraphKit` (composed class, `nnodes`
+  Discretization whose dim COORDINATE is `nhm_seg` + the new nodes'
+  `node_id`, union parameters, `pad_weights`), pywatershed's
+  `_build_flow_graph_inputs` semantics verbatim (intercept by
+  nhm_seg; in-series via `flows_to=<NewNode>`); and
+  `prms_translate.assemble.insert_flow_graph(kit, new_nodes)` swaps
+  a PRMS-control kit's channel for the graph (Maps padded +
+  re-targeted to `node_*_vol`; stream-temp kits raise
+  NotImplementedError). Tests: `tests/test_flow_graph_build.py`
+  (synthetic + pins vs the hand-built graphs),
+  `tests/test_prms_translate_flow_graph.py` (ucb Big Sandy kit,
+  self-consistent 1e-10 pin vs the plain channel kit).
 - **NOT ported** (recorded): Budget + `sink_source` (the motivating
   case for the deferred Budget design -- reservoirs source/sink mass),
   plot()/pyvis, initialize_netcdf, InflowExchange factory (revisit
