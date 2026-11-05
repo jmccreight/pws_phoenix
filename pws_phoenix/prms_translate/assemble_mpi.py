@@ -118,7 +118,7 @@ def mpi_model_from_control(
                 "class": entry["class"],
                 "discretization": mpi_grid,
             }
-            mpi_vars |= set(entry["class"].get_var_names())
+            mpi_vars |= set(entry["class"].get_var_names(include_budget=True))
         else:
             process_dict[slot] = entry
 

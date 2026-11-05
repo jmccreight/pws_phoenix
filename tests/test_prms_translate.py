@@ -30,6 +30,9 @@ from pws_phoenix.prms_translate import (  # noqa: E402
     volume_map_weights,
 )
 from pws_phoenix.prms_translate.dyn_param import forward_fill  # noqa: E402
+from pws_phoenix.prms_translate.readers import (  # noqa: E402
+    _drop_unknown_control_entries,
+)
 
 DRB_DIR = PWS_TEST_DATA / "drb_2yr"
 FGR_DIR = PWS_TEST_DATA / "fgr_ag_2yr"
@@ -486,3 +489,77 @@ def test_legacy_control_keys_load(tmp_path):
     assert ctl.get("gsf_rpt").values == 1
     assert ctl.get("rpt_days").values == 7
     assert str(ctl.get("stats_output_file").values) == "stats.out"
+
+
+def test_drop_unknown_control_entries():
+    """Entries whose name is not in `known` go, with their name
+    reported; the header (before the first ####) and the known
+    entries survive verbatim, in order."""
+    text = (
+        "header line\n"
+        "####\nknown_a\n1\n4\nx\n"
+        "####\nunknown_b\n1\n1\n0\n"
+        "####\nknown_c\n2\n1\n1\n2\n"
+    )
+    filtered, dropped = _drop_unknown_control_entries(
+        text, {"known_a", "known_c"}
+    )
+    assert dropped == ["unknown_b"]
+    blocks = [bb for bb in filtered.split("####\n") if bb]
+    assert blocks == [
+        "header line\n",
+        "known_a\n1\n4\nx\n",
+        "known_c\n2\n1\n1\n2\n",
+    ]
+    assert filtered.endswith("\n")
+    # nothing unknown: text passes through unchanged
+    same, none = _drop_unknown_control_entries(
+        text, {"known_a", "unknown_b", "known_c"}
+    )
+    assert none == [] and same == text
+
+
+@drb_skipif
+def test_load_control_drops_unknown_entries(tmp_path, capsys):
+    """A control entry the PRMS 5.2.1.1 metadata does not know
+    (cbh_binary_flag, deprecated; present in the fgr template control)
+    is dropped with a notice instead of tripping pyPRMS, and the rest
+    of the file reads as before."""
+    text = (DRB_DIR / "nhm.control").read_text()
+    if not text.endswith("\n"):
+        text += "\n"
+    text += "####\ncbh_binary_flag\n1\n1\n0\n"
+    path = tmp_path / "old.control"
+    path.write_text(text)
+    ctl = load_control(path)
+    assert not ctl.exists("cbh_binary_flag")
+    assert np.datetime64(ctl.get("start_time").values, "D") == np.datetime64(
+        "1979-01-01"
+    )
+    assert "['cbh_binary_flag']" in capsys.readouterr().out
+
+
+@drb_skipif
+def test_cbh_paths_override(tmp_path):
+    """A control whose precip_day names a file that is not there
+    (the fgr template control: precip.day vs the shipped prcp.cbh)
+    assembles once `cbh_paths=` points the prcp input at the real
+    file; the override replaces only that entry."""
+    text = (DRB_DIR / "nhm.control").read_text()
+    for name in ("myparam.param", "tmax.cbh", "tmin.cbh"):
+        assert text.count(f"\n{name}\n") == 1
+        text = text.replace(f"\n{name}\n", f"\n{DRB_DIR / name}\n")
+    assert text.count("\nprcp.cbh\n") == 1
+    text = text.replace("\nprcp.cbh\n", "\nprecip.day\n")
+    path = tmp_path / "template.control"
+    path.write_text(text)
+
+    cfg = from_control(load_control(path), path)
+    assert cfg.cbh_paths["prcp"] == tmp_path / "precip.day"
+    assert not cfg.cbh_paths["prcp"].exists()
+
+    kit = assemble_from_control(path, cbh_paths={"prcp": DRB_DIR / "prcp.cbh"})
+    consumers = [pp for pp in kit.process_dict.values() if "prcp" in pp]
+    assert len(consumers) == 1
+    expected = load_cbh(DRB_DIR / "prcp.cbh", cfg.start_time, cfg.end_time)
+    xr.testing.assert_identical(consumers[0]["prcp"], expected)

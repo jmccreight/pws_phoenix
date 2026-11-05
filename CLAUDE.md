@@ -366,7 +366,12 @@ the `epiweeks` dep).
   budget's units must agree (checked at first introspection).
   `_resolved_fields` GENERATES `{Class}_{budget}_{inputs_sum,
   outputs_sum,storage_changes_sum,[exchanges_sum],residual,
-  residual_accum}` as ordinary variables (class-name prefix: the flat
+  residual_accum}` as `kind="budget_variable"` fields -- allocated,
+  written and restarted like variables, but reported by
+  `get_budget_variables()`/`get_budget_var_names()`, NOT by
+  `get_variables()` unless `include_budget=True` (Nov 5, 2026; the
+  framework's allocation/stream/output sites pass it) (class-name
+  prefix: the flat
   grid dataset would otherwise share two budgets' `residual`;
   `residual_accum` is `restart=True`; a variant REDECLARES the whole
   dict, nothing inherited twice). One njit pass, zero per-step

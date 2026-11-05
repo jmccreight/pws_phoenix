@@ -184,9 +184,11 @@ class ModelContractGraph:
                 if proc_grid[slot] != grid:
                     continue
                 cls = entry["class"]
-                if var in cls.get_var_names() or var in tuple(
-                    cls.get_parameters_internal()
-                ) + tuple(cls.get_inputs()):
+                if var in cls.get_var_names(
+                    include_budget=True
+                ) or var in tuple(cls.get_parameters_internal()) + tuple(
+                    cls.get_inputs()
+                ):
                     return slot
             return f"({grid})"
 

@@ -136,7 +136,7 @@ Two kinds of thing are involved; keep them apart:
 | `control.advance(); proc.advance(); proc.calculate(1.0); proc.output()` | never drive a process by hand -- budgets are only checked by the Model. Make a one-process Model. `dt` is seconds (86400.0), not 1.0 | S |
 | `pws.base.Output(control, chunked_var_list, chunked_output_file=<zarr>)`, `run(output_obj=)`, `output_obj_kwargs_dict` | `control["output_serial_zarr"]` + `output_var_names` (same buffered-chunk zarr design) | C |
 | `Output` statistics (`hoi_stats`, `noi_stats`, `monthly_accumulations`, `percentile_resamp_enclosing`, ...) | N in the framework; show the xarray equivalent on the zarr store after the run | N |
-| `model.processes[name].mass_budget` / `energy_budget` repr | budget terms are ordinary variables `{Class}_{budget}_{inputs_sum,outputs_sum,storage_changes_sum,residual,residual_accum}` -- add them to `output_var_names` and inspect from the store | C |
+| `model.processes[name].mass_budget` / `energy_budget` repr | budget terms are per-location `kind="budget_variable"` fields `{Class}_{budget}_{inputs_sum,outputs_sum,storage_changes_sum,residual,residual_accum}` (`cls.get_budget_var_names()`) -- add them to `output_var_names` and inspect from the store | C |
 | `PRMSChannel_mass_budget.nc` | N -- the channel is not budgeted (its per-segment form is an identity; module docstring) | N |
 | `multiprocessing` / `concurrent.futures` ensembles | unchanged pattern (serial pws_phoenix per worker); or MPI for one big run | S |
 | GIS / `pws.utils.gis_files` / plotting | unchanged; variables carry the same names and `nhm_id`/`nhm_seg` coords are preserved on the grid dims | S |
