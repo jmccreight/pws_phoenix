@@ -560,18 +560,17 @@ plot_series(
 # ## Checking against pywatershed
 #
 # pywatershed's notebook wrote its three runs' outputs beside itself;
-# if they're present we compare ours with them. The two models read
-# the same control file, the same parameters (pywatershed's
-# `parameters_*.nc` hold the same float64 values we parse from
-# `myparam.param`) and the same forcings, so any difference is
-# arithmetic: pywatershed compiles its kernels with fast-math, which
-# departs from strict IEEE arithmetic by about 1e-8 -- enough to flip
-# a few snowpack decisions per season on a few HRUs, which routing
-# then spreads downstream. The flows therefore agree to within 1 % on
-# nearly every segment-day, with a small set of low-flow days where
-# such a flip happened; the reservoir storage, which integrates the
-# inflow, agrees to about 1e-6. (`docs/PORTS.md`, "The snow story",
-# has the measurements behind this.)
+# if they're present we compare ours with them, in two steps.
+#
+# First the full chains, loosely. The two models read the same control
+# file, parameters and forcings, but pywatershed compiles its land
+# surface kernels with fast-math, which departs from strict IEEE
+# arithmetic by about 1e-8 -- enough to flip a few snowpack decisions
+# per season on a few HRUs, which routing then spreads downstream. So
+# the flows agree to within 1 % on nearly every segment-day, with a
+# small set of low-flow days where such a flip happened; the reservoir
+# storage, which integrates the inflow, agrees to about 1e-6.
+# (`docs/PORTS.md`, "The snow story", has the measurements.)
 
 
 # %%
@@ -634,6 +633,72 @@ else:
                 tols,
             )
             assert fracs[tol_assert] <= max_frac, (run, name, fracs)
+
+# %% [markdown]
+# Second, the FlowGraph alone, tightly. Drive the section 3 graph with
+# the lateral inflows pywatershed's own NHM run wrote (the files its
+# post-process read), and compare with pywatershed's post-process run.
+# Same inputs, same graph, same reservoir: no fast-math is involved
+# (pywatershed's reservoir node is plain Python and its channel is
+# linear in its inputs), so outflows, storages, releases and spills
+# should agree to 1e-10 at every node on every day.
+
+# %%
+if PYWS_NB_OUTPUT_DIR.exists():
+    pyws_nhm_dir = PYWS_NB_OUTPUT_DIR / "fgr_nhm"
+    node_inputs_pyws = {}
+    for name, mm in kit_nhm.maps.items():
+        if mm.target_grid != "nsegment":
+            continue
+        weights = graph.pad_weights(mm.weights)
+        hru_vol = xr.load_dataarray(pyws_nhm_dir / f"{mm.source_var}.nc")
+        hru_vol = hru_vol.rename({"nhm_id": "nhru"})
+        node_inputs_pyws[f"node_{mm.source_var}"] = xr.DataArray(
+            hru_vol.values @ weights.T,
+            dims=("time", "nnodes"),
+            coords={"time": hru_vol["time"].values},
+        )
+
+    check_store = nb_dir / "fgr_starfit_post_pyws_inputs.zarr"
+    if not check_store.exists():
+        model_check = Model(
+            {
+                "flow_graph": {
+                    "class": graph.graph_class,
+                    "discretization": "nnodes",
+                    "parameters": graph.parameters,
+                    **node_inputs_pyws,
+                }
+            },
+            {
+                "budget": "error",
+                "output_serial_zarr": check_store,
+                "output_var_names": [
+                    "node_outflows",
+                    "node_storages",
+                    "lake_release",
+                    "lake_spill",
+                ],
+                "time_chunk_size": 365,
+            },
+            discretizations={"nnodes": graph.discretization},
+        )
+        with model_check:
+            model_check.run(S_PER_DAY, np.int32(model_check.ntime))
+    check_out = xr.open_zarr(check_store, consolidated=False).load()
+    check_out = check_out.rename(
+        {"lake_release": "release", "lake_spill": "spill"}
+    )
+    for name in ("node_outflows", "node_storages", "release", "spill"):
+        fracs = compare_with_pywatershed(
+            f"graph on pywatershed inputs/{name}",
+            check_out[name],
+            xr.load_dataarray(
+                PYWS_NB_OUTPUT_DIR / "fgr_starfit_post" / f"{name}.nc"
+            ),
+            (1e-10,),
+        )
+        assert fracs[1e-10] == 0.0, (name, fracs)
 
 # %% [markdown]
 # ## What just happened, and where next
