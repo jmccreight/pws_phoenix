@@ -466,7 +466,6 @@ def nor_midpoint_initial_storage(params, init_date) -> float:
     return float(params["GRanD_CAP_MCM"]) * pct_res_cap
 
 
-
 class StarfitFlowNode:
     """Node type: STARFIT reservoir release/spill (hourly path, graph
     io units via io_in_cfs; see module docstring for port scope)."""

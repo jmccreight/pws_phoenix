@@ -55,10 +55,8 @@ from pws_phoenix.utils.addtl_domain_files import download_addtl_domains
 
 try:
     import matplotlib.pyplot as plt
-
-    HAVE_MATPLOTLIB = True
 except ImportError:  # plotting is optional
-    HAVE_MATPLOTLIB = False
+    plt = None  # type: ignore[assignment]
     print("(matplotlib not installed; plots skipped)")
 
 S_PER_DAY = np.float64(60.0 * 60.0 * 24.0)
@@ -190,7 +188,7 @@ outflow_nhm = nhm_out["seg_outflow"].isel(nsegment=wh_44426).rename("NHM")
 def plot_series(series, ylabel, title, fname):
     """Line plot of {label: DataArray(time)}; saved beside the
     notebook, returned for inline display."""
-    if not HAVE_MATPLOTLIB:
+    if plt is None:
         return None
     fig, ax = plt.subplots(figsize=(10, 4))
     for label, da in series.items():
