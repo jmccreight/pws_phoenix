@@ -124,6 +124,8 @@ class Model:
         if control.get("restart_read") is not None:
             self._read_restart(pl.Path(control["restart_read"]))
 
+        # the step cursor: step()/run() continue from here
+        self._next_index = self._start_index
         self.current_time_index = np.array([self._start_index], dtype=np.int32)
         self.current_time = np.array(
             [self.times[self._start_index].values], dtype="datetime64[D]"
@@ -601,7 +603,10 @@ class Model:
         # it to this grid's real dim (the grid key; `real_dim` above).
         # Params/inputs already arrive on the real dim (inputs validated
         # above), so only these need resolving. --
-        allocated = cls.get_variables() | cls.get_parameters_internal()
+        allocated = (
+            cls.get_variables(include_budget=True)
+            | cls.get_parameters_internal()
+        )
         for name, meta in allocated.items():
             if name in grid_ds:
                 continue
@@ -759,20 +764,34 @@ class Model:
             vv.calculate(dt, self.time)
             self._check_budgets(vv)
 
-    def run(self, dt: np.float64, n_steps: np.int32) -> None:
-        """Run simulation for n_steps time steps (from the restart
-        resume point when warm-started; from time zero otherwise)."""
+    def step(self, dt: np.float64) -> None:
+        """Run ONE timestep: point the clock at it, advance, calculate
+        (budgets checked), collect output. Steps are numbered along
+        the inputs' time axis; the cursor starts at the cold/warm
+        start and run() is a loop of these."""
         if self._finalized:
-            raise RuntimeError("Cannot run a finalized Model.")
-        start = self._start_index
-        for tt in range(start, start + int(n_steps)):
-            self.current_time_index[0] = tt
-            self.time.set_index(tt)
-            self.current_time[0] = self.time.current
-            self.advance()
-            self.calculate(dt=dt)
-            if self.output is not None:
-                self.output.collect_current_timestep(tt)
+            raise RuntimeError("Cannot step a finalized Model.")
+        tt = self._next_index
+        if tt >= self.ntime:
+            raise ValueError(
+                f"step {tt} is past the end of the inputs' time axis "
+                f"({self.ntime} steps)."
+            )
+        self.current_time_index[0] = tt
+        self.time.set_index(tt)
+        self.current_time[0] = self.time.current
+        self.advance()
+        self.calculate(dt=dt)
+        if self.output is not None:
+            self.output.collect_current_timestep(tt)
+        self._next_index = tt + 1
+
+    def run(self, dt: np.float64, n_steps: np.int32) -> None:
+        """Run n_steps timesteps, continuing from the last step taken
+        (the restart resume point when warm-started; time zero
+        otherwise)."""
+        for _ in range(int(n_steps)):
+            self.step(dt)
 
     # -- restart ---------------------------------------------------------
 
@@ -1134,7 +1153,7 @@ class ModelMPI(Model):
         # of that name. Serial-grid inputs go through Input objects instead.
         mpi_var_names: set = set()
         for cls in mpi_classes.values():
-            mpi_var_names |= set(cls.get_var_names())
+            mpi_var_names |= set(cls.get_var_names(include_budget=True))
         file_input_names: list = []
         for cls in mpi_classes.values():
             for ii in tuple(cls.get_inputs()) + tuple(
@@ -1180,7 +1199,7 @@ class ModelMPI(Model):
         for kk, vv in self._process_dict.items():
             if self._proc_grid[kk] == mpi_grid:
                 continue
-            for name in vv["class"].get_var_names():
+            for name in vv["class"].get_var_names(include_budget=True):
                 serial_var_grid[name] = self._proc_grid[kk]
         ambiguous = [
             nn
@@ -1222,7 +1241,7 @@ class ModelMPI(Model):
         declared: set = set()
         # (a) state variables -- one buffer per name across processes
         for cls in mpi_classes.values():
-            for name in cls.get_var_names():
+            for name in cls.get_var_names(include_budget=True):
                 if name not in declared:
                     _declare(name, (mpi_grid,), np.nan, False)
                     declared.add(name)
@@ -1382,6 +1401,14 @@ class ModelMPI(Model):
             self._read_restart(pl.Path(restart_read))
 
     # -- run ------------------------------------------------------------
+
+    def step(self, dt: np.float64) -> None:
+        """Not available under MPI: mpixarray owns the time loop (see
+        run()), so there is no per-step entry point."""
+        raise NotImplementedError(
+            "ModelMPI has no step(): the streaming time loop belongs to "
+            "mpixarray; use run()."
+        )
 
     def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:
         """Stream the time loop via iterate(); n_steps is ignored (the
