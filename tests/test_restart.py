@@ -147,8 +147,9 @@ def test_missing_initial_fails_loudly(toy_ds):
 
 
 def test_flags_are_variables_only():
-    """Guard: restart flags only make sense on kind='variable' --
-    every flagged field in the registry is a variable."""
+    """Guard: restart flags only make sense on variables (declared or
+    generated budget terms) -- every flagged field in the registry is
+    one."""
     for name, cls in Process._registry.items():
         for vv in cls.get_restart_variables():
-            assert vv in cls.get_var_names(), f"{name}.{vv}"
+            assert vv in cls.get_var_names(include_budget=True), f"{name}.{vv}"

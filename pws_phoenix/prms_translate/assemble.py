@@ -121,7 +121,7 @@ def requested_output_names(
     PRMS-only diagnostics etc.)."""
     available: set[str] = set()
     for entry in process_dict.values():
-        available |= set(entry["class"].get_var_names())
+        available |= set(entry["class"].get_var_names(include_budget=True))
     kept = [nn for nn in cfg.output_var_names if nn in available]
     dropped = [nn for nn in cfg.output_var_names if nn not in available]
     return kept, dropped
@@ -478,7 +478,7 @@ def insert_flow_graph(
     if "output_var_names" in control:
         available: set[str] = set()
         for entry in process_dict.values():
-            available |= set(entry["class"].get_var_names())
+            available |= set(entry["class"].get_var_names(include_budget=True))
         kept = [nn for nn in control["output_var_names"] if nn in available]
         dropped += [
             nn for nn in control["output_var_names"] if nn not in available

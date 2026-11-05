@@ -144,7 +144,7 @@ class Output:
         Note:
             Tailored to read Model.model_dict (key -> Process instance),
             where each process's variables are identified via
-            get_var_names().
+                get_var_names(include_budget=True).
         """
         self.time_chunk_size = time_chunk_size
         self.variable_names = variable_names
@@ -176,7 +176,7 @@ class Output:
         for var_name in self.variable_names:
             found = False
             for process_name, process_obj in model_dict.items():
-                if var_name in process_obj.get_var_names():
+                if var_name in process_obj.get_var_names(include_budget=True):
                     self.variable_refs[var_name] = process_obj[var_name]
                     self.process_map[var_name] = process_name
                     found = True
