@@ -15,6 +15,7 @@ model.py) does NOT use Output -- it streams output through mpixarray
 """
 
 import pathlib as pl
+import warnings
 from typing import Any, Dict, List, Union
 
 import numpy as np
@@ -162,6 +163,7 @@ class Output:
         self.data_buffers: Dict[str, np.ndarray] = {}
         self._arrays: Dict[str, zarr.Array] = {}  # var_name -> store array
         self.current_time_step = 0
+        self._finalized = False
 
     def initialize_variable_tracking(self, model_dict: Dict[str, Any]) -> None:
         """Reference the requested variables on their processes, allocate
@@ -262,3 +264,20 @@ class Output:
             group["time"].resize((n_written,))
             for arr in self._arrays.values():
                 arr.resize((n_written,) + arr.shape[1:])
+        self._finalized = True
+
+    def __del__(self) -> None:
+        """Warn (never write -- interpreter-shutdown order is undefined)
+        when buffered steps were lost because finalize() was not called:
+        an unwritten zarr chunk reads back as the fill value, silently."""
+        if getattr(self, "_finalized", True):
+            return
+        unwritten = self.current_time_step % self.time_chunk_size
+        if unwritten > 0:
+            warnings.warn(
+                f"Output {str(self.output_store)!r} was not finalized: "
+                f"{unwritten} buffered time step(s) were never written "
+                "(call Model.finalize() or use `with Model(...)`).",
+                RuntimeWarning,
+                stacklevel=1,
+            )

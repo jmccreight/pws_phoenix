@@ -19,3 +19,4 @@ select = ["E4", "E7", "E9", "F"]
 # import where the narrative introduces them)
 [lint.per-file-ignores]
 "**/examples/*.py" = ["E402"]
+"**/examples_from_pws/*.py" = ["E402"]

@@ -47,8 +47,10 @@ Numerics notes (pywatershed semantics, kept verbatim):
   before the initialize hooks): nan `Obs_MEANFLOW_CUMECS` must be
   filled with `inflow_mean` upstream (pywatershed does this in node
   __init__); nan `initial_storage` (pywatershed's NOR-midpoint
-  fallback + start/end active-window gating) is NOT ported.
-  initialize_type RAISES on either, scoped to this type's own rows.
+  fallback) is the caller's: `nor_midpoint_initial_storage(params,
+  date)` gives the value, the start/end active-window gating is NOT
+  ported. initialize_type RAISES on either, scoped to this type's
+  own rows.
 
 NOT ported (recorded): compute_daily (pywatershed itself flags it for
 deletion), Budget/mass_budget (sink_source is harvested as zero --
@@ -378,9 +380,11 @@ def initialize_starfit_type(
     init_stor = dataset["initial_storage"].values
     if np.isnan(init_stor[mine]).any():
         raise NotImplementedError(
-            f"{type_name}: nan initial_storage -- pywatershed's "
-            "NOR-midpoint fallback (+ start_time window) is not "
-            "ported; supply initial_storage [MCM]."
+            f"{type_name}: nan initial_storage -- parameters freeze "
+            "at assembly, so pywatershed's in-node NOR-midpoint "
+            "fallback is data-prep here: supply initial_storage (io "
+            "units), e.g. nor_midpoint_initial_storage(params, date) "
+            "converted to the graph's units."
         )
 
     # flow -> volume basis (pywatershed nhrs_substep * 3600 / 1e6),
@@ -417,6 +421,50 @@ def starfit_advance_type(dataset) -> None:
     change[:] = dataset["lake_storage"].values
     change -= dataset["lake_storage_old"].values
     dataset["lake_storage_old"].values[:] = dataset["lake_storage"].values
+
+
+def nor_midpoint_initial_storage(params, init_date) -> float:
+    """pywatershed's fallback for a nan ``initial_storage``: the
+    midpoint of the normal operating range (NOR) at ``init_date``'s
+    epiweek (the raw week, no 53 -> 52 fold -- pywatershed's node
+    __init__ uses the raw week), as a fraction of capacity, in MCM.
+    pywatershed evaluates it at the control's initial time, i.e. the
+    day BEFORE the first timestep.
+
+    Args:
+        params: the reservoir's STARFIT parameters by name (a dict or
+            a one-reservoir xarray Dataset; values are ``float()``-ed).
+        init_date: a ``datetime.date`` / ``datetime.datetime``.
+
+    Returns: storage in MCM; multiply by ``cms_to_cfs`` (== cm_to_cf)
+    for a cfs graph.
+    """
+    import epiweeks
+
+    epiweek = epiweeks.Week.fromdate(init_date).week
+    sin_t = np.sin(2.0 * np.pi * _OMEGA * epiweek)
+    cos_t = np.cos(2.0 * np.pi * _OMEGA * epiweek)
+    max_nor = min(
+        float(params["NORhi_max"]),
+        max(
+            float(params["NORhi_min"]),
+            float(params["NORhi_mu"])
+            + float(params["NORhi_alpha"]) * sin_t
+            + float(params["NORhi_beta"]) * cos_t,
+        ),
+    )
+    min_nor = min(
+        float(params["NORlo_max"]),
+        max(
+            float(params["NORlo_min"]),
+            float(params["NORlo_mu"])
+            + float(params["NORlo_alpha"]) * sin_t
+            + float(params["NORlo_beta"]) * cos_t,
+        ),
+    )
+    pct_res_cap = (min_nor + max_nor) / 2 / 100
+    return float(params["GRanD_CAP_MCM"]) * pct_res_cap
+
 
 
 class StarfitFlowNode:

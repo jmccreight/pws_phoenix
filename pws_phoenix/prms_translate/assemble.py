@@ -36,6 +36,7 @@ CBH_ENTRY_TO_INPUT).
 """
 
 import pathlib as pl
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +45,7 @@ import xarray as xr
 
 from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
 from pws_phoenix.discretization import Discretization
+from pws_phoenix.flow_graph_build import NewNode, splice_flow_graph
 from pws_phoenix.hydrology.prms_stream_temp import (
     AGGREGATION_MAP_SPEC,
     PRMSStreamTemp,
@@ -128,6 +130,7 @@ def assemble_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
     preprocessed: str | pl.Path | None = None,
+    cbh_paths: Mapping[str, str | pl.Path] | None = None,
 ) -> ModelKit:
     """Legacy PRMS control file -> a ModelKit (see module docstring).
     `control` is the pws_phoenix control dict passed through to the
@@ -137,10 +140,19 @@ def assemble_from_control(
     (solar tables, segment_order, hru_in_to_cf) and map weights are
     VERIFIED against this run's parameters and used instead of
     deriving in-chain (see prms_translate/preprocess.py for the
-    provenance/staleness design)."""
+    provenance/staleness design). `cbh_paths` OVERRIDES the control
+    file's forcing-file entries by pws_phoenix input name (``prcp``,
+    ``tmax``, ``tmin``, ``humidity_hru``, ...) -- for control files
+    whose ``*_day`` entries do not name the files actually present
+    (PRMS's template control names ``precip.day``; a domain may ship
+    ``prcp.cbh``)."""
     control_file = pl.Path(control_file)
     ctl = load_control(control_file)
     cfg = from_control(ctl, control_file)
+    if cbh_paths:
+        cfg.cbh_paths = dict(cfg.cbh_paths) | {
+            name: pl.Path(path) for name, path in cbh_paths.items()
+        }
     params = load_parameters(cfg.param_files)
 
     artifacts: xr.Dataset | None = None
@@ -168,17 +180,18 @@ def assemble_from_control(
 
     # -- discretizations + the derivable parameters (from the
     # verified artifacts when preprocessed, else derived in-chain) --
+    # the segment dis carries the network ids (nhm_seg) beside the
+    # topology: no process declares them, but insert_flow_graph needs
+    # them to splice by nhm_seg and to label the graph's nodes
+    seg_dis_vars = {"tosegment": params["tosegment"]}
+    if "nhm_seg" in params:
+        seg_dis_vars["nhm_seg"] = params["nhm_seg"]
     if artifacts is not None:
-        seg_dis_params = xr.Dataset(
-            {
-                "tosegment": params["tosegment"],
-                "segment_order": artifacts["segment_order"],
-            }
-        )
+        seg_dis_vars["segment_order"] = artifacts["segment_order"]
         discretizations = {
             "nhru": Discretization(["nhru"]),
             "nsegment": Discretization(
-                ["nsegment"], parameters=seg_dis_params
+                ["nsegment"], parameters=xr.Dataset(seg_dis_vars)
             ),
         }
         soltabs = artifacts[["soltab_potsw", "soltab_horad_potsw"]]
@@ -187,7 +200,7 @@ def assemble_from_control(
             "nhru": Discretization(["nhru"]),
             "nsegment": Discretization(
                 ["nsegment"],
-                parameters=xr.Dataset({"tosegment": params["tosegment"]}),
+                parameters=xr.Dataset(seg_dis_vars),
                 topo_order={"segment_order": "tosegment"},
             ),
         }
@@ -352,10 +365,125 @@ def model_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
     preprocessed: str | pl.Path | None = None,
+    cbh_paths: Mapping[str, str | pl.Path] | None = None,
 ) -> Model:
     """The one-liner: legacy PRMS control file -> a constructed (and
     thereby validated) pws_phoenix Model. See assemble_from_control
-    for the kit underneath (and for `preprocessed`)."""
+    for the kit underneath (and for `preprocessed` / `cbh_paths`)."""
     return assemble_from_control(
-        control_file, control, preprocessed=preprocessed
+        control_file, control, preprocessed=preprocessed, cbh_paths=cbh_paths
     ).model()
+
+
+def insert_flow_graph(
+    kit: ModelKit,
+    new_nodes: list[NewNode],
+    *,
+    n_substeps: int = 24,
+    io_in_cfs: bool = True,
+    class_name: str = "FlowGraph",
+) -> ModelKit:
+    """Replace the kit's PRMSChannel with a FlowGraph that has
+    ``new_nodes`` spliced into the channel network (the pws_phoenix
+    form of pywatershed's ``prms_channel_flow_graph_to_model_dict``).
+
+    The ``prms_channel`` slot becomes ``flow_graph`` (same position in
+    the schedule) on a new ``nnodes`` grid; the three lateral-volume
+    Maps are padded with zero rows for the new nodes and re-targeted to
+    the graph's ``node_*_vol`` inputs; the ``nsegment`` grid goes away.
+    ``control["output_var_names"]`` is re-filtered to the graph's
+    variables (``seg_inflow``/``seg_outflow`` survive -- the channel
+    node declares them as its rows' state, now on ``nnodes``; anything
+    the graph lacks is recorded in ``dropped_output_var_names``). The
+    graph-level names (``node_outflows``, ``lake_release``, ...) are
+    never auto-added -- request them yourself.
+
+    Not wired: a kit with other segment-grid processes (stream
+    temperature, hydraulic geometry) -- they consume ``seg_outflow`` on
+    ``nsegment``; feeding them from the graph is a later step.
+    """
+    if "prms_channel" not in kit.process_dict:
+        raise ValueError("the kit has no 'prms_channel' slot to replace")
+    others = [
+        slot
+        for slot, entry in kit.process_dict.items()
+        if entry["discretization"] == "nsegment" and slot != "prms_channel"
+    ]
+    if others:
+        raise NotImplementedError(
+            f"segment-grid processes {others} beside the channel are not "
+            "wired to a FlowGraph yet (they consume seg_outflow on "
+            "nsegment)."
+        )
+    seg_dis = kit.discretizations["nsegment"].parameters
+    assert seg_dis is not None
+    if "nhm_seg" not in seg_dis:
+        raise ValueError(
+            "the segment dis carries no 'nhm_seg' (the parameter file "
+            "lacks it); splicing by nhm_seg is impossible"
+        )
+    fg = splice_flow_graph(
+        seg_dis,
+        kit.process_dict["prms_channel"]["parameters"],
+        new_nodes,
+        n_substeps=n_substeps,
+        io_in_cfs=io_in_cfs,
+        class_name=class_name,
+    )
+
+    # -- process_dict: the channel slot becomes the graph, in place --
+    process_dict: dict[str, dict[str, Any]] = {}
+    for slot, entry in kit.process_dict.items():
+        if slot == "prms_channel":
+            process_dict["flow_graph"] = {
+                "class": fg.graph_class,
+                "discretization": "nnodes",
+                "parameters": fg.parameters,
+            }
+        else:
+            process_dict[slot] = entry
+
+    # -- Maps: pad + re-target the ones that fed the channel --
+    maps: dict[str, Map] = {}
+    for name, mm in kit.maps.items():
+        if mm.target_grid != "nsegment":
+            maps[name] = mm
+            continue
+        maps[name] = Map(
+            weights=fg.pad_weights(mm.weights),
+            grid={mm.source_grid: "nnodes"},
+            variable={mm.source_var: f"node_{mm.source_var}"},
+            derivation=(
+                f"{mm.derivation}; zero rows appended for the "
+                f"{fg.n_nodes - fg.n_seg} spliced flow-graph nodes"
+            ),
+        )
+
+    discretizations = {
+        grid: disc
+        for grid, disc in kit.discretizations.items()
+        if grid != "nsegment"
+    }
+    discretizations["nnodes"] = fg.discretization
+
+    # -- output names: the channel's variables no longer exist --
+    control = dict(kit.control)
+    dropped = list(kit.dropped_output_var_names)
+    if "output_var_names" in control:
+        available: set[str] = set()
+        for entry in process_dict.values():
+            available |= set(entry["class"].get_var_names())
+        kept = [nn for nn in control["output_var_names"] if nn in available]
+        dropped += [
+            nn for nn in control["output_var_names"] if nn not in available
+        ]
+        control["output_var_names"] = kept
+
+    return ModelKit(
+        process_dict=process_dict,
+        control=control,
+        maps=maps,
+        discretizations=discretizations,
+        config=kit.config,
+        dropped_output_var_names=dropped,
+    )

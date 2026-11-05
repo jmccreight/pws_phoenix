@@ -284,13 +284,63 @@ def prms_metadata(version: str = PRMS_VERSION) -> dict:
     return md
 
 
+def _drop_unknown_control_entries(
+    text: str, known: set[str]
+) -> tuple[str, list[str]]:
+    """Remove the ``####``-delimited entries of a control file whose
+    name is not in `known`; returns (filtered text, dropped names)."""
+    kept: list[str] = []
+    dropped: list[str] = []
+    block: list[str] = []
+    header = True  # lines before the first delimiter are kept as-is
+
+    def flush() -> None:
+        if header or not block or block[0] in known:
+            kept.extend(block)
+        else:
+            dropped.append(block[0])
+
+    for line in text.splitlines():
+        if line.strip() == "####":
+            flush()
+            header = False
+            block = []
+            kept.append(line)
+        else:
+            block.append(line)
+    flush()
+    return "\n".join(kept) + "\n", dropped
+
+
 def load_control(path: str | pl.Path) -> ControlFile:
     """Read a PRMS control file (pyPRMS ControlFile: ``.get(name)``,
-    ``.modules``, ``.cbh_files``, ``.dynamic_parameters``). NOTE:
-    avoid pyPRMS's ``.additional_modules`` -- it assumes output-flag
-    variables (basinOutON_OFF, ...) that NHM control files omit, and
-    raises."""
-    return ControlFile(str(path), metadata=prms_metadata(), verbose=False)
+    ``.modules``, ``.cbh_files``, ``.dynamic_parameters``). Entries
+    the PRMS-version metadata does not know (e.g. ``cbh_binary_flag``,
+    deprecated at 5.2.1.1 but present in older control files) are
+    dropped with a printed notice -- pyPRMS raises on them, and
+    nothing here reads them. NOTE: avoid pyPRMS's
+    ``.additional_modules`` -- it assumes output-flag variables
+    (basinOutON_OFF, ...) that NHM control files omit, and raises."""
+    path = pl.Path(path)
+    md = prms_metadata()
+    text, dropped = _drop_unknown_control_entries(
+        path.read_text(), set(md["control"])
+    )
+    if not dropped:
+        return ControlFile(str(path), metadata=md, verbose=False)
+    print(
+        f"{path.name}: dropping control entries unknown to the PRMS "
+        f"{PRMS_VERSION} metadata: {dropped}"
+    )
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".control", delete=False
+    ) as ff:
+        ff.write(text)
+        tmp = pl.Path(ff.name)
+    try:
+        return ControlFile(str(tmp), metadata=md, verbose=False)
+    finally:
+        tmp.unlink()
 
 
 def _is_full_parameter_file(path: pl.Path) -> bool:
