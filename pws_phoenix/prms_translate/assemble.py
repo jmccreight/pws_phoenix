@@ -305,6 +305,10 @@ def assemble_from_control(
         name: forward_fill(load_dynamic_parameter(path), times)
         for name, path in cfg.dyn_param_paths.items()
     }
+    for name, da in dyn_inputs.items():
+        # a dynamic parameter has the static parameter's units
+        if name in params and "units" in params[name].attrs:
+            da.attrs["units"] = params[name].attrs["units"]
 
     for grid, gg in spec["required"].items():
         for init_name, info in gg["initial_values"].items():
@@ -326,6 +330,7 @@ def assemble_from_control(
                     np.tile(params[name].values, (times.size, 1)),
                     dims=("time", "nhru"),
                     coords={"time": times},
+                    attrs=params[name].attrs,
                 )
             else:
                 raise KeyError(

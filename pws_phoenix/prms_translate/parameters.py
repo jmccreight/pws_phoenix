@@ -21,6 +21,7 @@ separate_nhm_params role, contract-driven).
 import numpy as np
 import xarray as xr
 
+from pws_phoenix.prms_translate import prms_units
 from pws_phoenix.process import _dict_of_kind
 
 # pywatershed constants.py verbatim
@@ -54,6 +55,7 @@ def derive_hru_in_to_cf(params: xr.Dataset) -> xr.DataArray:
         params["hru_area"].values * FT2_PER_ACRE / INCHES_PER_FOOT,
         dims=("nhru",),
         name="hru_in_to_cf",
+        attrs={"units": "cubic feet/inch"},
     )
 
 
@@ -96,6 +98,19 @@ def package_parameters(
                     "the PRMS parameter file and was not supplied via "
                     "`extra`."
                 )
+            # the PRMS boundary: the translated units (readers.
+            # translate_units / the computed extras) must name the
+            # declared quantity -- a disagreement is a bug in
+            # prms_units' tables or in the declaration, never data
+            stamped = src.attrs.get("units")
+            if not prms_units.agree(meta.units, stamped):
+                raise ValueError(
+                    f"parameter {name!r} (process {slot!r}): declared "
+                    f"units {meta.units!r} but the translated PRMS "
+                    f"units are {stamped!r} -- fix prms_translate."
+                    "prms_units (PRMS_UNITS_BY_NAME / _BY_STRING) or "
+                    "the declaration."
+                )
             declared = tuple(
                 grid_dim if dd == "space" else dd for dd in meta.dims
             )
@@ -113,7 +128,7 @@ def package_parameters(
                         "constant."
                     )
                 das[name] = xr.DataArray(
-                    vals.flat[:1].copy(), dims=("scalar",)
+                    vals.flat[:1].copy(), dims=("scalar",), attrs=src.attrs
                 )
                 continue
             if len(src.dims) != len(declared):
