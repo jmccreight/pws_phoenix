@@ -36,6 +36,7 @@ CBH_ENTRY_TO_INPUT).
 """
 
 import pathlib as pl
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -129,6 +130,7 @@ def assemble_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
     preprocessed: str | pl.Path | None = None,
+    cbh_paths: Mapping[str, str | pl.Path] | None = None,
 ) -> ModelKit:
     """Legacy PRMS control file -> a ModelKit (see module docstring).
     `control` is the pws_phoenix control dict passed through to the
@@ -138,10 +140,19 @@ def assemble_from_control(
     (solar tables, segment_order, hru_in_to_cf) and map weights are
     VERIFIED against this run's parameters and used instead of
     deriving in-chain (see prms_translate/preprocess.py for the
-    provenance/staleness design)."""
+    provenance/staleness design). `cbh_paths` OVERRIDES the control
+    file's forcing-file entries by pws_phoenix input name (``prcp``,
+    ``tmax``, ``tmin``, ``humidity_hru``, ...) -- for control files
+    whose ``*_day`` entries do not name the files actually present
+    (PRMS's template control names ``precip.day``; a domain may ship
+    ``prcp.cbh``)."""
     control_file = pl.Path(control_file)
     ctl = load_control(control_file)
     cfg = from_control(ctl, control_file)
+    if cbh_paths:
+        cfg.cbh_paths = dict(cfg.cbh_paths) | {
+            name: pl.Path(path) for name, path in cbh_paths.items()
+        }
     params = load_parameters(cfg.param_files)
 
     artifacts: xr.Dataset | None = None
@@ -354,12 +365,13 @@ def model_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
     preprocessed: str | pl.Path | None = None,
+    cbh_paths: Mapping[str, str | pl.Path] | None = None,
 ) -> Model:
     """The one-liner: legacy PRMS control file -> a constructed (and
     thereby validated) pws_phoenix Model. See assemble_from_control
-    for the kit underneath (and for `preprocessed`)."""
+    for the kit underneath (and for `preprocessed` / `cbh_paths`)."""
     return assemble_from_control(
-        control_file, control, preprocessed=preprocessed
+        control_file, control, preprocessed=preprocessed, cbh_paths=cbh_paths
     ).model()
 
 

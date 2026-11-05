@@ -6,8 +6,12 @@ pyrightconfig.json
 
 # per-notebook data directories (XX_name/ beside XX_name.py)
 examples/[0-9][0-9]_*/
+examples_from_pws/[0-9][0-9]_*/
 
 *.egg-info/
 
 # ASV working directory (results/html/env; see benchmarks/README.md)
 .asv/
+
+# downloaded example data (pws_phoenix.utils.addtl_domain_files)
+pws_phoenix/data/

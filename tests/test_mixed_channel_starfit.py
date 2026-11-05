@@ -60,9 +60,9 @@ from pws_phoenix.flow_graph_build import NewNode, splice_flow_graph
 from pws_phoenix.hydrology.pass_through_flow_node import PassThroughFlowNode
 from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import (
-    _OMEGA,
     StarfitFlowNode,
     cms_to_cfs,
+    nor_midpoint_initial_storage,
 )
 from pws_phoenix.model import Model
 
@@ -105,37 +105,6 @@ RESERVOIR_MODES: dict[str, Any] = {
     "hourly": StarfitFlowNode,
     "daily": StarfitDailyFlowNode,
 }
-
-
-def nor_midpoint_initial_storage(bs, init_date):
-    """pywatershed's nan-initial_storage fallback, test-side: the NOR
-    midpoint fraction of capacity at `init_date`'s epiweek (raw, no
-    53->52 fold -- init uses the raw week), in MCM."""
-    import epiweeks
-
-    epiweek = epiweeks.Week.fromdate(init_date).week
-    sin_t = np.sin(2.0 * np.pi * _OMEGA * epiweek)
-    cos_t = np.cos(2.0 * np.pi * _OMEGA * epiweek)
-    max_nor = min(
-        float(bs["NORhi_max"]),
-        max(
-            float(bs["NORhi_min"]),
-            float(bs["NORhi_mu"])
-            + float(bs["NORhi_alpha"]) * sin_t
-            + float(bs["NORhi_beta"]) * cos_t,
-        ),
-    )
-    min_nor = min(
-        float(bs["NORlo_max"]),
-        max(
-            float(bs["NORlo_min"]),
-            float(bs["NORlo_mu"])
-            + float(bs["NORlo_alpha"]) * sin_t
-            + float(bs["NORlo_beta"]) * cos_t,
-        ),
-    )
-    pct_res_cap = (min_nor + max_nor) / 2 / 100
-    return float(bs["GRanD_CAP_MCM"]) * pct_res_cap
 
 
 @pytest.fixture(scope="module")
