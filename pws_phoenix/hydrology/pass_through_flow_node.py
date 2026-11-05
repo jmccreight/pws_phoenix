@@ -63,6 +63,7 @@ class PassThroughFlowNode:
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="cfs",
             description="Pass-through inflow accumulator [cfs] "
             "(kernel work buffer)",
         ),

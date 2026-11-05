@@ -1358,24 +1358,28 @@ class PRMSSnow(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Winter vegetation cover density [-]",
     )
     covden_sum = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Summer vegetation cover density [-]",
     )
     emis_noppt = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Air emissivity when there is no precipitation [-]",
     )
     freeh2o_cap = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Free-water holding capacity as fraction of pack ice [-]",
     )
     hru_deplcrv = DataArrayMeta(
@@ -1400,18 +1404,21 @@ class PRMSSnow(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of PET sublimated from the snow surface [-]",
     )
     rad_trncf = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Solar radiation transmission through winter canopy [-]",
     )
     snarea_thresh = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum SWE below which the depletion curve applies "
         "[inches]",
     )
@@ -1419,6 +1426,7 @@ class PRMSSnow(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Initial snowpack water equivalent [inches] "
         "(must be zero -- see module docstring)",
     )
@@ -1427,12 +1435,14 @@ class PRMSSnow(Process):
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="degF",
         description="Maximum temperature for all-snow precipitation [degF]",
     )
     cecn_coef = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="cal/(cm^2 delta_degC)",
         description="Convection-condensation energy coefficient "
         "[cal/(cm^2 degC)]",
     )
@@ -1447,6 +1457,7 @@ class PRMSSnow(Process):
         kind="parameter",
         dims=("ndeplval",),
         dtype=np.float64,
+        units="fraction",
         description="Snow-area depletion curves, flat (n_curves x 11); "
         "the kernel slices rows by hru_deplcrv",
     )
@@ -1456,42 +1467,49 @@ class PRMSSnow(Process):
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="fraction",
         description="Albedo-reset rain fraction threshold, accumulation [-]",
     )
     albset_rnm = DataArrayMeta(
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="fraction",
         description="Albedo-reset rain fraction threshold, melt [-]",
     )
     albset_sna = DataArrayMeta(
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="inches",
         description="Albedo-reset snow threshold, accumulation [inches]",
     )
     albset_snm = DataArrayMeta(
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="inches",
         description="Albedo-reset snow threshold, melt [inches]",
     )
     den_init = DataArrayMeta(
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="fraction",
         description="Initial (new) snow density [-]",
     )
     den_max = DataArrayMeta(
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="fraction",
         description="Maximum snow density [-]",
     )
     settle_const = DataArrayMeta(
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="1/day",
         description="Snowpack settlement-rate constant [1/day]",
     )
     # -- static solar table (solar-geometry product; see docstring) --
@@ -1499,6 +1517,7 @@ class PRMSSnow(Process):
         kind="parameter",
         dims=("ndoy", "space"),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Potential shortwave on a horizontal plane per Julian "
         "day [cal/cm^2] -- static table indexed by current_doy",
         derivation="compute_soltabs(hru_slope, hru_aspect, hru_lat)",
@@ -1516,18 +1535,21 @@ class PRMSSnow(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation on the HRU [inches]",
     )
     hru_intcpevap = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="HRU area-weighted canopy evaporation [inches]",
     )
     net_ppt = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation through the canopy [inches]",
     )
     net_rain = DataArrayMeta(
@@ -1548,6 +1570,7 @@ class PRMSSnow(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Measured/estimated shortwave on a horizontal plane "
         "[cal/cm^2]",
     )
@@ -1555,48 +1578,56 @@ class PRMSSnow(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential evapotranspiration [inches]",
     )
     pptmix = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Rain/snow mix flag (0/1)",
     )
     prmx = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of rain in a mixed event [-]",
     )
     swrad = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Shortwave radiation on the HRU [cal/cm^2]",
     )
     tavgc = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="degC",
         description="Average air temperature [degC]",
     )
     tmaxc = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="degC",
         description="Maximum air temperature [degC]",
     )
     tminc = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="degC",
         description="Minimum air temperature [degC]",
     )
     transp_on = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Transpiration occurring (0/1 flag)",
     )
 
@@ -1606,6 +1637,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum SWE for the current pack, capped [inches]",
     )
     albedo = DataArrayMeta(
@@ -1613,12 +1645,14 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Snow surface albedo [-]",
     )
     frac_swe = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="SWE as a fraction of the pack maximum (ai) [-]",
     )
     freeh2o = DataArrayMeta(
@@ -1626,6 +1660,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Free liquid water in the snowpack [inches]",
     )
     freeh2o_change = DataArrayMeta(
@@ -1639,6 +1674,7 @@ class PRMSSnow(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Free water, previous timestep (PRMSCanopy input)",
     )
     iasw = DataArrayMeta(
@@ -1667,6 +1703,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.int64,
+        units="days",
         description="Days the pack has been isothermal at 0 degC [days]",
     )
     lst = DataArrayMeta(
@@ -1694,6 +1731,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Snowpack heat deficit [cal/cm^2]",
     )
     pk_den = DataArrayMeta(
@@ -1701,6 +1739,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Snowpack density [-]",
     )
     pk_depth = DataArrayMeta(
@@ -1708,6 +1747,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack depth [inches]",
     )
     pk_ice = DataArrayMeta(
@@ -1715,6 +1755,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack ice content [inches]",
     )
     pk_ice_change = DataArrayMeta(
@@ -1728,12 +1769,14 @@ class PRMSSnow(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Pack ice, previous timestep (PRMSCanopy input)",
     )
     pk_precip = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation added to the snowpack [inches]",
     )
     pk_temp = DataArrayMeta(
@@ -1741,6 +1784,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="degC",
         description="Snowpack temperature [degC]",
     )
     pksv = DataArrayMeta(
@@ -1748,6 +1792,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="SWE before the last new snow (SCA interpolation state)",
     )
     pkwater_equiv = DataArrayMeta(
@@ -1755,12 +1800,14 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack water equivalent [inches]",
     )
     pptmix_nopack = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Mixed event with no antecedent snowpack (0/1 "
         "flag; float64 -- PRMSRunoff consumes it as a float input on "
         "the shared grid dataset)",
@@ -1770,6 +1817,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous pack SWE plus new snow [inches]",
     )
     pst = DataArrayMeta(
@@ -1777,6 +1825,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum SWE for the current pack [inches]",
     )
     salb = DataArrayMeta(
@@ -1784,6 +1833,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="days",
         description="Days since last albedo-resetting snow (saved) [days]",
     )
     scrv = DataArrayMeta(
@@ -1791,6 +1841,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Pack SWE plus 3/4 of new snow (SCA interpolation "
         "state) [inches]",
     )
@@ -1799,6 +1850,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="days",
         description="Days since last albedo-resetting snowfall [days]",
     )
     snow_evap = DataArrayMeta(
@@ -1813,6 +1865,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Snow-covered area fraction [-]",
     )
     snowcov_areasv = DataArrayMeta(
@@ -1820,6 +1873,7 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="SCA before the last new snow (interpolation state)",
     )
     snowmelt = DataArrayMeta(
@@ -1834,12 +1888,14 @@ class PRMSSnow(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Accumulated shallow new snow (albedo state) [inches]",
     )
     tcal = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Net snowpack energy balance [cal/cm^2]",
     )
     through_rain = DataArrayMeta(

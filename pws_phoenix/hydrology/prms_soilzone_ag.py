@@ -1665,6 +1665,7 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="inches",
         description="Convergence tolerance on unsatisfied ag AET [inches]",
     )
     ag_soilwater_deficit_min = _meta(

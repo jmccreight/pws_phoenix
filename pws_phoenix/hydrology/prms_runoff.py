@@ -976,12 +976,14 @@ class PRMSRunoffNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="HRU area [acres]",
     )
     hru_in_to_cf = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet/inch",
         description="Conversion of inches over the HRU to cubic feet",
         derivation="hru_area * 43560.0 / 12.0",
     )
@@ -991,42 +993,49 @@ class PRMSRunoffNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that is impervious [-]",
     )
     imperv_stor_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum impervious area retention storage [inches]",
     )
     carea_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Maximum possible area contributing to surface runoff [-]",
     )
     smidx_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Coefficient in contributing-area computation [-]",
     )
     smidx_exp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/inch",
         description="Exponent in contributing-area computation [1/inch]",
     )
     soil_moist_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum capillary-reservoir water capacity [inches]",
     )
     snowinfil_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches/day",
         description="Maximum snow infiltration per day [inches/day]",
     )
 
@@ -1035,18 +1044,21 @@ class PRMSRunoffNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Pervious HRU area [acres]",
     )
     hru_frac_perv = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Pervious fraction of HRU area [-]",
     )
     hru_imperv = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Impervious HRU area [acres]",
     )
 
@@ -1055,36 +1067,42 @@ class PRMSRunoffNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous lower-reservoir soil storage [inches]",
     )
     soil_rechr_prev = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous recharge-reservoir soil storage [inches]",
     )
     net_rain = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Rain through the canopy [inches]",
     )
     net_ppt = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation through the canopy [inches]",
     )
     net_snow = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snow through the canopy [inches]",
     )
     potet = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential evapotranspiration [inches]",
     )
     snowmelt = DataArrayMeta(
@@ -1098,24 +1116,28 @@ class PRMSRunoffNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Evaporation and sublimation from the snowpack [inches]",
     )
     pkwater_equiv = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack water equivalent [inches]",
     )
     pptmix_nopack = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Mixed rain/snow event with no snowpack (0/1 flag)",
     )
     snowcov_area = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Snow-covered area fraction [-]",
     )
     through_rain = DataArrayMeta(
@@ -1129,6 +1151,7 @@ class PRMSRunoffNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="HRU area-weighted canopy evaporation [inches]",
     )
     intcp_changeover = DataArrayMeta(
@@ -1144,12 +1167,14 @@ class PRMSRunoffNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Contributing area fraction of the pervious area [-]",
     )
     infil = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Infiltration to the capillary/preferential zones "
         "[inches over pervious area]",
     )
@@ -1164,12 +1189,14 @@ class PRMSRunoffNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Surface runoff to the stream network [inches]",
     )
     sroff_vol = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Surface runoff volume [cubic feet]",
     )
     hru_sroffp = DataArrayMeta(
@@ -1191,12 +1218,14 @@ class PRMSRunoffNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious area retention storage [inches over imperv]",
     )
     imperv_evap = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious area evaporation [inches over imperv]",
     )
     hru_impervevap = DataArrayMeta(
@@ -1211,12 +1240,14 @@ class PRMSRunoffNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious retention storage [inches over the HRU]",
     )
     hru_impervstor_old = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious retention storage, previous timestep",
     )
     hru_impervstor_change = DataArrayMeta(
@@ -1525,78 +1556,91 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Average depth of surface depressions [inches]",
     )
     dprst_et_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of unsatisfied PET to apply to dprst [-]",
     )
     dprst_flow_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Coefficient in linear flow routing from open dprst [1/d]",
     )
     dprst_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that has surface depressions [-]",
     )
     dprst_frac_init = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Initial fraction of maximum dprst storage volume [-]",
     )
     dprst_frac_open = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of open (spilling) surface depressions [-]",
     )
     dprst_seep_rate_clos = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Closed-depression seepage rate [fraction/day]",
     )
     dprst_seep_rate_open = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Open-depression seepage rate [fraction/day]",
     )
     sro_to_dprst_imperv = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of impervious runoff routed to dprst [-]",
     )
     sro_to_dprst_perv = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of pervious runoff routed to dprst [-]",
     )
     va_open_exp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Open-depression volume-area exponent [-]",
     )
     va_clos_exp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Closed-depression volume-area exponent [-]",
     )
     op_flow_thres = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Open-depression flow threshold (frac of max volume) [-]",
     )
 
@@ -1605,42 +1649,49 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Maximum surface-depression area [acres]",
     )
     dprst_area_open_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Maximum open surface-depression area [acres]",
     )
     dprst_area_clos_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Maximum closed surface-depression area [acres]",
     )
     dprst_frac_clos = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of closed surface depressions [-]",
     )
     dprst_vol_open_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description="Maximum open surface-depression volume [acre-inches]",
     )
     dprst_vol_clos_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description="Maximum closed surface-depression volume [acre-inches]",
     )
     dprst_vol_thres_open = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description=(
             "Open-depression volume above which flow occurs [acre-inches] "
             "(pywatershed 'variable', never written by its kernel)"
@@ -1653,6 +1704,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description="Open surface-depression storage volume [acre-inches]",
     )
     dprst_vol_clos = DataArrayMeta(
@@ -1660,24 +1712,28 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description="Closed surface-depression storage volume [acre-inches]",
     )
     dprst_vol_open_frac = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Open depression volume fraction of maximum [-]",
     )
     dprst_vol_clos_frac = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Closed depression volume fraction of maximum [-]",
     )
     dprst_vol_frac = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Depression volume fraction of maximum (open+closed) [-]",
     )
     dprst_area_open = DataArrayMeta(
@@ -1685,6 +1741,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Open surface-depression area [acres]",
     )
     dprst_area_clos = DataArrayMeta(
@@ -1692,6 +1749,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description=(
             "Closed surface-depression area [acres] (static after init: "
             "pywatershed never writes it back -- see module docstring)"
@@ -1722,6 +1780,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Runoff captured by depressions [inches over the HRU]",
     )
     dprst_stor_hru = DataArrayMeta(
@@ -1729,12 +1788,14 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Depression storage [inches over the HRU]",
     )
     dprst_stor_hru_old = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Depression storage, previous timestep",
     )
     dprst_stor_hru_change = DataArrayMeta(
@@ -1748,6 +1809,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="New water to depressions [inches over the HRU]",
     )
 
@@ -2337,6 +2399,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Pervious HRU area [acres] (per-step: ag area and "
         "dynamic ag_frac carve it out)",
         restart=True,
@@ -2345,6 +2408,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Pervious fraction of HRU area [-] (per-step under "
         "dynamic ag_frac)",
         restart=True,
@@ -2355,12 +2419,14 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum ag capillary-reservoir water capacity [inches]",
     )
     ag_soil_rechr_max_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Ag recharge-zone maximum as fraction of "
         "ag_soil_moist_max [-]",
     )
@@ -2370,6 +2436,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Ag recharge-zone maximum storage [inches] "
         "(in upstream kernel signatures but unused)",
     )
@@ -2379,6 +2446,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous TOTAL ag soil storage [inches] "
         "(soilzone-ag back-edge)",
     )
@@ -2386,6 +2454,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous ag recharge-zone storage [inches] "
         "(soilzone-ag back-edge)",
     )
@@ -2393,6 +2462,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that is agricultural [-] "
         "(TIME-VARYING: PRMS dynamic parameter)",
     )
@@ -2402,6 +2472,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Agricultural HRU area [acres] (per-step under "
         "dynamic ag_frac)",
         restart=True,
@@ -2410,6 +2481,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Ag infiltration [inches over ag area]",
     )
     infil_ag_hru = DataArrayMeta(

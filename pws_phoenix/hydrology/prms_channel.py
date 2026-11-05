@@ -213,18 +213,21 @@ class PRMSChannel(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="m",
         description="Segment length [m]",
     )
     seg_slope = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Segment slope [-]",
     )
     seg_depth = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="m",
         description="Segment bank-full depth [m]",
     )
     segment_type = DataArrayMeta(
@@ -255,12 +258,14 @@ class PRMSChannel(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="seconds/m^(1/3)",
         description="Manning's n roughness [-]",
     )
     x_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Muskingum storage weighting factor [-]",
     )
 
@@ -275,30 +280,35 @@ class PRMSChannel(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="hours",
         description="Routing sub-timestep [h] (float)",
     )
     tsi = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.int64,
+        units="hours",
         description="Routing sub-timestep [h] (int; -1 = within-hour)",
     )
     c0 = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Muskingum c0 coefficient",
     )
     c1 = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Muskingum c1 coefficient",
     )
     c2 = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Muskingum c2 coefficient",
     )
 
@@ -307,18 +317,21 @@ class PRMSChannel(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Surface runoff volume mapped to segments [cf]",
     )
     seg_ssres_flow_vol = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Interflow volume mapped to segments [cf]",
     )
     seg_gwres_flow_vol = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Groundwater discharge volume mapped to segments [cf]",
     )
 
@@ -327,12 +340,14 @@ class PRMSChannel(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Lateral inflow to each segment [cfs]",
     )
     seg_upstream_inflow = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Upstream inflow, daily mean [cfs]",
     )
     seg_inflow = DataArrayMeta(
@@ -340,12 +355,14 @@ class PRMSChannel(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Segment inflow, daily mean [cfs]",
     )
     seg_outflow = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Segment outflow, daily mean [cfs]",
         initial="segment_flow_init",
     )
@@ -353,6 +370,7 @@ class PRMSChannel(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Previous sub-timestep inflow (routing state)",
     )
     outflow_ts = DataArrayMeta(
@@ -360,18 +378,21 @@ class PRMSChannel(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Sub-timestep outflow (routing state; instantaneous)",
     )
     seg_stor_change = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Channel storage change over the timestep [cf]",
     )
     channel_outflow_vol = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Outflow volume leaving the domain (outlets) [cf]",
     )
     # kernel work buffers, declared so the kernel allocates NOTHING
@@ -379,12 +400,14 @@ class PRMSChannel(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Sub-timestep inflow accumulator (kernel work buffer)",
     )
     seg_current_sum = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Upstream-inflow accumulator (kernel work buffer)",
     )
 

@@ -77,6 +77,7 @@ class HumidityCarrier(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="percent",
         description="CBH relative humidity [percent]",
     )
 

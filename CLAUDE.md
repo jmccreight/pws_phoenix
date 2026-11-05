@@ -119,6 +119,13 @@ silent shift. Run tests from the repo root:
    required how-to-open header, and the pywatershed-numbered-notebook
    tone) whenever writing or editing anything under an `examples/`
    directory.
+5. Every float `DataArrayMeta` declares `units=` from the closed
+   vocabulary in `pws_phoenix/units.py` (int/bool fields may omit it);
+   `tests/test_units.py` enforces it. A new unit = a new key in that
+   table with its pint expression (`None` if pint cannot express it).
+   FlowGraph fields in the graph's io units declare the placeholders
+   `io flow units` / `io flow units x s` / `io storage units`,
+   resolved at composition.
 
 # Prime directive: memory
 
