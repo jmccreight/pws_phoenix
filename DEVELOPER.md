@@ -214,3 +214,54 @@ import time excluded: **5.1 s cold** (cache wiped) -> **1.9 s warm**.
 The warm 1.9 s still held the uncached atmosphere (since opted in,
 Oct 30, 2026: its `solf` table moved in-file) and stream-temperature
 compiles plus the data loading and assembly.
+
+## Numba threading: `prange` over the HRU loop, opt-in
+
+`pws_phoenix.NUMBA_PARALLEL` (read once at import from
+`PWS_NUMBA_PARALLEL`; default off) feeds `parallel=NUMBA_PARALLEL` on
+the main `_calculate` of every hru-grid process -- atmosphere, canopy,
+snow, runoff (+Ag, +NoDprst), soilzone (+Ag, +NoDprst), groundwater
+(+NoDprst) -- whose single per-element loop is `numba.prange`. With the
+flag off `prange` is plain `range`, so the default kernel is the
+unthreaded one byte for byte. Results are bit-identical either way:
+nothing crosses elements, so there is no reduction and no float
+reordering (the serial suite is green with the flag on; the snow MPI
+test is pinned at `NUMBA_NUM_THREADS=3 mpirun -n 4`).
+
+Deliberately NOT threaded:
+
+- the light per-element helpers (`_post_areas`, `_update_areas`,
+  `_pre`/`_post`, `_iter_diag`, `_compute_ccov_hru`, `_transp_tindex`,
+  `_transp_frost`): a parallel region costs a thread launch (~10-30
+  us), more than those loops;
+- `_prep_aet` / `_adjust_irrigation` in soilzone_ag: an integer counter
+  carried across iterations;
+- the segment kernels (`for jseg in segment_order` is sequential) and
+  the FlowGraph kernel;
+- budget sums (a threaded sum changes the float order).
+
+### Threads vs ranks
+
+Numba's thread count is `NUMBA_NUM_THREADS`, default every logical
+core (14 on LaNueva). Under `mpirun` each rank starts its own pool, so
+ranks x threads must fit the machine (`NUMBA_NUM_THREADS=3 mpirun -n
+4`). MPI already divides the HRUs, so threads help under MPI only when
+the rank count is limited by memory, not cores. For an ensemble
+(calibration), independent processes beat threads: no launch cost,
+perfect scaling.
+
+### Where it pays (estimate; measurement pending)
+
+Per kernel call: `t_serial ~ n_hru x c` with c ~ 50-300 ns per HRU
+(groundwater light, snow/soilzone heavy); `t_parallel ~ L +
+t_serial / n_threads` with L ~ 10-30 us per region launch. Break-even
+at ~100-500 HRUs; >= 2x on 8 threads at ~300-2000. drb_2yr (765 HRUs)
+sits on the line; ucb_2yr (3851) should gain. The per-step framework
+cost (~0.1 ms) does not shrink with threads, so the chain-level gain
+lags the kernel-level one until ~10k HRUs; M-series efficiency cores
+finish their slice last and lengthen every region.
+
+**To be measured (Nov 2026):** ucb_2yr full run, flag off vs
+`PWS_NUMBA_PARALLEL=1` at `NUMBA_NUM_THREADS` = 1, 4, 10, 14 (the
+1-thread row isolates the launch overhead; 14 shows the efficiency-core
+tail). Record the five numbers here.
