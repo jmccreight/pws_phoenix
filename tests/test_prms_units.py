@@ -159,3 +159,16 @@ def test_drb_kit_inputs_carry_vocabulary_units():
                 )
                 judged += 1
     assert judged > 100
+
+
+@drb_skipif
+def test_drb_kit_builds_under_check():
+    """The Model boundary on real translated inputs: the drb NHM kit
+    builds with control["units"] = "check" and no patches (stage 2-M
+    reading what stage 2-T stamped)."""
+    kit = assemble_from_control(
+        DRB_DIR / "nhm.control", control={"units": "check"}
+    )
+    model = kit.model()
+    assert model._units_mode == "check"
+    model.finalize()

@@ -28,7 +28,8 @@ import xarray as xr
 from pws_phoenix.data_io import Input, Output, open_xr
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.clock import Time
-from pws_phoenix.process import _FILL_VALUE, _dict_of_kind
+from pws_phoenix import units as units_mod
+from pws_phoenix.process import _FILL_VALUE, _dict_of_kind, _resolved_fields
 
 # The MPI stack (mpix + mpixarray, ~0.6 s to import) is loaded inside
 # ModelMPI._build, the only place it is used: the serial Model never pays
@@ -459,6 +460,38 @@ class Model:
         self._budget_mode = mode
         self._budget_rtol = float(control.get("budget_rtol", 1e-10))
         self._budget_atol = float(control.get("budget_atol", 1e-10))
+        self._set_units_options(control)
+
+    def _set_units_options(self, control: Dict[str, Any]) -> None:
+        """control["units"]: None (default; nothing checked, pint never
+        imported), "check" (every supplied parameter/input's units must
+        name the declared quantity; Map source/target declarations must
+        agree), or "convert" (as check, but a RESIDENT array in
+        compatible units is converted in place at build; a streamed/lazy
+        one raises). control["units_patch"] = {name: vocabulary key}
+        overrides a supplied array's attrs["units"] (a file without the
+        attribute, or with a spelling outside the vocabulary). Build-time
+        only: no per-step cost. See pws_phoenix/units.py."""
+        mode = control.get("units")
+        if mode not in units_mod.MODES:
+            raise ValueError(
+                f"control['units'] must be one of {units_mod.MODES}; "
+                f"got {mode!r}."
+            )
+        self._units_mode = mode
+        self._units_patch: Dict[str, str] = dict(
+            control.get("units_patch") or {}
+        )
+        if mode is not None:
+            units_mod.registry()  # import pint now: fail at build, not later
+
+    def _reconcile_units(
+        self, name: str, da: Any, declared: Union[str, None], **kw: Any
+    ) -> None:
+        """units_mod.reconcile with this model's mode + patch."""
+        units_mod.reconcile(
+            name, da, declared, self._units_mode, self._units_patch, **kw
+        )
 
     def _check_budgets(self, proc: Any) -> None:
         """Run a process's budgets for the step just calculated; judge
@@ -560,6 +593,13 @@ class Model:
                     "parameters nor the supplied 'parameters'"
                 )
             source[pp].load()
+            self._reconcile_units(
+                pp,
+                source[pp],
+                _resolved_fields(cls)[pp].units,
+                convertible=True,
+                context=f"process '{proc_name}' parameter",
+            )
             grid_ds[pp] = source[pp]
             grid_ds[pp].values.flags.writeable = False
 
@@ -576,7 +616,17 @@ class Model:
                         read_only=(ii in inputs_req),
                         load=self._load_all,
                     )
-                current = self.inputs_dict[ii].current_values
+                inp = self.inputs_dict[ii]
+                # a lazy (file-backed, load=False) input reads one slice
+                # per step: checkable, not convertible
+                self._reconcile_units(
+                    ii,
+                    inp.data,
+                    _resolved_fields(cls)[ii].units,
+                    convertible=inp.data.variable._in_memory,
+                    context=f"process '{proc_name}' input",
+                )
+                current = inp.current_values
                 if current.dims != (real_dim,):
                     # A wrong-named spatial dim would silently ride along
                     # as a SECOND dim on the grid dataset and only "work"
@@ -718,6 +768,28 @@ class Model:
                 in proc.get_inputs() + proc.get_mutable_inputs()
             ]
             first_consumer = min(consumers, key=lambda kk: position[kk])
+            if self._units_mode is not None and owners:
+                # a Map carries ONE quantity: the owner's declaration and
+                # every consumer's must name the same units
+                src_units = _resolved_fields(type(self.model_dict[owners[0]]))[
+                    mm.source_var
+                ].units
+                for kk in consumers:
+                    tgt_units = _resolved_fields(type(self.model_dict[kk]))[
+                        mm.target_var
+                    ].units
+                    if src_units != tgt_units and not (
+                        src_units is not None
+                        and tgt_units is not None
+                        and units_mod.same(tgt_units, src_units)
+                    ):
+                        raise ValueError(
+                            f"Map '{map_name}': source '{mm.source_var}' "
+                            f"is declared {src_units!r} by '{owners[0]}' "
+                            f"but target '{mm.target_var}' is declared "
+                            f"{tgt_units!r} by '{kk}' -- a Map carries "
+                            "one quantity."
+                        )
             late = [
                 ww
                 for ww in writers
@@ -1190,6 +1262,33 @@ class ModelMPI(Model):
                 "offending dim(s) to the distributed grid dim when "
                 "assembling the input file."
             )
+
+        # Units at the distributed grid's boundary (control["units"]):
+        # static params/ICs are resident (loaded above) -> check or
+        # convert in place, rank-locally (identical metadata on every
+        # rank, so every rank takes the same branch -- no collective
+        # needed and none hidden); streamed inputs are check-only.
+        if self._units_mode is not None:
+            for proc_name, cls in mpi_classes.items():
+                fields = _resolved_fields(cls)
+                for pp in cls.get_parameters():
+                    if pp in ds_mpi_stream:
+                        self._reconcile_units(
+                            pp,
+                            ds_mpi_stream[pp],
+                            fields[pp].units,
+                            convertible=True,
+                            context=f"process '{proc_name}' parameter",
+                        )
+                for ii in file_input_names:
+                    if ii in fields:
+                        self._reconcile_units(
+                            ii,
+                            ds_input[ii],
+                            fields[ii].units,
+                            convertible=False,
+                            context=f"process '{proc_name}' streamed input",
+                        )
 
         # Split requested outputs by OWNING grid (the process declaring the
         # var as a state variable): distributed-grid vars stream via the

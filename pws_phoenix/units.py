@@ -11,14 +11,27 @@ subtraction to pint) never reach its parser; and quantities pint cannot
 express (an exponent-dependent power-law coefficient) still get a
 checkable NAME -- their value is ``None`` and they match by string only.
 
-Stage 1 (declarations + this vocabulary + ``tests/test_units.py``) has
-no runtime behavior. Stage 2 adds the build-time checks (supplied
-``attrs["units"]`` vs the declaration; Map source vs target; budget
-terms) and the optional in-place conversion of resident arrays, all
-through :func:`registry` -- pint is imported lazily and only then.
+Runtime behavior (the Model boundary; ``control["units"]``):
 
-pint is OPTIONAL at runtime (``environment.yaml`` lists it; a serial
-env without it runs every model with the units checks off).
+- ``None`` (default): nothing is checked, pint is never imported.
+- ``"check"``: at BUILD, every supplied parameter and input's
+  ``attrs["units"]`` (or its ``control["units_patch"]`` entry) must be
+  a vocabulary key naming the declared quantity (:func:`same`); a Map's
+  source and target declarations must agree. Nothing runs per step.
+- ``"convert"``: as "check", but a RESIDENT array (a parameter, an
+  in-memory input) supplied in different-but-compatible units is
+  converted IN PLACE, once, by the affine map :func:`affine` returns
+  (``x_declared = scale * x_supplied + offset``; the offset serves
+  degF -> degC). A streamed/lazy input that would need converting
+  raises -- conversion is never a per-step edit; pre-process the file.
+- the PRMS boundary is separate: ``prms_translate.prms_units``
+  translates PRMS's unit words to vocabulary keys and
+  ``package_parameters`` judges them against the declarations.
+
+Budget terms are compared by string in ``process.py``: with a closed
+canonical vocabulary that IS the exact check. pint is OPTIONAL at
+runtime (``environment.yaml`` lists it; a serial env without it runs
+every model with ``control["units"]`` = None).
 
 Conventions encoded in the table:
 
@@ -38,7 +51,12 @@ Conventions encoded in the table:
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+import numpy as np
+
+MODES = (None, "check", "convert")
 
 # declaration string -> pint expression (None = not expressible in pint;
 # such a unit matches by exact string only)
@@ -123,3 +141,112 @@ def quantity(units: str) -> Any:
     if expr is None:
         raise ValueError(f"units {units!r} have no pint expression")
     return registry()(expr)
+
+
+def _convert_value(value: float, supplied: str, declared: str) -> float:
+    """`value` in `supplied` units expressed in `declared` units (both
+    vocabulary keys with pint expressions; a key's expression may carry
+    a magnitude, e.g. MCM = 1e6 m^3)."""
+    qs, qd = quantity(supplied), quantity(declared)
+    as_supplied = registry().Quantity(value * qs.magnitude, qs.units)
+    return float(as_supplied.to(qd.units).magnitude / qd.magnitude)
+
+
+def affine(supplied: str, declared: str) -> tuple[float, float]:
+    """(scale, offset) with ``x_declared = scale * x_supplied + offset``.
+    Raises ValueError when the two keys have different dimensions or
+    either has no pint expression."""
+    import pint
+
+    # two-point evaluation; the wide span keeps the roundoff of pint's
+    # offset-unit path (through kelvin) out of the scale (5/9 exact)
+    span = 1.0e3
+    try:
+        offset = _convert_value(0.0, supplied, declared)
+        scale = (_convert_value(span, supplied, declared) - offset) / span
+    except pint.DimensionalityError as err:
+        raise ValueError(
+            f"units {supplied!r} cannot be converted to {declared!r}: {err}"
+        ) from None
+    return scale, offset
+
+
+def same(declared: str, supplied: str) -> bool:
+    """Do two vocabulary keys name the same unit? Equal strings always
+    do (incl. keys without a pint expression); otherwise both need an
+    expression and must convert with scale 1 and offset 0 -- so
+    ``fraction``/``none`` agree, ``inches``/``feet`` do not. A key with
+    no expression never equals a different key."""
+    if declared == supplied:
+        return True
+    if VOCABULARY[declared] is None or VOCABULARY[supplied] is None:
+        return False
+    qd, qs = quantity(declared), quantity(supplied)
+    if qd.dimensionality != qs.dimensionality:
+        return False
+    scale, offset = affine(supplied, declared)
+    return math.isclose(scale, 1.0, rel_tol=1e-12) and abs(offset) < 1e-12
+
+
+def reconcile(
+    name: str,
+    da: Any,
+    declared: str | None,
+    mode: str | None,
+    patch: dict[str, str],
+    *,
+    convertible: bool,
+    context: str,
+) -> None:
+    """The Model-boundary check for ONE supplied array (an xr.DataArray
+    whose ``.values`` is the working buffer). No-op for mode None or a
+    unit-less (int/bool) declaration. Otherwise the supplied units
+    (``patch[name]`` wins over ``da.attrs["units"]``) must be a
+    vocabulary key and :func:`same` as `declared`, or -- mode "convert"
+    and `convertible` -- the array is converted in place (the write
+    flag is restored afterwards) and its attrs updated. Everything
+    else raises ValueError naming `context` and `name`."""
+    if mode is None or declared is None:
+        return
+    supplied = patch.get(name, da.attrs.get("units"))
+    where = f"{context}: '{name}' (declared {declared!r})"
+    if supplied is None:
+        raise ValueError(
+            f"{where} has no units -- set attrs['units'] on the supplied "
+            f"array or control['units_patch'][{name!r}]."
+        )
+    if supplied not in VOCABULARY:
+        raise ValueError(
+            f"{where}: supplied units {supplied!r} are not in the "
+            "pws_phoenix vocabulary (pws_phoenix/units.py) -- spell them "
+            "as a vocabulary key via control['units_patch'] or add the key."
+        )
+    if same(declared, supplied):
+        return
+    if mode == "check":
+        raise ValueError(
+            f"{where}: supplied units are {supplied!r}; control['units'] "
+            "= 'convert' converts resident arrays in place."
+        )
+    scale, offset = affine(supplied, declared)  # raises if incompatible
+    if not convertible:
+        raise ValueError(
+            f"{where}: supplied in {supplied!r}, which would need "
+            "converting, but the array is streamed/lazy -- conversion is "
+            "never a per-step edit; pre-process the file to "
+            f"{declared!r} (scale {scale!r}, offset {offset!r})."
+        )
+    values = da.values
+    if not np.issubdtype(values.dtype, np.floating):
+        raise ValueError(
+            f"{where}: cannot convert a {values.dtype} array in place."
+        )
+    writeable = values.flags.writeable
+    values.flags.writeable = True
+    try:
+        values *= scale
+        if offset != 0.0:
+            values += offset
+    finally:
+        values.flags.writeable = writeable
+    da.attrs["units"] = declared
