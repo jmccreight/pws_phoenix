@@ -30,30 +30,35 @@ class Upper(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Upper zone parameter 0",
     )
     param_up_1 = DataArrayMeta(
         kind="parameter",
         dims=("month", "space"),
         dtype=np.float64,
+        units="fraction",
         description="Upper zone parameter 1 (time-varying: cyclic monthly)",
     )
     param_shared_name = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Parameter shared with Lower",
     )
     forcing_up = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Primary forcing (read-only)",
     )
     flow = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Flow (public -- shared downstream with Lower)",
         initial="flow_initial",
         restart=True,  # prognostic; flow_previous regenerates at advance
@@ -62,6 +67,7 @@ class Upper(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Flow at previous time step",
     )
 
@@ -103,30 +109,35 @@ class Lower(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Lower zone parameter 0",
     )
     param_shared_name = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Parameter shared with Upper",
     )
     flow = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Flow from Upper (read-only input)",
     )
     forcing_low = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower zone's own forcing (read-only)",
     )
     storage = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Storage",
         initial="storage_initial",
         restart=True,  # prognostic; storage_previous regenerates
@@ -135,6 +146,7 @@ class Lower(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Storage at previous time step",
     )
 

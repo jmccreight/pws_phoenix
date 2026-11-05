@@ -114,12 +114,14 @@ class PRMSAtmosphereBase(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="HRU slope [rise/run]",
     )
     hru_lat = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="degrees",
         description="HRU latitude [degrees N]",
     )
 
@@ -128,66 +130,77 @@ class PRMSAtmosphereBase(Process):
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="degF",
         description="Monthly adjustment to CBH maximum temperature [degF]",
     )
     tmin_cbh_adj = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="degF",
         description="Monthly adjustment to CBH minimum temperature [degF]",
     )
     tmax_allsnow = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="degF",
         description="Maximum temperature for all-snow precipitation [degF]",
     )
     tmax_allrain_offset = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="degF",
         description="Offset above tmax_allsnow for all-rain [degF]",
     )
     snow_cbh_adj = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="fraction",
         description="Monthly CBH precipitation adjustment for snow [-]",
     )
     rain_cbh_adj = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="fraction",
         description="Monthly CBH precipitation adjustment for rain [-]",
     )
     adjmix_rain = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="fraction",
         description="Monthly rain-fraction adjustment for mixed events [-]",
     )
     dday_slope = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="dday/delta_degF",
         description="Degree-day slope coefficient [dday/degF]",
     )
     dday_intcp = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="dday",
         description="Degree-day intercept coefficient [dday]",
     )
     radmax = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="fraction",
         description="Maximum fraction of potential solar radiation [-]",
     )
     ppt_rad_adj = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="inches",
         description="Precip threshold above which radiation is adjusted "
         "[inches]",
     )
@@ -195,24 +208,28 @@ class PRMSAtmosphereBase(Process):
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="dday",
         description="Radiation-adjustment intercept on precip days [-]",
     )
     radadj_slope = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="dday/delta_degF",
         description="Radiation-adjustment slope on precip days [1/degF]",
     )
     tmax_index = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="degF",
         description="Index temperature for radiation adjustment [degF]",
     )
     jh_coef = DataArrayMeta(
         kind="parameter",
         dims=("nmonth", "space"),
         dtype=np.float64,
+        units="1/delta_degF",
         description="Monthly Jensen-Haise air-temperature coefficient "
         "[1/degF]",
     )
@@ -222,18 +239,21 @@ class PRMSAtmosphereBase(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="degF",
         description="Jensen-Haise per-HRU air-temperature coefficient [degF]",
     )
     radj_sppt = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Radiation adjustment for summer precip days [-]",
     )
     radj_wppt = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Radiation adjustment for winter precip days [-]",
     )
     # -- static solar tables (prms_solar_geometry factory product) --
@@ -241,6 +261,7 @@ class PRMSAtmosphereBase(Process):
         kind="parameter",
         dims=("ndoy", "space"),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Potential shortwave on the sloped surface per Julian "
         "day [cal/cm^2] -- static table indexed by current_doy",
         derivation="compute_soltabs(hru_slope, hru_aspect, hru_lat)",
@@ -249,6 +270,7 @@ class PRMSAtmosphereBase(Process):
         kind="parameter",
         dims=("ndoy", "space"),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Potential shortwave on a horizontal plane per Julian "
         "day [cal/cm^2] -- static table indexed by current_doy",
         derivation="compute_soltabs(hru_slope, hru_aspect, hru_lat)",
@@ -259,6 +281,7 @@ class PRMSAtmosphereBase(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="cos(arctan(hru_slope))",
     )
 
@@ -267,18 +290,21 @@ class PRMSAtmosphereBase(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="CBH precipitation [inches]",
     )
     tmax = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="degF",
         description="CBH maximum air temperature [degF]",
     )
     tmin = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="degF",
         description="CBH minimum air temperature [degF]",
     )
 
@@ -287,60 +313,70 @@ class PRMSAtmosphereBase(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="degF",
         description="Adjusted maximum air temperature [degF]",
     )
     tminf = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="degF",
         description="Adjusted minimum air temperature [degF]",
     )
     tmaxc = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="degC",
         description="Adjusted maximum air temperature [degC]",
     )
     tminc = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="degC",
         description="Adjusted minimum air temperature [degC]",
     )
     tavgc = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="degC",
         description="Adjusted average air temperature [degC]",
     )
     prmx = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of rain in a mixed event [-]",
     )
     hru_ppt = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Adjusted precipitation on the HRU [inches]",
     )
     hru_rain = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Rain on the HRU [inches]",
     )
     hru_snow = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snow on the HRU [inches]",
     )
     pptmix = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Rain/snow mix flag (0/1) -- PRMSCanopy edits the "
         "shared field in place downstream",
     )
@@ -348,18 +384,21 @@ class PRMSAtmosphereBase(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Shortwave radiation on the HRU [cal/cm^2]",
     )
     orad_hru = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cal/cm^2",
         description="Shortwave on a horizontal plane at the HRU [cal/cm^2]",
     )
     ccov_hru = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Cloud cover fraction on the HRU [-] (from swrad "
         "vs potential; relocated here from upstream stream_temp's "
         "in-aggregation computation)",
@@ -368,6 +407,7 @@ class PRMSAtmosphereBase(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential evapotranspiration (Jensen-Haise) [inches]",
     )
     transp_on = DataArrayMeta(
@@ -375,6 +415,7 @@ class PRMSAtmosphereBase(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Transpiration occurring (0/1 flag; leaf-computed)",
     )
 
@@ -687,6 +728,7 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="degF",
         description="Cumulative tmax to trigger transpiration [temp_units]",
     )
     temp_units = DataArrayMeta(
@@ -701,6 +743,7 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="degF",
         description="transp_tmax in degF (temp_units conversion)",
     )
 
@@ -710,6 +753,7 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="degF",
         description="Accumulated tmaxf toward the transpiration trigger "
         "[degF]",
     )
@@ -826,12 +870,14 @@ class PRMSAtmosphereTranspFrost(PRMSAtmosphereBase):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="day of year",
         description="Last spring frost [solar day of year]",
     )
     fall_frost = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="day of year",
         description="First killing fall frost [solar day of year]",
     )
 
@@ -876,6 +922,7 @@ class PRMSAtmosphereTranspFrostDyn(PRMSAtmosphereTranspFrost):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="day of year",
         description="Last spring frost [solar day of year] "
         "(TIME-VARYING: PRMS dynamic parameter)",
     )
@@ -883,6 +930,7 @@ class PRMSAtmosphereTranspFrostDyn(PRMSAtmosphereTranspFrost):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="day of year",
         description="First killing fall frost [solar day of year] "
         "(TIME-VARYING: PRMS dynamic parameter)",
     )

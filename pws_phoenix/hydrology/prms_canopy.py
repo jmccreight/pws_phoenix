@@ -105,36 +105,42 @@ class PRMSCanopy(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Summer vegetation cover density [-]",
     )
     covden_win = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Winter vegetation cover density [-]",
     )
     srain_intcp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Summer rain interception storage capacity [inches]",
     )
     wrain_intcp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Winter rain interception storage capacity [inches]",
     )
     snow_intcp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snow interception storage capacity [inches]",
     )
     potet_sublim = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of PET sublimated from intercepted snow [-]",
     )
 
@@ -143,24 +149,28 @@ class PRMSCanopy(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack ice, previous timestep [inches]",
     )
     freeh2o_prev = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack free water, previous timestep [inches]",
     )
     transp_on = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Transpiration occurring (0/1 flag)",
     )
     hru_ppt = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation on the HRU [inches]",
     )
     hru_rain = DataArrayMeta(
@@ -181,6 +191,7 @@ class PRMSCanopy(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential evapotranspiration [inches]",
     )
 
@@ -189,6 +200,7 @@ class PRMSCanopy(Process):
         kind="mutable_input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Rain/snow mix flag (0/1) -- ZEROED in place where "
         "intercepted trace snow becomes rain (never read here)",
     )
@@ -198,6 +210,7 @@ class PRMSCanopy(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation through the canopy [inches]",
     )
     net_rain = DataArrayMeta(
@@ -226,6 +239,7 @@ class PRMSCanopy(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Canopy evaporation/sublimation [inches over cover]",
     )
     intcp_form = DataArrayMeta(
@@ -239,6 +253,7 @@ class PRMSCanopy(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Interception storage [inches over cover]",
     )
     intcp_transp_on = DataArrayMeta(
@@ -260,6 +275,7 @@ class PRMSCanopy(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Interception storage [inches over the HRU]",
     )
     hru_intcpstor_change = DataArrayMeta(
@@ -273,6 +289,7 @@ class PRMSCanopy(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Interception storage, previous timestep",
     )
 

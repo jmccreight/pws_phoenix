@@ -244,24 +244,27 @@ def compute_soltabs(dis_hru: xr.Dataset, hru_dim: str = "nhru") -> xr.Dataset:
                 soltab_potsw,
                 dims=dims,
                 attrs={
+                    "units": "cal/cm^2",
                     "description": "Potential shortwave on the sloped "
-                    "surface per Julian day [cal/cm^2 day]"
+                    "surface per Julian day [cal/cm^2 day]",
                 },
             ),
             "soltab_horad_potsw": xr.DataArray(
                 soltab_horad_potsw,
                 dims=dims,
                 attrs={
+                    "units": "cal/cm^2",
                     "description": "Potential shortwave on a horizontal "
-                    "plane per Julian day [cal/cm^2 day]"
+                    "plane per Julian day [cal/cm^2 day]",
                 },
             ),
             "soltab_sunhrs": xr.DataArray(
                 soltab_sunhrs,
                 dims=dims,
                 attrs={
+                    "units": "hours",
                     "description": "Hours of direct sunlight per Julian "
-                    "day [hours]"
+                    "day [hours]",
                 },
             ),
         }

@@ -64,6 +64,7 @@ class PRMSHydraulicGeometryWidthOnly(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="m",
         description="Segment length [m]",
     )
 
@@ -72,12 +73,14 @@ class PRMSHydraulicGeometryWidthOnly(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="m per cms^exp",
         description="Width power-law coefficient [m per (cms)^width_m]",
     )
     width_m = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Width power-law exponent [-]",
     )
 
@@ -87,6 +90,7 @@ class PRMSHydraulicGeometryWidthOnly(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="m per cms^exp",
         description="Depth power-law coefficient [m per (cms)^depth_m] "
         "(strmflow_character default 0.27 in this core)",
     )
@@ -94,6 +98,7 @@ class PRMSHydraulicGeometryWidthOnly(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Depth power-law exponent [-] "
         "(strmflow_character default 0.39 in this core)",
     )
@@ -103,6 +108,7 @@ class PRMSHydraulicGeometryWidthOnly(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Streamflow leaving each segment [cfs]",
     )
 
@@ -111,30 +117,35 @@ class PRMSHydraulicGeometryWidthOnly(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="m",
         description="Flow width (PRMS seg_width) [m]",
     )
     seg_flow_depth = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="m",
         description="Flow depth (PRMS seg_depth) [m]",
     )
     seg_flow_area = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="m^2",
         description="Flow cross-sectional area (PRMS seg_area) [m^2]",
     )
     seg_flow_velocity = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="m/s",
         description="Flow velocity (PRMS seg_velocity) [m/s]",
     )
     seg_res_time = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="seconds",
         description="Segment residence time [seconds]",
     )
 
@@ -220,12 +231,14 @@ class PRMSHydraulicGeometryFull(PRMSHydraulicGeometryWidthOnly):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="m per cms^exp",
         description="Depth power-law coefficient [m per (cms)^depth_m]",
     )
     depth_m = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Depth power-law exponent [-]",
     )
 

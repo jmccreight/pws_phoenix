@@ -222,6 +222,7 @@ class StarfitDailyFlowNode:
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="io flow units",
             description="Next day's constant outflow rate, computed "
             "at the current day's end [io flow units]",
             restart=True,

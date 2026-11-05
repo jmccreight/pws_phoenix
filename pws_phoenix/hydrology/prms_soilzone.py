@@ -336,12 +336,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="HRU area [acres]",
     )
     hru_in_to_cf = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet/inch",
         description="Conversion of inches over the HRU to cubic feet",
         derivation="hru_area * 43560.0 / 12.0",
     )
@@ -358,78 +360,91 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Linear preferential-flow routing coefficient [1/day]",
     )
     fastcoef_sq = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Non-linear preferential-flow routing coefficient [-]",
     )
     hru_percent_imperv = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that is impervious [-]",
     )
     pref_flow_den = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Preferential-flow pore density [-]",
     )
     pref_flow_infil_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of infiltration to preferential flow [-]",
     )
     sat_threshold = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Soil saturation threshold above field capacity [inches]",
     )
     slowcoef_lin = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Linear gravity-flow routing coefficient [1/day]",
     )
     slowcoef_sq = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Non-linear gravity-flow routing coefficient [-]",
     )
     soil2gw_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches/day",
         description="Maximum capillary excess routed to GWR [inches/day]",
     )
     soil_moist_init_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Initial fraction of capillary storage [-]",
     )
     soil_moist_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum capillary-reservoir water capacity [inches]",
     )
     soil_rechr_init_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Initial fraction of recharge-zone storage [-]",
     )
     soil_rechr_max_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Recharge-zone maximum as fraction of soil_moist_max [-]",
     )
     soil_type = DataArrayMeta(
@@ -442,18 +457,21 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Gravity-drainage exponent to GWR [-]",
     )
     ssr2gw_rate = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Gravity-drainage rate coefficient to GWR [fraction/day]",
     )
     ssstor_init_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Initial fraction of gravity+pref storage [-]",
     )
 
@@ -462,6 +480,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Pervious fraction of HRU area [-] (variant hook: "
         "_set_hru_frac_perv)",
     )
@@ -469,18 +488,21 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge-zone maximum storage [inches] (clamped)",
     )
     soil_lower_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower-zone maximum storage [inches]",
     )
     _sat_threshold = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="sat_threshold zeroed for INACTIVE|LAKE HRUs "
         "(upstream edited-copy parameter)",
     )
@@ -488,6 +510,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="pref_flow_den zeroed for non-LAND HRUs "
         "(upstream edited-copy parameter)",
     )
@@ -495,6 +518,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Gravity storage above which flow goes preferential "
         "[inches] (upstream 'variable', never written by its kernel)",
     )
@@ -502,6 +526,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum preferential-flow storage [inches] "
         "(upstream 'variable', never written by its kernel)",
     )
@@ -523,12 +548,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious area evaporation [inches over the HRU]",
     )
     hru_intcpevap = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="HRU area-weighted canopy evaporation [inches]",
     )
     infil_hru = DataArrayMeta(
@@ -542,24 +569,28 @@ class PRMSSoilzoneNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential evapotranspiration [inches]",
     )
     transp_on = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Transpiration occurring (0/1 flag)",
     )
     snow_evap = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Evaporation and sublimation from the snowpack [inches]",
     )
     snowcov_area = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Snow-covered area fraction [-]",
     )
 
@@ -568,6 +599,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="mutable_input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Surface runoff [inches] -- dunnian flow is ADDED "
         "in place (upstream behavior, its own WARNING comment)",
     )
@@ -575,6 +607,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="mutable_input",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Surface runoff volume [cf] -- recomputed from the "
         "dunnian-updated sroff",
     )
@@ -584,12 +617,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Capillary infiltration [inches over the HRU]",
     )
     cap_waterin = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Capillary reservoir water in [inches]",
     )
     dunnian_flow = DataArrayMeta(
@@ -603,12 +638,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Actual evapotranspiration [inches over the HRU]",
     )
     perv_actet = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Pervious actual ET [inches over pervious area]",
     )
     perv_actet_hru = DataArrayMeta(
@@ -622,12 +659,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential ET from the lower zone [inches]",
     )
     potet_rechr = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential ET from the recharge zone [inches]",
     )
     pref_flow = DataArrayMeta(
@@ -641,12 +680,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Preferential reservoir inflow [inches]",
     )
     pref_flow_infil = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Infiltration to the preferential reservoir [inches]",
     )
     pref_flow_stor = DataArrayMeta(
@@ -654,6 +695,7 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Preferential-flow reservoir storage [inches]",
     )
     pref_flow_stor_change = DataArrayMeta(
@@ -667,12 +709,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Preferential storage, previous timestep",
     )
     recharge = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge to groundwater [inches]",
     )
     slow_flow = DataArrayMeta(
@@ -687,6 +731,7 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Gravity reservoir storage [inches]",
     )
     slow_stor_change = DataArrayMeta(
@@ -700,6 +745,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Gravity storage, previous timestep",
     )
     soil_lower = DataArrayMeta(
@@ -707,12 +753,14 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower capillary-zone storage [inches]",
     )
     soil_lower_change = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower-zone storage change [inches]",
     )
     soil_lower_change_hru = DataArrayMeta(
@@ -726,12 +774,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower-zone storage, previous timestep (PRMSRunoff input)",
     )
     soil_lower_ratio = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Lower-zone storage fraction of maximum [-]",
     )
     soil_moist = DataArrayMeta(
@@ -739,12 +789,14 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Capillary reservoir storage [inches]",
     )
     soil_moist_tot = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Total soil-zone storage [inches over the HRU]",
     )
     soil_rechr = DataArrayMeta(
@@ -752,12 +804,14 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge-zone storage [inches]",
     )
     soil_rechr_change = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge-zone storage change [inches]",
     )
     soil_rechr_change_hru = DataArrayMeta(
@@ -771,6 +825,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge-zone storage, previous timestep "
         "(PRMSRunoff input)",
     )
@@ -786,6 +841,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Capillary excess to the gravity reservoir [inches]",
     )
     ssr_to_gw = DataArrayMeta(
@@ -800,24 +856,28 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Interflow to the stream network [inches]",
     )
     ssres_flow_vol = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Interflow volume [cubic feet]",
     )
     ssres_in = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Inflow to gravity+preferential reservoirs [inches]",
     )
     ssres_stor = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Gravity + preferential storage [inches]",
     )
     swale_actet = DataArrayMeta(
@@ -831,6 +891,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Unsatisfied potential ET [inches]",
     )
 
@@ -1468,6 +1529,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that has surface depressions [-]",
     )
 
@@ -1476,12 +1538,14 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Depression evaporation [inches over the HRU]",
     )
     dprst_seep_hru = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Depression seepage to groundwater [inches over the HRU]",
     )
 

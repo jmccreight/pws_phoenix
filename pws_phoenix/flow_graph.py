@@ -97,6 +97,7 @@ from numba.core.errors import NumbaExperimentalFeatureWarning
 
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
+from pws_phoenix.units import IO_PLACEHOLDERS
 
 # The registry dispatch (literal_unroll over per-type function tuples)
 # is built on numba's first-class-function / literal_unroll features,
@@ -151,18 +152,21 @@ _GRAPH_FIELDS = {
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units x s",
         description="Surface runoff volume at nodes [io flow units x s]",
     ),
     "node_ssres_flow_vol": DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units x s",
         description="Interflow volume at nodes [io flow units x s]",
     ),
     "node_gwres_flow_vol": DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units x s",
         description="Groundwater discharge volume at nodes "
         "[io flow units x s]",
     ),
@@ -171,30 +175,35 @@ _GRAPH_FIELDS = {
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Lateral inflow to each node [io flow units]",
     ),
     "node_upstream_inflows": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Upstream inflow, daily mean [io flow units]",
     ),
     "node_outflows": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Node outflow, daily mean [io flow units]",
     ),
     "node_storages": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io storage units",
         description="Node storage (nan where undefined by the type)",
     ),
     "node_storage_changes": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Node storage change [io flow units] (node semantics: "
         "flow-rate units)",
     ),
@@ -202,6 +211,7 @@ _GRAPH_FIELDS = {
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Node sink/source [io flow units] (sink negative; "
         "the mass budget's exchanges term)",
     ),
@@ -209,6 +219,7 @@ _GRAPH_FIELDS = {
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Outflow leaving the graph (outlet nodes; else 0)",
     ),
     # -- kernel work buffers --
@@ -216,18 +227,21 @@ _GRAPH_FIELDS = {
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Sub-timestep upstream inflow (kernel work buffer)",
     ),
     "node_upstream_inflow_acc": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Upstream inflow accumulator (kernel work buffer)",
     ),
     "node_outflow_substep": DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="io flow units",
         description="Sub-timestep outflow per node (kernel work buffer)",
     ),
 }
@@ -237,16 +251,14 @@ _GRAPH_FIELDS = {
 # (module docstring "Mass budget"): the upstream hand-off is an input,
 # node_sink_source is the exchanges term (pywatershed negates it into
 # storage_changes). Declared on every composed class; the terms carry
-# the graph's flow units, stamped at composition.
+# the graph's flow units ("io flow units" placeholders, resolved at
+# composition like every other io-units field -- see IO_PLACEHOLDERS).
 _MASS_BUDGET = {
     "inputs": ("node_lateral_inflow", "node_upstream_inflows"),
     "outputs": ("node_outflows",),
     "storage_changes": ("node_storage_changes",),
     "exchanges": ("node_sink_source",),
 }
-_FLOW_UNIT_FIELDS = tuple(
-    nn for terms in _MASS_BUDGET.values() for nn in terms
-)
 
 
 def _build_graph_kernel(prepare_fns, substep_fns, finalize_fns):
@@ -399,14 +411,7 @@ def make_flow_graph(
     if len(set(type_names)) != len(type_names):
         raise ValueError(f"duplicate node type names: {type_names}")
 
-    class_attrs: dict = {}
-    flow_units = "cfs" if io_in_cfs else "cms"
-    for name, meta in _GRAPH_FIELDS.items():
-        if name in _FLOW_UNIT_FIELDS:
-            # the budget terms carry THIS graph's flow units: a
-            # per-composition copy (the module declarations are shared)
-            meta = dataclasses.replace(meta, units=flow_units)
-        class_attrs[name] = meta
+    class_attrs: dict = dict(_GRAPH_FIELDS)
     for tt_class in node_types:
         for name, meta in tt_class.fields.items():
             if name in class_attrs:
@@ -418,6 +423,16 @@ def make_flow_graph(
                     )
                 continue
             class_attrs[name] = meta
+    # fields declared in the graph's io units ("io flow units", ...)
+    # get THIS graph's units: a per-composition copy (the module
+    # declarations are shared objects; copied only after the identity
+    # check above)
+    which = 0 if io_in_cfs else 1
+    for name, meta in class_attrs.items():
+        if meta.units in IO_PLACEHOLDERS:
+            class_attrs[name] = dataclasses.replace(
+                meta, units=IO_PLACEHOLDERS[meta.units][which]
+            )
 
     # every field name so far is a state array; the graph-state
     # namedtuple carries the union (built once per composition)

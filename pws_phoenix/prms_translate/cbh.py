@@ -20,6 +20,7 @@ import numpy as np
 import xarray as xr
 from pyPRMS import Cbh
 
+from pws_phoenix.prms_translate import prms_units
 from pws_phoenix.prms_translate.readers import prms_metadata
 
 # pyPRMS/PRMS-internal -> pws_phoenix (pywatershed-verbatim) names
@@ -60,4 +61,9 @@ def load_cbh(
     da = da.drop_vars([cc for cc in da.coords if cc != "time"])
     if start_time is not None or end_time is not None:
         da = da.sel(time=slice(start_time, end_time))
-    return da.astype(np.float64)
+    da = da.astype(np.float64)
+    # pyPRMS's CBH units ("in", "degree_fahrenheit") -> vocabulary key
+    key = prms_units.resolve(str(da.name), da.attrs.get("units"))
+    if key is not None:
+        da.attrs["units"] = key
+    return da
