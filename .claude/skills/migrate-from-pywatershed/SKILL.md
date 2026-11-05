@@ -68,7 +68,8 @@ Two kinds of thing are involved; keep them apart:
 
 | pywatershed | pws_phoenix | class |
 | --- | --- | --- |
-| `Control.load_prms(file)` | `model_from_control(file)` (prms_translate) | C |
+| `Control.load_prms(file)` | `model_from_control(file)` (prms_translate). `readers.load_control` DROPS entries the PRMS 5.2.1.1 metadata does not know and prints them (`cbh_binary_flag` in the fgr template control; pyPRMS would raise) -- pywatershed's `warn_unused_options=False` hides the same thing | C |
+| `options["prcp_day"]`, `tmax_day`, `tmin_day`, ... (the control's CBH file entries) | read from the control; when the names do not match the files on disk (fgr names `precip.day`, ships `prcp.cbh`; pywatershed never reads these entries, it opens `<input_dir>/<var>.nc`), pass `assemble_from_control(..., cbh_paths={"prcp": path, "tmax": ..., "tmin": ...})` | C |
 | `Control.from_yaml(file)` / `Control(start_time, end_time, time_step, options=)` | `pywatershed_translate.load_control_yaml` → `PrmsRunConfig` window + flags; `time_step` must be 24 h (daily is fixed) | C |
 | `edit_end_time` / `edit_n_time_steps` | a shorter run = `model.run(dt, n_steps)` with fewer steps; the window itself comes from the control file (`PrmsRunConfig.start_time/end_time`) | C |
 | `edit_init_start_times` (a later start) | no override today -- edit the control file's `start_time`, or wait for the planned `window=` kwarg on the assemblers | S |
@@ -85,6 +86,14 @@ Two kinds of thing are involved; keep them apart:
 | `init_vars_from_file`, `var_save_file` (PRMS binary restart) | N (raises in `from_control`) | N |
 | `cascade_flag`, `cascadegw_flag` | N -- no cascades in pws_phoenix | N |
 | `MPI` wanted | `prms_translate.assemble_mpi.mpi_model_from_control` under `mpirun`; output routed by grid (`output_parallel_netcdf` for the distributed grid, `output_serial_zarr` rank-0 for replicated grids) | C |
+
+### Data
+
+| pywatershed | pws_phoenix | class |
+| --- | --- | --- |
+| `pws.utils.addtl_domain_files.download()`, `pws.utils.get_addtl_domains_dir("fgr_2yr")` | `pws_phoenix.utils.addtl_domain_files.download_addtl_domains()` / `get_addtl_domains_dir(domain)` (same release zip; lands in `pws_phoenix/data/`, gitignored) | C |
+| `pkg_root / "data/big_sandy_starfit_parameters.nc"`, `pkg_root / "data/..."` (pywatershed PACKAGE data) | read the same file from the pywatershed clone (`PYWS_ROOT / "pywatershed" / "data" / ...`, with an assert naming it); pws_phoenix commits NO data until a data repo exists | S |
+| `pws.utils.gis_files.download()`, `DomainPlot`, folium maps | N today -- drop the map section with a pointer to the pywatershed notebook (`gis_files` port + `pws_phoenix/plot/` are planned) | N |
 
 ### Parameters
 
@@ -113,7 +122,7 @@ Two kinds of thing are involved; keep them apart:
 | pywatershed | pws_phoenix | class |
 | --- | --- | --- |
 | `prms_channel_flow_graph_to_model_dict(model_dict, prms_channel_dis, prms_channel_params, new_nodes_maker_dict, new_nodes_maker_names/indices/ids, new_nodes_flow_to_nhm_seg, addtl_output_vars)` | `prms_translate.assemble.insert_flow_graph(kit, new_nodes)` on a kit (PRMS control today; `pywatershed_translate` kit later), or `flow_graph_build.splice_flow_graph(dis_seg, channel_params, new_nodes)` -> `FlowGraphKit` when hand-assembling. Same semantics as pywatershed: `NewNode(node_type, flows_to=<nhm_seg>, node_id=<maker_id>, parameters={...})` intercepts above that segment; `flows_to=<another NewNode>` = pywatershed's non-positive in-series index. The collated `names/indices/ids` lists collapse into the `NewNode` list (one per node, in the same order); `node_maker_id` becomes `node_id` = the `nnodes` coordinate (`ds.sel(nnodes=999)`). `addtl_output_vars` dissolve: every node field is an ordinary variable (`node_outflows`, `lake_storage`, `lake_release`, `lake_spill`, ...) -- request them in `output_var_names` | C |
-| `StarfitFlowNodeMaker(discretization, sf_params, compute_daily=, imbalance_behavior=)` | `NewNode(StarfitFlowNode, ...)` (hourly, `compute_daily=False`) or `NewNode(StarfitDailyFlowNode, ...)` (`compute_daily=True`; ONE-DAY LAG, matches pywatershed's daily mode, never the hourly reference). `parameters` = the reservoir's row of `sf_params` (`{name: float(row[name]) for kind=="parameter"}`) in the GRAPH's units (cfs graph: storages in Mcf = MCM x `cms_to_cfs`); nan `initial_storage` / `Obs_MEANFLOW_CUMECS` must be filled by the caller -- pywatershed fills in-node (NOR midpoint at the control init epiweek), `initialize_type` raises; `tests/test_mixed_channel_starfit.py::nor_midpoint_initial_storage` is the recipe. `imbalance_behavior` -> `control["budget"]` | S (the fill) |
+| `StarfitFlowNodeMaker(discretization, sf_params, compute_daily=, imbalance_behavior=)` | `NewNode(StarfitFlowNode, ...)` (hourly, `compute_daily=False`) or `NewNode(StarfitDailyFlowNode, ...)` (`compute_daily=True`; ONE-DAY LAG, matches pywatershed's daily mode, never the hourly reference). `parameters` = the reservoir's row of `sf_params` (`{name: float(row[name]) for kind=="parameter"}`) in the GRAPH's units (cfs graph: storages in Mcf = MCM x `cms_to_cfs`); nan `initial_storage` / `Obs_MEANFLOW_CUMECS` must be filled by the caller (pywatershed fills in-node; `initialize_type` raises): `Obs_MEANFLOW_CUMECS` <- `float(row["inflow_mean"])`; `initial_storage` <- `starfit_flow_node.nor_midpoint_initial_storage(row, init_date)` (MCM; `* cms_to_cfs` in a cfs graph) with `init_date` = the control start MINUS ONE DAY (pywatershed's init time) and `row` ALREADY carrying any capacity scaling (`GRanD_CAP_MCM *= cap_mult` first -- the midpoint depends on it, as it does in pywatershed). `examples_from_pws/06_flow_graph_starfit.py::starfit_node_parameters` is the worked version. `imbalance_behavior` -> `control["budget"]` | S (the fill) |
 | `PassThroughFlowNodeMaker`, `ObsInFlowNodeMaker`, `SourceSinkFlowNodeMaker`, `StarfitSourceSinkFlowNodeMaker` | `NewNode(PassThroughFlowNode / ObsInFlowNode / SourceSinkFlowNode / StarfitSourceSinkFlowNode, ...)`; per-node pandas Series inputs become `kind="input"` fields (`node_obs_flow`, `node_source_sink`, `(time, nnodes)`, zero where not applicable) served in lockstep (`missing_data_as_zero` = data prep) | S (the inputs) |
 | `prms_channel_flow_graph_postprocess(control, input_dir, ...)` + hand loop | a one-process Model: `splice_flow_graph(...)` for the class/dis/params; externals (`sroff_vol`, `ssres_flow_vol`, `gwres_flow_vol`) from the previous run's output files, mapped by the three volume Maps padded with `kit.pad_weights(...)` | S |
 | a kit with stream temperature / hydraulic geometry + a FlowGraph | `insert_flow_graph` raises `NotImplementedError` (they consume `seg_outflow` on `nsegment`); not wired | N |
@@ -150,6 +159,15 @@ xr.testing.assert_allclose(phx, pws_out, rtol=rtol, atol=atol)
 - The first mismatch to suspect is the window: pywatershed's
   `edit_init_start_times` vs `start_time`; both must land on the same
   first output date.
+- **Isolate the ported piece.** A full-chain comparison vs a
+  pywatershed NUMBA run can only be loose (the snow knife-edges);
+  do not chase it tighter. Wherever the script has a stage driven
+  from files (a post-process FlowGraph, a submodel), drive OUR stage
+  with pywatershed's OWN intermediate output files and pin that
+  tight (1e-10 for the graph). Pattern: `06_flow_graph_starfit.py`
+  "Checking against pywatershed" -- loose prints + gross-breakage
+  asserts for the chains, then the graph on pywatershed's
+  `fgr_nhm/*_vol.nc` with zero values outside 1e-10.
 
 ## Helpers this skill expects
 
@@ -158,8 +176,11 @@ Existing (`pws_phoenix/prms_translate/`): `assemble.model_from_control`
 `maps`, `discretizations`, `.model()`); `assemble.insert_flow_graph`;
 `control.resolve_classes`; `parameters.package_parameters`;
 `cbh.load_cbh`; `preprocess.write_preprocessed`;
-`assemble_mpi.mpi_model_from_control`. Core:
-`flow_graph_build.splice_flow_graph` / `NewNode` / `FlowGraphKit`.
+`assemble_mpi.mpi_model_from_control`; `readers.load_control`
+(unknown-entry filter); `assemble_from_control(..., cbh_paths=)`.
+Core: `flow_graph_build.splice_flow_graph` / `NewNode` /
+`FlowGraphKit`; `hydrology.starfit_flow_node.
+nor_midpoint_initial_storage`; `utils.addtl_domain_files`.
 
 PLANNED (`pws_phoenix/pywatershed_translate/`, not yet written -- when
 a mapping above names one of these, hand-build the equivalent from the
