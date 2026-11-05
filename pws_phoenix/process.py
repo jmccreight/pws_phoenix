@@ -70,6 +70,11 @@ class DataArrayMeta:
         "input",
         "mutable_input",
         "variable",
+        # GENERATED per-location budget terms (see _budget_fields): a
+        # variable in every lifecycle respect (allocated, written,
+        # restartable) but never declared by hand -- kept distinct so
+        # "the process's variables" means the physics ones.
+        "budget_variable",
     ]
     dims: tuple[str, ...]
     dtype: type
@@ -188,7 +193,7 @@ def _budget_fields(
                     "collides with a declared field."
                 )
             generated[name] = DataArrayMeta(
-                kind="variable",
+                kind="budget_variable",
                 dims=("space",),
                 dtype=np.float64,
                 description=(
@@ -377,12 +382,33 @@ class Process(ABC):
         return _keys_of_kind(cls, "mutable_input")
 
     @classmethod
-    def get_variables(cls) -> dict[str, DataArrayMeta]:
-        return _dict_of_kind(cls, "variable")
+    def get_variables(
+        cls, include_budget: bool = False
+    ) -> dict[str, DataArrayMeta]:
+        """The process's declared variables; ``include_budget=True``
+        appends the generated budget terms (the framework's view:
+        everything allocated and writable as a variable)."""
+        out = _dict_of_kind(cls, "variable")
+        if include_budget:
+            out |= _dict_of_kind(cls, "budget_variable")
+        return out
 
     @classmethod
-    def get_var_names(cls) -> tuple[str, ...]:
-        return _keys_of_kind(cls, "variable")
+    def get_var_names(cls, include_budget: bool = False) -> tuple[str, ...]:
+        return tuple(cls.get_variables(include_budget=include_budget))
+
+    @classmethod
+    def get_budget_variables(cls) -> dict[str, DataArrayMeta]:
+        """The GENERATED budget terms (``kind="budget_variable"``):
+        ``{Class}_{budget}_{inputs_sum, outputs_sum,
+        storage_changes_sum, [exchanges_sum], residual,
+        residual_accum}`` per declared budget; empty when the class
+        declares none."""
+        return _dict_of_kind(cls, "budget_variable")
+
+    @classmethod
+    def get_budget_var_names(cls) -> tuple[str, ...]:
+        return _keys_of_kind(cls, "budget_variable")
 
     @classmethod
     def get_restart_variables(cls) -> tuple[str, ...]:
@@ -391,10 +417,11 @@ class Process(ABC):
         declarations (pywatershed's hand-maintained
         get_restart_variables() lists are the cross-check during
         flagging). The declaration-override seam applies: a variant's
-        redeclaration replaces the base's flag."""
+        redeclaration replaces the base's flag. Budget accumulators
+        are included (restart is the COMPLETE state)."""
         return tuple(
             name
-            for name, meta in _dict_of_kind(cls, "variable").items()
+            for name, meta in cls.get_variables(include_budget=True).items()
             if meta.restart
         )
 

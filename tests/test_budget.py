@@ -118,7 +118,7 @@ class _ExchangeBucket(_Bucket):
 
 
 def test_generated_fields():
-    names = tuple(_Bucket.get_variables())
+    names = tuple(_Bucket.get_budget_variables())
     for suffix in (
         "inputs_sum",
         "outputs_sum",
@@ -128,7 +128,7 @@ def test_generated_fields():
     ):
         assert f"_Bucket_mass_{suffix}" in names
     assert "_Bucket_mass_exchanges_sum" not in names
-    ex_names = tuple(_ExchangeBucket.get_variables())
+    ex_names = tuple(_ExchangeBucket.get_budget_variables())
     assert "_ExchangeBucket_mass_exchanges_sum" in ex_names
     # the variant does NOT inherit the base's generated names
     assert "_Bucket_mass_residual" not in ex_names
@@ -137,7 +137,17 @@ def test_generated_fields():
         "storage",
         "_Bucket_mass_residual_accum",
     )
-    assert _Bucket.get_variables()["_Bucket_mass_residual"].units == "inches"
+    assert (
+        _Bucket.get_budget_variables()["_Bucket_mass_residual"].units
+        == "inches"
+    )
+    # the generated terms are their own kind: not among the declared
+    # variables unless asked for
+    assert "_Bucket_mass_residual" not in _Bucket.get_var_names()
+    assert _Bucket.get_var_names(include_budget=True) == (
+        *_Bucket.get_var_names(),
+        *_Bucket.get_budget_var_names(),
+    )
 
 
 def _declare(budgets_dict, extra=None):
