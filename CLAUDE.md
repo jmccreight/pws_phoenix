@@ -14,6 +14,7 @@
   - [Known mpixarray limits (Phase 1)](#known-mpixarray-limits-phase-1)
   - [IO is intentionally NOT apples-to-apples](#io-is-intentionally-not-apples-to-apples)
   - [Global state: `Time` + `Options` (the "Global" split)](#global-state-time--options-the-global-split)
+  - [Units mode (Nov 2026; stages 1 + 2 built, stage 3 piloted)](#units-mode-nov-2026-stages-1--2-built-stage-3-piloted)
   - [Phase 2 backlog (separable, layered on top)](#phase-2-backlog-separable-layered-on-top)
   - [Porting pywatershed processes (goal 4; started July 2026)](#porting-pywatershed-processes-goal-4-started-july-2026)
   - [FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)](#flowgraph-port-agreed-design-july-2026-stage-1-built--green)
@@ -346,6 +347,73 @@ positional time-varying-parameter lookup therefore indexes with `field - 1`
 (convention (A); see `Upper.calculate` and `tests/test_time.py`). Still in
 pywatershed if needed: `jsol` (days since solstice, niche) and `epiweek` (needs
 the `epiweeks` dep).
+
+## Units mode (Nov 2026; stages 1 + 2 built, stage 3 piloted)
+
+Every float `DataArrayMeta` declares `units=` from the CLOSED vocabulary
+in `units.py` (`VOCABULARY`: pywatershed-natural key -> pint
+expression, `None` for the few pint cannot express, e.g. the
+exponent-dependent `m per cms^exp`). pint sits BEHIND the table and
+touches strings only -- arrays stay plain numpy (`_refs`, numba,
+zero-copy untouched); pint-xarray's `quantify()` is rejected for
+runtime. `fraction` = a proportion, `none` = a dimensionless flag
+stored as float (both pint `dimensionless`); temperature differences
+are `delta_degF`/`delta_degC`; rate coefficients keep their physical
+`1/day` though the daily kernels apply them per step. FlowGraph fields
+in the graph's io units declare the placeholders `io flow units` /
+`io flow units x s` / `io storage units`, resolved over the whole field
+union at composition (`IO_PLACEHOLDERS`). `tests/test_units.py`
+enforces: every expression parses, every declared string is a key,
+every float field has units, no placeholder survives composition.
+
+Two boundaries, deliberately separate:
+
+- **PRMS boundary** (`prms_translate/prms_units.py`): PRMS's metadata
+  words (pyPRMS's bundled XML -- not pywatershed, not the oracle) ->
+  vocabulary keys: a by-name table for PRMS strings that are wrong or
+  vague (`hru_in_to_cf: "cubic feet"`, `gwflow_coef: "fraction/day"`,
+  `width_alpha: "unknown"`), flag resolution for `temp_units` /
+  `precip_units` / `elev_units` from the file's own values (metric
+  precip raises NotImplementedError: the kernels are imperial), a
+  spelling table incl. pyPRMS's own CBH strings. `load_parameters`
+  (`translate_units`), `load_cbh`, dynamic parameters,
+  `derive_hru_in_to_cf` and `compute_soltabs` stamp keys;
+  `package_parameters` RAISES on a declared-vs-translated disagreement
+  (a table or declaration bug, never data -- nothing to patch).
+- **Model boundary** (`control["units"]`, build-time only, no per-step
+  cost): `None` (default; pint never imported) | `"check"` (every
+  supplied parameter/input's `attrs["units"]` must be a key naming the
+  declared quantity, `units.same`; Map owner vs consumer declarations
+  must agree) | `"convert"` (a RESIDENT array in compatible units is
+  converted in place at build via `units.affine`, attrs updated -- the
+  caller's arrays ARE the buffers; a streamed/lazy input that would
+  need converting RAISES: conversion is never a per-step edit,
+  pre-process the file). `control["units_patch"] = {name: key}`
+  overrides a supplied array's attrs (missing attr = error; the patch
+  is the escape hatch). Hooks: `_add_process_fields` (params before
+  the read-only flag; `Input.data`), `ModelMPI._build` (resident
+  params per rank; streamed inputs check-only, every rank raises
+  together), `_resolve_maps`. Budget units stay string-equality: exact
+  with a closed vocabulary. Tests: `test_units_check{,_mpi}.py`,
+  `test_prms_units.py` (the drb kit builds under "check", no patches).
+
+Stage 3 (kernels; pilot BUILT Nov 5, 2026, sweep pending):
+`tests/test_kernel_units.py` runs a kernel's undecorated body
+(`Cls._calculate.py_func`) on pint Quantity arrays built from the
+declarations (kernel argument names == field names), so every `+`,
+`-`, comparison and element assignment is dimension-checked, and
+compares the magnitudes BIT FOR BIT to the compiled run (pint
+silently converts a compatible-but-wrong-scale assignment, e.g. cubic
+feet into an acre-inches array -- the magnitude comparison is what
+catches that). Convention (JLM): `1/day` coefficients keep their
+declaration; the harness multiplies the `PER_DAY` set by `1 day`
+before the call (dropping it fails at `stor - flow`). Pilot = the
+groundwater family (no implicit-unit literals). Sweep: one kernel per
+PR; hoist implicit-unit literals (`32.0`, dnearzero, 5/9) to named
+module floats the test monkeypatches to Quantities; monkeypatch helper
+njit Dispatchers to their `.py_func`; settle STARFIT
+`lake_release_sub`/`lake_spill_sub` (cms hourly but io units in daily
+mode; declared cms).
 
 ## Phase 2 backlog (separable, layered on top)
 
