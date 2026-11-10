@@ -414,7 +414,13 @@ Quantity run). Done: the groundwater family (no literals), PRMSCanopy
 the kernel divides an hourly-sample sum by it as a COUNT ->
 `ts / _ROUTING_STEP_HOURS`; integer fields pass plain even when they
 declare units -- `tsi`; non-field kernel args take units from
-`NON_FIELD_UNITS`, e.g. `s_per_time` seconds). pint accepts a bare zero in `+` and comparisons but NOT
+`NON_FIELD_UNITS`, e.g. `s_per_time` seconds) + its init derivation
+`muskingum_mann_coefficients` (plain numpy via the harness's
+`func=`; the bare `* 60.0 * 60.0` left velocity in m/s, which pint
+alone cannot see -- kcoef in seconds converts silently into hours; the
+magnitude comparison catches it). A `UnitStrippedWarning` is an error
+in the Quantity run (`np.full` and plain-array assignment drop units
+silently). Init derivations of the other ports are not yet checked. pint accepts a bare zero in `+` and comparisons but NOT
 assigned into a dimensional array or after scaling (`0.0 * cov >
 potet`), so a kernel's zeros of a working unit are a named module
 float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code

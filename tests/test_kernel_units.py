@@ -19,7 +19,9 @@ the test multiplies those parameters by ``1 day`` before the call
 literals); then PRMSCanopy (implicit-unit module floats + an njit
 helper, patched via the harness); PRMSChannel (a non-field kernel
 argument, dt = s_per_time in seconds; ts in hours used as a sample
-count). Harness: tests/kernel_units.py.
+count), and its init derivation muskingum_mann_coefficients (plain
+numpy, run through the harness's ``func=``). Harness:
+tests/kernel_units.py.
 Synthetic data, CI-able.
 """
 
@@ -38,7 +40,7 @@ from kernel_units import (  # noqa: E402
 from pws_phoenix.hydrology import prms_canopy, prms_channel  # noqa: E402
 from pws_phoenix.hydrology.prms_canopy import PRMSCanopy  # noqa: E402
 from pws_phoenix.hydrology.prms_channel import PRMSChannel  # noqa: E402
-from pws_phoenix.units import quantity  # noqa: E402
+from pws_phoenix.units import quantity, registry  # noqa: E402
 from pws_phoenix.hydrology.prms_groundwater import (  # noqa: E402
     PRMSGroundwater,
     PRMSGroundwaterNoDprst,
@@ -349,3 +351,112 @@ def test_channel_patches_are_load_bearing(channel_data, dropped, error, match):
     assert len(patches) == len(CHANNEL_PATCHES) - 1
     with pytest.raises(error, match=match):
         run_quantified(PRMSChannel, channel_data, patches=patches)
+
+
+# ----------------------------------------------------------------------
+# channel init: muskingum_mann_coefficients (plain numpy, not a kernel;
+# it writes the ts/tsi/c0/c1/c2 the kernel reads)
+# ----------------------------------------------------------------------
+
+MUSKINGUM_PATCH_UNITS = {
+    "_SECONDS_PER_MINUTE": "second / minute",
+    "_MINUTES_PER_HOUR": "minute / hour",
+    "_KCOEF_MIN_HOURS": "hour",
+    "_KCOEF_MAX_HOURS": "hour",
+    "_ONE_HOUR": "hour",
+    "_DD_NEARZERO_HOURS": "hour",
+    "_DD_FLOOR_HOURS": "hour",
+}
+MUSKINGUM_PATCHES = {
+    (prms_channel, name): getattr(prms_channel, name) * registry()(expr)
+    for name, expr in MUSKINGUM_PATCH_UNITS.items()
+}
+
+
+@pytest.fixture
+def muskingum_data() -> dict[str, np.ndarray]:
+    """Eleven segments: one per rung of the sub-timestep ladder (kcoef
+    targets in hours; the first clamped up to 0.01, the ninth down to
+    24), then a lake (kcoef forced to 24) and a flat segment (velocity
+    0, kcoef stays 24). Segment 1 (x_coef 0.6) has c2 < 0 (short travel
+    time), segment 7 (x_coef 0.4) c0 < 0 (long)."""
+    kcoef_hours = np.array(
+        [0.001, 1.1, 2.5, 3.5, 5.0, 7.0, 10.0, 20.0, 30.0, 5.0, 5.0]
+    )
+    nseg = kcoef_hours.size
+    lake, flat = 9, 10
+    # Manning velocity with these mann_n/slope/depth: 0.5 m/s
+    velocity_m_per_hour = (1.0 / 0.04) * np.sqrt(0.0004) * 1.0 * 3600.0
+    x_coef = np.full(nseg, 0.2)
+    x_coef[1] = 0.6
+    x_coef[7] = 0.4
+    seg_slope = np.full(nseg, 0.0004)
+    seg_slope[flat] = 0.0
+    segment_type = np.ones(nseg, dtype=np.int64)
+    segment_type[lake] = 2
+    return {
+        # outputs
+        "ts": np.zeros(nseg),
+        "tsi": np.zeros(nseg, dtype=np.int64),
+        "c0": np.zeros(nseg),
+        "c1": np.zeros(nseg),
+        "c2": np.zeros(nseg),
+        # parameters
+        "mann_n": np.full(nseg, 0.04),
+        "seg_slope": seg_slope,
+        "seg_depth": np.ones(nseg),
+        "seg_length": kcoef_hours * velocity_m_per_hour,
+        "segment_type": segment_type,
+        "x_coef": x_coef,
+    }
+
+
+def test_muskingum_coefficients_units(muskingum_data):
+    out = assert_kernel_dimensionally_consistent(
+        PRMSChannel,
+        muskingum_data,
+        patches=MUSKINGUM_PATCHES,
+        func=prms_channel.muskingum_mann_coefficients,
+    )
+    np.testing.assert_array_equal(
+        out["tsi"], [-1, 1, 2, 3, 4, 6, 8, 12, 24, 24, 24]
+    )
+    np.testing.assert_array_equal(
+        out["ts"], [1, 1, 2, 3, 4, 6, 8, 12, 24, 24, 24]
+    )
+    assert out["c2"][1] == 0.0  # short travel time
+    assert out["c0"][7] == 0.0 and out["c2"][7] > 0.0  # long
+    np.testing.assert_allclose(out["c0"] + out["c1"] + out["c2"], 1.0)
+
+
+@pytest.mark.parametrize(
+    "dropped, error, match",
+    [
+        # m/s * 60 * 60 stays m/s under pint: kcoef comes out in seconds
+        # and pint converts it SILENTLY into the hours array -- only the
+        # magnitude comparison sees it (ts lands on the wrong rung)
+        ("_SECONDS_PER_MINUTE", AssertionError, "ts"),
+        ("_MINUTES_PER_HOUR", AssertionError, "ts"),
+        ("_KCOEF_MIN_HOURS", ValueError, "Cannot compare"),
+        # plain ones * 24.0: numpy strips the units on kcoef[wh_moving] = ...
+        ("_KCOEF_MAX_HOURS", pint.errors.UnitStrippedWarning, "stripped"),
+        ("_ONE_HOUR", pint.DimensionalityError, "from '1.0' to 'hour'"),
+        ("_DD_NEARZERO_HOURS", ValueError, "Cannot compare"),
+        ("_DD_FLOOR_HOURS", pint.DimensionalityError, "to 'hour'"),
+    ],
+)
+def test_muskingum_patches_are_load_bearing(
+    muskingum_data, dropped, error, match
+):
+    """Each patch is needed: without it the check fails."""
+    patches = {
+        kk: vv for kk, vv in MUSKINGUM_PATCHES.items() if kk[1] != dropped
+    }
+    assert len(patches) == len(MUSKINGUM_PATCHES) - 1
+    with pytest.raises(error, match=match):
+        assert_kernel_dimensionally_consistent(
+            PRMSChannel,
+            muskingum_data,
+            patches=patches,
+            func=prms_channel.muskingum_mann_coefficients,
+        )

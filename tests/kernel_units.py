@@ -8,7 +8,12 @@ drive everything. A field without units, or of integer dtype, is
 passed as a plain array (an integer field may declare units, e.g.
 the channel's ``tsi`` in hours, but the kernel uses it as an integer:
 ``(ihr + 1) % tsi[jseg]``). A kernel argument that is not a field
-takes its units from ``NON_FIELD_UNITS``. ``patches`` swaps module attributes for the duration of
+takes its units from ``NON_FIELD_UNITS``.
+
+``func=`` runs a plain-numpy function instead of the kernel (an
+init-time derivation such as ``muskingum_mann_coefficients``): its
+argument names must also be ``cls``'s field names, and the plain-float
+run of the same function stands in for the compiled run. ``patches`` swaps module attributes for the duration of
 the Quantity run: implicit-unit module floats (``_NEARZERO``,
 ``_ZERO_INCHES``) become Quantities, and helper njit Dispatchers
 become their ``py_func`` (a Dispatcher cannot take a Quantity).
@@ -28,7 +33,8 @@ import dis
 import inspect
 import sys
 import types
-from collections.abc import Iterator
+import warnings
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import numpy as np
@@ -69,13 +75,22 @@ def inches(value: float) -> pint.Quantity:
     return value * units_mod.quantity("inches")
 
 
-def kernel_arg_names(cls: type) -> list[str]:
-    """The kernel's positional parameters == declared field names."""
-    return list(inspect.signature(cls._calculate.py_func).parameters)
+def _body(cls: type, func: Callable | None) -> Callable:
+    """The Python body run on Quantities: `func`, or the kernel's
+    py_func."""
+    return func if func is not None else cls._calculate.py_func
+
+
+def kernel_arg_names(cls: type, func: Callable | None = None) -> list[str]:
+    """The kernel's (or `func`'s) positional parameters == declared
+    field names."""
+    return list(inspect.signature(_body(cls, func)).parameters)
 
 
 def kernel_units(
-    cls: type, declared: dict[str, str] | None = None
+    cls: type,
+    declared: dict[str, str] | None = None,
+    func: Callable | None = None,
 ) -> dict[str, str | None]:
     """Kernel argument -> vocabulary key (None = passed plain: no units,
     or an integer field): the declaration (`NON_FIELD_UNITS` for a
@@ -83,7 +98,7 @@ def kernel_units(
     prove a wrong declaration is caught)."""
     fields = _resolved_fields(cls)
     out: dict[str, str | None] = {}
-    for name in kernel_arg_names(cls):
+    for name in kernel_arg_names(cls, func):
         if name in fields:
             meta = fields[name]
             key = None if np.issubdtype(meta.dtype, np.integer) else meta.units
@@ -107,10 +122,13 @@ def patched(patches: Patches | None) -> Iterator[None]:
             setattr(module, name, value)
 
 
-def run_compiled(cls: type, data: dict[str, np.ndarray]) -> dict:
-    """The compiled kernel on copies of `data`; returns the arrays."""
-    arrays = {name: data[name].copy() for name in kernel_arg_names(cls)}
-    cls._calculate(*arrays.values())
+def run_compiled(
+    cls: type, data: dict[str, np.ndarray], func: Callable | None = None
+) -> dict:
+    """The compiled kernel (or plain `func`) on copies of `data`;
+    returns the arrays."""
+    arrays = {name: data[name].copy() for name in kernel_arg_names(cls, func)}
+    (func if func is not None else cls._calculate)(*arrays.values())
     return arrays
 
 
@@ -151,9 +169,12 @@ def traced_lines(
         sys.settrace(previous)
 
 
-def _traced_codes(cls: type, patches: Patches | None) -> list[types.CodeType]:
-    """The kernel body plus every patched-in plain function (helpers)."""
-    codes = [cls._calculate.py_func.__code__]
+def _traced_codes(
+    cls: type, patches: Patches | None, func: Callable | None
+) -> list[types.CodeType]:
+    """The kernel body (or `func`) plus every patched-in plain function
+    (helpers)."""
+    codes = [_body(cls, func).__code__]
     for value in (patches or {}).values():
         if isinstance(value, types.FunctionType):
             codes.append(value.__code__)
@@ -168,6 +189,7 @@ def run_quantified(
     per_day: frozenset[str] = PER_DAY,
     patches: Patches | None = None,
     fired: dict[types.CodeType, set[int]] | None = None,
+    func: Callable | None = None,
 ) -> dict:
     """The kernel body (`py_func`) on Quantity arrays in the units
     `kernel_units` gives (unit-less fields plain); `per_day` parameters
@@ -176,7 +198,7 @@ def run_quantified(
     helpers are added to it. Returns the arrays."""
     one_day = units_mod.quantity("days")
     arrays: dict[str, Any] = {}
-    for name, key in kernel_units(cls, declared).items():
+    for name, key in kernel_units(cls, declared, func).items():
         if key is None:
             arrays[name] = data[name].copy()
             continue
@@ -184,8 +206,13 @@ def run_quantified(
         if name in per_day:
             qarr = qarr * one_day
         arrays[name] = qarr
-    with patched(patches), traced_lines(_traced_codes(cls, patches)) as got:
-        cls._calculate.py_func(*arrays.values())
+    codes = _traced_codes(cls, patches, func)
+    # a stripped unit (numpy downcasting a Quantity) is a line pint no
+    # longer checks: make it an error
+    with patched(patches), traced_lines(codes) as got:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", pint.errors.UnitStrippedWarning)
+            _body(cls, func)(*arrays.values())
     if fired is not None:
         for code, lines in got.items():
             fired.setdefault(code, set()).update(lines)
@@ -216,18 +243,19 @@ def assert_kernel_dimensionally_consistent(
     declared: dict[str, str] | None = None,
     patches: Patches | None = None,
     require_all_lines: bool = True,
+    func: Callable | None = None,
 ) -> dict:
     """Quantity run == compiled run, element for element and bit for
     bit, each array read in the units it was BUILT in (inputs come
     back unchanged, outputs are the check); and (`require_all_lines`)
     every unmarked line of the kernel and patched helpers ran. Returns
     the compiled arrays (for branch asserts)."""
-    compiled = run_compiled(cls, data)
+    compiled = run_compiled(cls, data, func)
     fired: dict[types.CodeType, set[int]] = {}
     quantified = run_quantified(
-        cls, data, declared=declared, patches=patches, fired=fired
+        cls, data, declared=declared, patches=patches, fired=fired, func=func
     )
-    for name, key in kernel_units(cls, declared).items():
+    for name, key in kernel_units(cls, declared, func).items():
         if name in PER_DAY:
             continue  # carries the 1 day factor by construction
         got = (

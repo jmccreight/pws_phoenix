@@ -118,6 +118,19 @@ _ROUTING_STEP_HOURS = 1.0
 _ZERO_CFS = 0.0
 _ZERO_CUBIC_FEET = 0.0
 
+# The init derivation's implicit units, named (muskingum_mann_coefficients;
+# plain numpy, so the units test patches these directly): velocity m/s
+# -> m/hour, kcoef bounds and the dd floor in hours, and one hour for
+# the sub-timestep ladder (kk is compared as a count of hours; ts is
+# written in hours). Each multiply/divide by 1.0 is exact.
+_SECONDS_PER_MINUTE = 60.0
+_MINUTES_PER_HOUR = 60.0
+_KCOEF_MIN_HOURS = 0.01
+_KCOEF_MAX_HOURS = 24.0
+_ONE_HOUR = 1.0
+_DD_NEARZERO_HOURS = 1e-6
+_DD_FLOOR_HOURS = 0.0001
+
 
 def muskingum_mann_coefficients(
     ts: np.ndarray,
@@ -144,8 +157,8 @@ def muskingum_mann_coefficients(
 
     velocity = (
         ((1.0 / mann_n) * np.sqrt(seg_slope) * seg_depth ** (2.0 / 3.0))
-        * 60.0
-        * 60.0
+        * _SECONDS_PER_MINUTE
+        * _MINUTES_PER_HOUR
     )
     # pywatershed clamps too-flat seg_slope IN PLACE here -- AFTER
     # velocity, so the edit affects nothing downstream in channel
@@ -154,47 +167,51 @@ def muskingum_mann_coefficients(
 
     # Kcoef = 24 default; Manning travel time where velocity > 0;
     # lakes forced to 24; clamped to [0.01, 24]
-    kcoef = np.full(n_seg, 24.0, dtype=np.float64)
+    # (ones * 24.0, not np.full: np.full drops a Quantity's units)
+    kcoef = _KCOEF_MAX_HOURS * np.ones(n_seg, dtype=np.float64)
     wh_moving = velocity > 0.0
     kcoef[wh_moving] = seg_length[wh_moving] / velocity[wh_moving]
-    kcoef = np.where(segment_type == _SEGMENT_TYPE_LAKE, 24.0, kcoef)
-    kcoef = np.where(kcoef < 0.01, 0.01, kcoef)
-    kcoef = np.where(kcoef > 24.0, 24.0, kcoef)
+    kcoef = np.where(
+        segment_type == _SEGMENT_TYPE_LAKE, _KCOEF_MAX_HOURS, kcoef
+    )
+    kcoef = np.where(kcoef < _KCOEF_MIN_HOURS, _KCOEF_MIN_HOURS, kcoef)
+    kcoef = np.where(kcoef > _KCOEF_MAX_HOURS, _KCOEF_MAX_HOURS, kcoef)
 
-    ts[:] = 1.0
+    ts[:] = _ONE_HOUR
     tsi[:] = 1
-    # sub-timestep ladder (even divisors of 24 h) -- verbatim
+    # sub-timestep ladder (even divisors of 24 h) -- verbatim, kk a
+    # count of hours
     for iseg in range(n_seg):
-        kk = kcoef[iseg]
+        kk = kcoef[iseg] / _ONE_HOUR
         if kk < 1.0:
             tsi[iseg] = -1
         elif kk < 2.0:
-            ts[iseg] = 1.0
+            ts[iseg] = 1.0 * _ONE_HOUR
             tsi[iseg] = 1
         elif kk < 3.0:
-            ts[iseg] = 2.0
+            ts[iseg] = 2.0 * _ONE_HOUR
             tsi[iseg] = 2
         elif kk < 4.0:
-            ts[iseg] = 3.0
+            ts[iseg] = 3.0 * _ONE_HOUR
             tsi[iseg] = 3
         elif kk < 6.0:
-            ts[iseg] = 4.0
+            ts[iseg] = 4.0 * _ONE_HOUR
             tsi[iseg] = 4
         elif kk < 8.0:
-            ts[iseg] = 6.0
+            ts[iseg] = 6.0 * _ONE_HOUR
             tsi[iseg] = 6
         elif kk < 12.0:
-            ts[iseg] = 8.0
+            ts[iseg] = 8.0 * _ONE_HOUR
             tsi[iseg] = 8
         elif kk < 24.0:
-            ts[iseg] = 12.0
+            ts[iseg] = 12.0 * _ONE_HOUR
             tsi[iseg] = 12
         else:
-            ts[iseg] = 24.0
+            ts[iseg] = 24.0 * _ONE_HOUR
             tsi[iseg] = 24
 
     dd = kcoef - (kcoef * x_coef) + (0.5 * ts)
-    dd = np.where(np.abs(dd) < 1e-6, 0.0001, dd)
+    dd = np.where(np.abs(dd) < _DD_NEARZERO_HOURS, _DD_FLOOR_HOURS, dd)
     c0[:] = (-(kcoef * x_coef) + (0.5 * ts)) / dd
     c1[:] = ((kcoef * x_coef) + (0.5 * ts)) / dd
     c2[:] = (kcoef - (kcoef * x_coef) - (0.5 * ts)) / dd
