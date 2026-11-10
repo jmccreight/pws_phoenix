@@ -16,108 +16,29 @@ Convention for ``1/day`` coefficients (JLM, Nov 5, 2026): declarations
 keep the physical rate; the daily kernels apply it once per step, so
 the test multiplies those parameters by ``1 day`` before the call
 (``PER_DAY``). Pilot kernel: the groundwater family (no implicit-unit
-literals). Synthetic data, CI-able, no numba compile of anything new
-(the compiled run uses the kernel as the model does).
+literals); then PRMSCanopy (implicit-unit module floats + an njit
+helper, patched via the harness). Harness: tests/kernel_units.py.
+Synthetic data, CI-able.
 """
 
-import inspect
-
+import numba
 import numpy as np
 import pytest
 
 pint = pytest.importorskip("pint")
 
-from pws_phoenix import units as units_mod  # noqa: E402
+from kernel_units import (  # noqa: E402
+    assert_kernel_dimensionally_consistent,
+    inches,
+    run_compiled,
+    run_quantified,
+)
+from pws_phoenix.hydrology import prms_canopy  # noqa: E402
+from pws_phoenix.hydrology.prms_canopy import PRMSCanopy  # noqa: E402
 from pws_phoenix.hydrology.prms_groundwater import (  # noqa: E402
     PRMSGroundwater,
     PRMSGroundwaterNoDprst,
 )
-from pws_phoenix.process import _resolved_fields  # noqa: E402
-
-# parameters declared as rates that the kernels apply per daily step
-PER_DAY = frozenset({"gwflow_coef", "gwsink_coef"})
-
-
-# ----------------------------------------------------------------------
-# harness (test-side; promote to a shared module with the second kernel)
-# ----------------------------------------------------------------------
-
-
-def quantify(values: np.ndarray, key: str) -> pint.Quantity:
-    """`values` (magnitudes in vocabulary key `key`) as a Quantity array."""
-    unit = units_mod.quantity(key)
-    return units_mod.registry().Quantity(
-        np.asarray(values, dtype=np.float64) * unit.magnitude, unit.units
-    )
-
-
-def magnitudes(qarr: pint.Quantity, key: str) -> np.ndarray:
-    """The Quantity array's magnitudes expressed in vocabulary key `key`."""
-    unit = units_mod.quantity(key)
-    return qarr.to(unit.units).magnitude / unit.magnitude
-
-
-def kernel_arg_names(cls: type) -> list[str]:
-    """The kernel's positional parameters == declared field names."""
-    return list(inspect.signature(cls._calculate.py_func).parameters)
-
-
-def run_compiled(cls: type, data: dict[str, np.ndarray]) -> dict:
-    """The compiled kernel on copies of `data`; returns the arrays."""
-    arrays = {name: data[name].copy() for name in kernel_arg_names(cls)}
-    cls._calculate(*arrays.values())
-    return arrays
-
-
-def kernel_units(cls: type, declared: dict[str, str] | None = None) -> dict:
-    """Kernel argument -> vocabulary key: the declaration, or the
-    `declared` override (for the tests that prove a wrong declaration
-    is caught)."""
-    fields = _resolved_fields(cls)
-    return {
-        name: (declared or {}).get(name, fields[name].units)
-        for name in kernel_arg_names(cls)
-    }
-
-
-def run_quantified(
-    cls: type,
-    data: dict[str, np.ndarray],
-    *,
-    declared: dict[str, str] | None = None,
-    per_day: frozenset[str] = PER_DAY,
-) -> dict:
-    """The kernel body (`py_func`) on Quantity arrays in the units
-    `kernel_units` gives; `per_day` parameters are multiplied by 1 day
-    first. Returns the Quantity arrays."""
-    one_day = units_mod.quantity("days")
-    arrays = {}
-    for name, key in kernel_units(cls, declared).items():
-        qarr = quantify(data[name].copy(), key)
-        if name in per_day:
-            qarr = qarr * one_day
-        arrays[name] = qarr
-    cls._calculate.py_func(*arrays.values())
-    return arrays
-
-
-def assert_kernel_dimensionally_consistent(
-    cls: type,
-    data: dict[str, np.ndarray],
-    *,
-    declared: dict[str, str] | None = None,
-) -> None:
-    """Quantity run == compiled run, magnitude for magnitude, each array
-    read in the units it was BUILT in (inputs come back unchanged,
-    outputs are the check)."""
-    compiled = run_compiled(cls, data)
-    quantified = run_quantified(cls, data, declared=declared)
-    for name, key in kernel_units(cls, declared).items():
-        if name in PER_DAY:
-            continue  # carries the 1 day factor by construction
-        np.testing.assert_array_equal(
-            magnitudes(quantified[name], key), compiled[name], err_msg=name
-        )
 
 
 # ----------------------------------------------------------------------
@@ -181,3 +102,145 @@ def test_compatible_wrong_declaration_is_caught(gw_data):
             gw_data,
             declared={"gwres_flow_vol": "acre-inches"},
         )
+
+
+# ----------------------------------------------------------------------
+# canopy
+# ----------------------------------------------------------------------
+
+CANOPY_PATCHES = {
+    (prms_canopy, "_NEARZERO"): inches(prms_canopy._NEARZERO),
+    (prms_canopy, "_DNEARZERO"): inches(prms_canopy._DNEARZERO),
+    (prms_canopy, "_ZERO_INCHES"): inches(prms_canopy._ZERO_INCHES),
+    (prms_canopy, "intercept"): prms_canopy.intercept.py_func,
+}
+
+
+@pytest.fixture
+def canopy_data() -> dict[str, np.ndarray]:
+    """Fourteen hrus, one step, together running every kernel line
+    (the harness enforces it):
+
+    0 bare soil holding water (extra_water)
+    1 summer -> winter changeover, then rain-form evaporation
+    2 winter -> summer changeover (shrinking store), trees intercept rain
+    3 grasses intercept rain (no snowpack, no snow)
+    4 grasses with a snowpack: no interception
+    5 trees intercept trace snow -> it becomes rain, pptmix zeroed
+    6 snow-form sublimation (snowfall below _NEARZERO; store over snow_intcp)
+    7 the potet cap (potet_sublim * cov > 1: not physical, reaches it)
+    8 summer -> winter onto zero winter cover: store dropped
+    9 summer -> winter with covden_win > covden_sum: store rescaled
+    10 winter -> summer onto zero summer cover: store dropped
+    11 snow-form sublimation of the whole store
+    12 rain-form evaporation of part of the store
+    13 the potet cap on zero cover (potet < 0: not physical, reaches it)
+    """
+    nhru = 14
+
+    def full(value):
+        return np.full(nhru, value)
+
+    def at(default, **by_hru):
+        arr = full(default)
+        for key, value in by_hru.items():
+            arr[int(key[1:])] = value
+        return arr
+
+    hru_rain = at(0.0, h0=0.2, h2=0.3, h3=0.2, h4=0.1, h5=0.05)
+    hru_snow = at(0.0, h5=1.0e-7, h6=5.0e-7, h7=5.0e-7, h11=5.0e-7)
+    zeros = full(0.0)
+    return {
+        # in/out state + outputs
+        "net_ppt": zeros.copy(),
+        "net_rain": zeros.copy(),
+        "net_snow": zeros.copy(),
+        "intcp_changeover": zeros.copy(),
+        "intcp_evap": zeros.copy(),
+        "intcp_form": np.zeros(nhru, dtype=np.int64),
+        "intcp_stor": at(
+            0.0,
+            h0=0.1,
+            h1=0.05,
+            h2=0.04,
+            h6=0.2,
+            h7=0.2,
+            h8=0.04,
+            h9=0.04,
+            h10=0.04,
+            h11=0.01,
+            h12=0.2,
+            h13=0.05,
+        ),
+        "intcp_transp_on": at(1, h2=0, h10=0).astype(np.int64),
+        "hru_intcpevap": zeros.copy(),
+        "hru_intcpstor": zeros.copy(),
+        "hru_intcpstor_change": zeros.copy(),
+        "pptmix": at(0.0, h5=1.0, h6=1.0),
+        "hru_intcpstor_old": zeros.copy(),
+        # inputs
+        "pk_ice_prev": at(0.0, h4=1.0),
+        "freeh2o_prev": zeros.copy(),
+        "transp_on": at(1.0, h1=0.0, h8=0.0, h9=0.0),
+        "hru_ppt": hru_rain + hru_snow,
+        "hru_rain": hru_rain,
+        "hru_snow": hru_snow,
+        "potet": at(0.1, h13=-0.1),
+        # parameters
+        "cov_type": at(3, h0=0, h3=1, h4=1).astype(np.int64),
+        "covden_sum": at(0.8, h9=0.5, h10=0.0, h13=0.0),
+        "covden_win": at(0.3, h8=0.0, h9=0.9),
+        "srain_intcp": full(0.1),
+        "wrain_intcp": full(0.05),
+        "snow_intcp": at(0.1, h7=0.5),
+        "potet_sublim": at(0.5, h7=1.5),
+    }
+
+
+def test_canopy_kernel_units(canopy_data):
+    out = assert_kernel_dimensionally_consistent(
+        PRMSCanopy, canopy_data, patches=CANOPY_PATCHES
+    )
+    # each case did what the fixture says (the harness already required
+    # every line to run; these pin WHICH hru ran it)
+    assert out["intcp_changeover"][0] == 0.1  # extra_water
+    assert out["intcp_changeover"][1] > 0.0
+    assert out["intcp_evap"][1] == 0.05  # store evaporated whole
+    assert out["intcp_stor"][2] == 0.1  # intercepted up to srain_intcp
+    assert out["intcp_stor"][3] == 0.1  # grasses intercept (summer cap)
+    assert out["net_rain"][4] == 0.1  # grasses under a snowpack
+    assert out["pptmix"][5] == 0.0 and out["net_snow"][5] == 0.0
+    assert out["intcp_form"][6] == 1 and out["intcp_evap"][6] == 0.05
+    assert out["hru_intcpevap"][7] == pytest.approx(0.1)  # capped at potet
+    assert out["intcp_stor"][8] == 0.0
+    assert out["intcp_changeover"][9] == 0.0
+    assert out["intcp_evap"][9] == pytest.approx(0.04 * 0.5 / 0.9)
+    assert out["intcp_stor"][10] == 0.0
+    assert out["intcp_changeover"][10] == pytest.approx(0.04 * 0.3)
+    assert out["intcp_form"][11] == 1 and out["intcp_stor"][11] == 0.0
+    assert out["intcp_evap"][11] == pytest.approx(0.01 + 5.0e-7)
+    assert out["intcp_stor"][12] == pytest.approx(0.1)
+    assert out["intcp_evap"][12] == 0.1
+    assert out["intcp_evap"][13] == 0.0
+    assert out["intcp_stor"][13] == pytest.approx(0.05)
+
+
+@pytest.mark.parametrize(
+    "dropped, error, match",
+    [
+        # a bare float compared with an inches Quantity
+        ("_NEARZERO", ValueError, "Cannot compare"),
+        ("_DNEARZERO", ValueError, "Cannot compare"),
+        # a bare 0.0 scaled by cov is dimensionless, then compared with
+        # potet (inches)
+        ("_ZERO_INCHES", pint.DimensionalityError, "dimensionless"),
+        # the compiled helper cannot type a Quantity
+        ("intercept", numba.core.errors.TypingError, "nopython"),
+    ],
+)
+def test_canopy_patches_are_load_bearing(canopy_data, dropped, error, match):
+    """Each patch is needed: without it the Quantity run fails."""
+    patches = {kk: vv for kk, vv in CANOPY_PATCHES.items() if kk[1] != dropped}
+    assert len(patches) == len(CANOPY_PATCHES) - 1
+    with pytest.raises(error, match=match):
+        run_quantified(PRMSCanopy, canopy_data, patches=patches)

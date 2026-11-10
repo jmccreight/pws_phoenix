@@ -407,11 +407,22 @@ silently converts a compatible-but-wrong-scale assignment, e.g. cubic
 feet into an acre-inches array -- the magnitude comparison is what
 catches that). Convention (JLM): `1/day` coefficients keep their
 declaration; the harness multiplies the `PER_DAY` set by `1 day`
-before the call (dropping it fails at `stor - flow`). Pilot = the
-groundwater family (no implicit-unit literals). Sweep: one kernel per
-PR; hoist implicit-unit literals (`32.0`, dnearzero, 5/9) to named
-module floats the test monkeypatches to Quantities; monkeypatch helper
-njit Dispatchers to their `.py_func`; settle STARFIT
+before the call (dropping it fails at `stor - flow`). Harness:
+`tests/kernel_units.py` (`patches=` swaps module attributes for the
+Quantity run). Done: the groundwater family (no literals), PRMSCanopy
+(Nov 9, 2026). pint accepts a bare zero in `+` and comparisons but NOT
+assigned into a dimensional array or after scaling (`0.0 * cov >
+potet`), so a kernel's zeros of a working unit are a named module
+float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code
+unchanged), as are thresholds (`_NEARZERO`); helper njit Dispatchers
+are patched to their `.py_func`; each patch has a must-fail test.
+pint checks only what executes, so the harness REQUIRES every line of
+the kernel and patched helpers to run (`sys.settrace` vs the code
+object's line table); a line no input can reach carries
+`# units-test: unreachable (<reason>)` in the kernel source, reviewed
+by eye. Statement coverage, not paths (canopy: 0 marked lines; 8
+untaken false-branch arcs, coverage.py `--cov-branch`).
+Sweep: one kernel per PR; also hoist `32.0`, 5/9; settle STARFIT
 `lake_release_sub`/`lake_spill_sub` (cms hourly but io units in daily
 mode; declared cms).
 
