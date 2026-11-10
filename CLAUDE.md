@@ -155,7 +155,7 @@ IO primitives), `discretization.py` (`Discretization`), `maps.py` (`Map` +
 `MapMPI`; formerly `map.py`),
 `process.py` (`DataArrayMeta` + the `Process` ABC), `model.py` (`Model`
 serial + `ModelMPI` streaming), `config.py` (minimal yaml ->
-`(process_dict, control, maps)`; a probe for the `Options` design),
+`(process_dict, control, maps, discretizations)`; a probe for the `Options` design),
 `processes_concrete.py` (the toy Upper/Lower processes), and
 `hydrology/` (REAL pywatershed process ports, mirroring pywatershed's
 `hydrology/` module structure -- one process per module; see "Porting
@@ -317,7 +317,8 @@ The "Global" item is split into two objects with different lifetimes and reach
 - **`Options`** (not yet a class) -- construction-time run config, consumed at
   _build_ and baked into processes; a Process never needs it at runtime. The
   Model `control` dict plays this role today. (`config.load_model_yaml` --
-  a minimal yaml -> `(process_dict, control, maps)` loader, July 2026 -- is
+  a minimal yaml -> `(process_dict, control, maps, discretizations)`
+  loader, July 2026; serial `discretizations:` section Nov 2026 -- is
   a first serialization probe for this design; classes resolve by name via
   `Process._registry`, paths resolve relative to the yaml.)
 
@@ -457,9 +458,9 @@ the `epiweeks` dep).
   topology (networkx, replicating pywatershed's construction EXACTLY --
   a different valid order changes float accumulation downstream; a
   dependency-free ordering is a later step with a tolerance decision).
-  A future `Model.from_yaml()` classmethod (evolution of
-  `config.load_model_yaml`) will construct Discretizations from a yaml
-  section.
+  `config.load_model_yaml` builds serial Discretizations from its
+  `discretizations:` section (Nov 2026); a future `Model.from_yaml()`
+  classmethod is its evolution.
 - **Per-process init hook (IMPLEMENTED July 2026)**:
   `Process.initialize()` (default no-op), called once by the Model
   after binding/ICs/input-validation, before the run loop; contract =
