@@ -167,7 +167,9 @@ def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
     data_dir = mpi_paths["data_dir"]
 
     if style == "yaml":
-        process_dict, control, maps = load_model_yaml(mpi_paths["yaml_file"])
+        process_dict, control, maps, _ = load_model_yaml(
+            mpi_paths["yaml_file"]
+        )
     else:
         if style == "mixed":  # segment data in memory
             lower_data = {
