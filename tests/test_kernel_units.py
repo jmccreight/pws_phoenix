@@ -17,7 +17,9 @@ keep the physical rate; the daily kernels apply it once per step, so
 the test multiplies those parameters by ``1 day`` before the call
 (``PER_DAY``). Pilot kernel: the groundwater family (no implicit-unit
 literals); then PRMSCanopy (implicit-unit module floats + an njit
-helper, patched via the harness). Harness: tests/kernel_units.py.
+helper, patched via the harness); PRMSChannel (a non-field kernel
+argument, dt = s_per_time in seconds; ts in hours used as a sample
+count). Harness: tests/kernel_units.py.
 Synthetic data, CI-able.
 """
 
@@ -33,8 +35,10 @@ from kernel_units import (  # noqa: E402
     run_compiled,
     run_quantified,
 )
-from pws_phoenix.hydrology import prms_canopy  # noqa: E402
+from pws_phoenix.hydrology import prms_canopy, prms_channel  # noqa: E402
 from pws_phoenix.hydrology.prms_canopy import PRMSCanopy  # noqa: E402
+from pws_phoenix.hydrology.prms_channel import PRMSChannel  # noqa: E402
+from pws_phoenix.units import quantity  # noqa: E402
 from pws_phoenix.hydrology.prms_groundwater import (  # noqa: E402
     PRMSGroundwater,
     PRMSGroundwaterNoDprst,
@@ -244,3 +248,104 @@ def test_canopy_patches_are_load_bearing(canopy_data, dropped, error, match):
     assert len(patches) == len(CANOPY_PATCHES) - 1
     with pytest.raises(error, match=match):
         run_quantified(PRMSCanopy, canopy_data, patches=patches)
+
+
+# ----------------------------------------------------------------------
+# channel
+# ----------------------------------------------------------------------
+
+CHANNEL_PATCHES = {
+    (prms_channel, "_ROUTING_STEP_HOURS"): (
+        prms_channel._ROUTING_STEP_HOURS * quantity("hours")
+    ),
+    (prms_channel, "_ZERO_CFS"): prms_channel._ZERO_CFS * quantity("cfs"),
+    (prms_channel, "_ZERO_CUBIC_FEET"): (
+        prms_channel._ZERO_CUBIC_FEET * quantity("cubic feet")
+    ),
+}
+
+
+@pytest.fixture
+def channel_data() -> dict[str, np.ndarray]:
+    """Five segments, one day, every kernel line run (the harness
+    enforces it)::
+
+        0 --> 2 --> 4 --> outlet
+        1 --'      ^
+        3 ---------'
+
+    tsi: 0 within-hour (-1: outflow = inflow), 1 hourly, 2 every two
+    hours (the off hours skip routing), 3 every four, 4 every six.
+    """
+    nseg = 5
+    s_per_time = np.float64(86400.0)
+    lateral_cfs = np.array([1.0, 2.0, 0.5, 3.0, 0.25])
+    tsi = np.array([-1, 1, 2, 4, 6], dtype=np.int64)
+    zeros = np.zeros(nseg)
+    return {
+        # outputs, state and work buffers
+        "seg_lateral_inflow": zeros.copy(),
+        "seg_upstream_inflow": zeros.copy(),
+        "seg_inflow": zeros.copy(),
+        "seg_outflow": zeros.copy(),
+        "seg_stor_change": zeros.copy(),
+        "channel_outflow_vol": zeros.copy(),
+        "inflow_ts": zeros.copy(),
+        "outflow_ts": np.array([1.0, 2.0, 3.0, 3.0, 6.0]),
+        "inflow_ts_prev": np.array([1.0, 2.0, 3.0, 3.0, 6.0]),
+        "seg_current_sum": zeros.copy(),
+        # Map-fed inputs [cubic feet]
+        "seg_sroff_vol": 0.5 * lateral_cfs * s_per_time,
+        "seg_ssres_flow_vol": 0.3 * lateral_cfs * s_per_time,
+        "seg_gwres_flow_vol": 0.2 * lateral_cfs * s_per_time,
+        # topology + coefficients (set directly; c0 + c1 + c2 = 1)
+        "segment_order": np.array([0, 1, 3, 2, 4], dtype=np.int64),
+        "tosegment0": np.array([2, 2, 4, 4, -1], dtype=np.int64),
+        "ts": tsi.clip(1).astype(np.float64),
+        "tsi": tsi,
+        "c0": np.array([0.0, 0.25, 0.2, 0.1, 0.05]),
+        "c1": np.array([1.0, 0.5, 0.5, 0.6, 0.55]),
+        "c2": np.array([0.0, 0.25, 0.3, 0.3, 0.4]),
+        "s_per_time": s_per_time,
+    }
+
+
+def test_channel_kernel_units(channel_data):
+    out = assert_kernel_dimensionally_consistent(
+        PRMSChannel, channel_data, patches=CHANNEL_PATCHES
+    )
+    # within-hour headwater: outflow = inflow, hour by hour
+    assert out["seg_outflow"][0] == out["seg_inflow"][0]
+    # only the outlet sends volume out of the domain
+    assert out["channel_outflow_vol"][4] > 0.0
+    assert np.all(out["channel_outflow_vol"][:4] == 0.0)
+    # seg 2 is fed by 0 and 1
+    assert out["seg_upstream_inflow"][2] > 0.0
+
+
+@pytest.mark.parametrize(
+    "dropped, error, match",
+    [
+        # inflow_ts / ts is cfs / hour, assigned into a cfs array
+        ("_ROUTING_STEP_HOURS", pint.DimensionalityError, "/ hour / second"),
+        # a bare 0.0 assigned into a cfs / cubic feet array
+        (
+            "_ZERO_CFS",
+            pint.DimensionalityError,
+            "from '0.0' to 'foot \\*\\* 3 /",
+        ),
+        (
+            "_ZERO_CUBIC_FEET",
+            pint.DimensionalityError,
+            "from '0.0' to 'foot \\*\\* 3'",
+        ),
+    ],
+)
+def test_channel_patches_are_load_bearing(channel_data, dropped, error, match):
+    """Each patch is needed: without it the Quantity run fails."""
+    patches = {
+        kk: vv for kk, vv in CHANNEL_PATCHES.items() if kk[1] != dropped
+    }
+    assert len(patches) == len(CHANNEL_PATCHES) - 1
+    with pytest.raises(error, match=match):
+        run_quantified(PRMSChannel, channel_data, patches=patches)

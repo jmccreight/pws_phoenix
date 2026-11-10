@@ -4,8 +4,11 @@ on pint Quantity arrays built from the declarations and compare it,
 magnitude for magnitude, to the compiled kernel.
 
 Kernel argument names == declared field names, so the declarations
-drive everything. A field without units (int/bool) is passed as a
-plain array. ``patches`` swaps module attributes for the duration of
+drive everything. A field without units, or of integer dtype, is
+passed as a plain array (an integer field may declare units, e.g.
+the channel's ``tsi`` in hours, but the kernel uses it as an integer:
+``(ihr + 1) % tsi[jseg]``). A kernel argument that is not a field
+takes its units from ``NON_FIELD_UNITS``. ``patches`` swaps module attributes for the duration of
 the Quantity run: implicit-unit module floats (``_NEARZERO``,
 ``_ZERO_INCHES``) become Quantities, and helper njit Dispatchers
 become their ``py_func`` (a Dispatcher cannot take a Quantity).
@@ -39,6 +42,9 @@ from pws_phoenix.process import _resolved_fields
 # convention, Nov 5, 2026)
 PER_DAY = frozenset({"gwflow_coef", "gwsink_coef"})
 
+# kernel arguments that are not fields: argument name -> vocabulary key
+NON_FIELD_UNITS = {"s_per_time": "seconds"}  # the channel's dt
+
 Patches = dict[tuple[Any, str], Any]
 
 UNREACHABLE_MARKER = "# units-test: unreachable"
@@ -71,14 +77,20 @@ def kernel_arg_names(cls: type) -> list[str]:
 def kernel_units(
     cls: type, declared: dict[str, str] | None = None
 ) -> dict[str, str | None]:
-    """Kernel argument -> vocabulary key (None for a unit-less int/bool
-    field): the declaration, or the `declared` override (for the tests
-    that prove a wrong declaration is caught)."""
+    """Kernel argument -> vocabulary key (None = passed plain: no units,
+    or an integer field): the declaration (`NON_FIELD_UNITS` for a
+    non-field argument), or the `declared` override (for the tests that
+    prove a wrong declaration is caught)."""
     fields = _resolved_fields(cls)
-    return {
-        name: (declared or {}).get(name, fields[name].units)
-        for name in kernel_arg_names(cls)
-    }
+    out: dict[str, str | None] = {}
+    for name in kernel_arg_names(cls):
+        if name in fields:
+            meta = fields[name]
+            key = None if np.issubdtype(meta.dtype, np.integer) else meta.units
+        else:
+            key = NON_FIELD_UNITS[name]
+        out[name] = (declared or {}).get(name, key)
+    return out
 
 
 @contextlib.contextmanager

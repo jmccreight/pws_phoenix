@@ -105,6 +105,19 @@ from pws_phoenix.process import DataArrayMeta, Process
 # pywatershed constants.SegmentType.LAKE
 _SEGMENT_TYPE_LAKE = 2
 
+# The kernel's implicit units, named. ts is declared in hours (the
+# init adds 0.5 * ts to kcoef, a travel time in hours), but the kernel
+# divides inflow_ts -- a SUM of hourly cfs samples -- by it as a COUNT
+# of samples: the count is ts / _ROUTING_STEP_HOURS. The zeros are the
+# kernel's working units. numba freezes all three as constants (the
+# compiled code is unchanged: ts / 1.0 == ts exactly); the stage-3
+# units test (tests/test_kernel_units.py) patches them to pint
+# Quantities -- a bare 0.0 cannot be assigned into a cfs array under
+# pint.
+_ROUTING_STEP_HOURS = 1.0
+_ZERO_CFS = 0.0
+_ZERO_CUBIC_FEET = 0.0
+
 
 def muskingum_mann_coefficients(
     ts: np.ndarray,
@@ -521,13 +534,13 @@ class PRMSChannel(Process):
         # muskingum_mann routing -- pywatershed _muskingum_mann_numpy,
         # rewritten in place (its per-day allocations become zeroed
         # buffers)
-        seg_inflow[:] = 0.0
-        seg_outflow[:] = 0.0
-        inflow_ts[:] = 0.0
-        seg_current_sum[:] = 0.0
+        seg_inflow[:] = _ZERO_CFS
+        seg_outflow[:] = _ZERO_CFS
+        inflow_ts[:] = _ZERO_CFS
+        seg_current_sum[:] = _ZERO_CFS
 
         for ihr in range(24):
-            seg_upstream_inflow[:] = 0.0
+            seg_upstream_inflow[:] = _ZERO_CFS
 
             for jseg in segment_order:
                 # current inflow: upstream avg + lateral
@@ -541,7 +554,7 @@ class PRMSChannel(Process):
                 remainder = (ihr + 1) % tsi[jseg]
                 if remainder == 0:
                     # segment routed on the current hour
-                    inflow_ts[jseg] /= ts[jseg]
+                    inflow_ts[jseg] /= ts[jseg] / _ROUTING_STEP_HOURS
                     if tsi[jseg] > 0:
                         # Muskingum routing equation
                         outflow_ts[jseg] = (
@@ -553,7 +566,7 @@ class PRMSChannel(Process):
                         # travel time <= 1 hour: outflow = inflow
                         outflow_ts[jseg] = inflow_ts[jseg]
                     inflow_ts_prev[jseg] = inflow_ts[jseg]
-                    inflow_ts[jseg] = 0.0
+                    inflow_ts[jseg] = _ZERO_CFS
 
                 # daily mean outflow accumulates hourly values
                 seg_outflow[jseg] += outflow_ts[jseg]
@@ -572,7 +585,7 @@ class PRMSChannel(Process):
             if tosegment0[jj] < 0:
                 channel_outflow_vol[jj] = seg_outflow[jj] * s_per_time
             else:
-                channel_outflow_vol[jj] = 0.0
+                channel_outflow_vol[jj] = _ZERO_CUBIC_FEET
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         # dt is SECONDS (s_per_time); 86400.0 for daily PRMS

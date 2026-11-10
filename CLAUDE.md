@@ -410,7 +410,11 @@ declaration; the harness multiplies the `PER_DAY` set by `1 day`
 before the call (dropping it fails at `stor - flow`). Harness:
 `tests/kernel_units.py` (`patches=` swaps module attributes for the
 Quantity run). Done: the groundwater family (no literals), PRMSCanopy
-(Nov 9, 2026). pint accepts a bare zero in `+` and comparisons but NOT
+(Nov 9, 2026), PRMSChannel (Nov 9, 2026: `ts` is declared hours but
+the kernel divides an hourly-sample sum by it as a COUNT ->
+`ts / _ROUTING_STEP_HOURS`; integer fields pass plain even when they
+declare units -- `tsi`; non-field kernel args take units from
+`NON_FIELD_UNITS`, e.g. `s_per_time` seconds). pint accepts a bare zero in `+` and comparisons but NOT
 assigned into a dimensional array or after scaling (`0.0 * cov >
 potet`), so a kernel's zeros of a working unit are a named module
 float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code
