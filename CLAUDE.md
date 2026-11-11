@@ -431,7 +431,16 @@ map through the harness's explicit `ARG_FIELDS` (also needed by the Ag
 and stream-temp kernels); compute_interflow's `c3 = sqrt(...)` is nan
 for `ssres_in < -coef_lin**2/(4 coef_sq)`, reachable only from a state
 initialize() never produces (slow_stor above pref_flow_thrsh). Init
-derivations of the other ports are not yet checked. pint accepts a bare zero in `+` and comparisons but NOT
+derivations of the other ports are not yet checked. PRMSRunoff{NoDprst,}
+(Nov 11, 2026; 5 helpers): no declaration errors; pywatershed's ONE
+`_NEARZERO` is compared against inches, acres and dimensionless ratios
+-> `_NEARZERO_INCHES`/`_NEARZERO_ACRES` beside it (same value); zeros
+in three units (`_ZERO_INCHES`/`_ZERO_ACRES`/`_ZERO_ACRE_INCHES`);
+the bool option `intcp_changeover_in_net_rain` runs both ways with
+coverage accumulated (`fired=`); a patched helper the kernel never
+calls fails coverage (NoDprst omits `dprst_comp`). A must-fail test
+that unexpectedly PASSES marks a path statement coverage missed
+(`_ZERO_ACRES` needed an empty-depression hru). pint accepts a bare zero in `+` and comparisons but NOT
 assigned into a dimensional array or after scaling (`0.0 * cov >
 potet`), so a kernel's zeros of a working unit are a named module
 float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code

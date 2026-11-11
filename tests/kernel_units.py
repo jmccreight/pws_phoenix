@@ -60,6 +60,12 @@ PER_DAY = frozenset(
         "soil2gw_max",
         "fastcoef_sq",
         "slowcoef_sq",
+        # runoff: snowinfil_max (inches/day) caps a step's infiltration;
+        # the depression outflow and seepage rates
+        "snowinfil_max",
+        "dprst_flow_coef",
+        "dprst_seep_rate_open",
+        "dprst_seep_rate_clos",
     }
 )
 
@@ -77,7 +83,11 @@ ARG_FIELDS = {
 }
 
 # kernel arguments that are not fields: argument name -> vocabulary key
-NON_FIELD_UNITS = {"s_per_time": "seconds"}  # the channel's dt
+# (None = passed plain)
+NON_FIELD_UNITS: dict[str, str | None] = {
+    "s_per_time": "seconds",  # the channel's dt
+    "intcp_changeover_in_net_rain": None,  # runoff's bool option
+}
 
 Patches = dict[tuple[Any, str], Any]
 
@@ -274,14 +284,19 @@ def assert_kernel_dimensionally_consistent(
     patches: Patches | None = None,
     require_all_lines: bool = True,
     func: Callable | None = None,
+    fired: dict[types.CodeType, set[int]] | None = None,
 ) -> dict:
     """Quantity run == compiled run, element for element and bit for
     bit, each array read in the units it was BUILT in (inputs come
     back unchanged, outputs are the check); and (`require_all_lines`)
     every unmarked line of the kernel and patched helpers ran. Returns
-    the compiled arrays (for branch asserts)."""
+    the compiled arrays (for branch asserts). `fired` accumulates the
+    executed lines across calls (a kernel option that takes one value
+    per call, e.g. runoff's ``intcp_changeover_in_net_rain``): pass the
+    same dict to each call, ``require_all_lines`` on the last."""
     compiled = run_compiled(cls, data, func)
-    fired: dict[types.CodeType, set[int]] = {}
+    if fired is None:
+        fired = {}
     quantified = run_quantified(
         cls, data, declared=declared, patches=patches, fired=fired, func=func
     )

@@ -22,7 +22,9 @@ argument, dt = s_per_time in seconds; ts in hours used as a sample
 count), and its init derivation muskingum_mann_coefficients (plain
 numpy, run through the harness's ``func=``); the PRMSSoilzone family
 (four helpers, derived fields under other argument names via
-``ARG_FIELDS``, the 1/(inch day) ``*coef_sq``). Harness:
+``ARG_FIELDS``, the 1/(inch day) ``*coef_sq``); the PRMSRunoff family
+(five helpers; zeros and near-zeros in inches, acres and acre-inches;
+a bool kernel option run both ways, coverage accumulated). Harness:
 tests/kernel_units.py.
 Synthetic data, CI-able.
 """
@@ -43,10 +45,15 @@ from kernel_units import (  # noqa: E402
 from pws_phoenix.hydrology import (  # noqa: E402
     prms_canopy,
     prms_channel,
+    prms_runoff,
     prms_soilzone,
 )
 from pws_phoenix.hydrology.prms_canopy import PRMSCanopy  # noqa: E402
 from pws_phoenix.hydrology.prms_channel import PRMSChannel  # noqa: E402
+from pws_phoenix.hydrology.prms_runoff import (  # noqa: E402
+    PRMSRunoff,
+    PRMSRunoffNoDprst,
+)
 from pws_phoenix.hydrology.prms_soilzone import (  # noqa: E402
     PRMSSoilzone,
     PRMSSoilzoneNoDprst,
@@ -765,3 +772,289 @@ def test_ssr2gw_rate_is_exact_only_for_unit_exponent(soilzone_data):
     data["ssr2gw_exp"] = np.full_like(data["ssr2gw_exp"], 0.5)
     with pytest.raises(pint.DimensionalityError, match=r"inch \*\* 0.5"):
         run_quantified(PRMSSoilzone, data, patches=SOILZONE_PATCHES)
+
+
+# ----------------------------------------------------------------------
+# runoff
+# ----------------------------------------------------------------------
+
+
+def acres(value: float) -> pint.Quantity:
+    return value * quantity("acres")
+
+
+def acre_inches(value: float) -> pint.Quantity:
+    return value * quantity("acre-inches")
+
+
+RUNOFF_PATCHES = {
+    (prms_runoff, "_NEARZERO_INCHES"): inches(prms_runoff._NEARZERO_INCHES),
+    (prms_runoff, "_NEARZERO_ACRES"): acres(prms_runoff._NEARZERO_ACRES),
+    (prms_runoff, "_DNEARZERO"): inches(prms_runoff._DNEARZERO),
+    (prms_runoff, "_ZERO_INCHES"): inches(prms_runoff._ZERO_INCHES),
+    (prms_runoff, "_ZERO_ACRES"): acres(prms_runoff._ZERO_ACRES),
+    (prms_runoff, "_ZERO_ACRE_INCHES"): acre_inches(
+        prms_runoff._ZERO_ACRE_INCHES
+    ),
+    (prms_runoff, "_SMIDX_MAX_INCHES"): inches(prms_runoff._SMIDX_MAX_INCHES),
+    (prms_runoff, "perv_comp"): prms_runoff.perv_comp.py_func,
+    (prms_runoff, "check_capacity"): prms_runoff.check_capacity.py_func,
+    (prms_runoff, "imperv_et"): prms_runoff.imperv_et.py_func,
+    (prms_runoff, "compute_infil"): prms_runoff.compute_infil.py_func,
+    (prms_runoff, "dprst_comp"): prms_runoff.dprst_comp.py_func,
+}
+
+
+@pytest.fixture
+def runoff_data() -> dict[str, np.ndarray]:
+    """Twenty hrus, one step (run with intcp_changeover_in_net_rain
+    False and True), together running every line of both runoff kernels
+    and the five helpers (the harness enforces it). Default: a LAND hru
+    of 100 acres, 10% impervious, 5 acres of depressions (60% open),
+    half full; dry.
+
+    0 dry: depression evaporation, seepage only
+    1 rain on a snow-free hru: pervious, impervious and depression
+      runoff
+    2 canopy changeover water; potet below the impervious store
+    3 rain/snow mix with no antecedent pack onto a snowpack: capacity
+      check of the infiltration
+    4 snowmelt from a pack
+    5 snowmelt over capacity: excess above snowinfil_max runs off
+    6 snowmelt that depleted the pack, with rain
+    7 snowmelt that depleted the pack, no rain
+    8 smidx above 25 inches (not physical, reaches it)
+    9 contributing fraction above carea_max (large smidx_coef)
+    10 negative avail_et under full snow cover (hru_intcpevap > potet:
+       not physical, reaches it)
+    11 a lake hru
+    12 sro_to_dprst_* > 1: srp and sri driven negative, clamped (not
+       physical, reaches it)
+    13 nearly empty depressions: no area
+    14 depressions over their maximum volume: full area, spill
+    15 negative va_*_exp: area above its maximum, clamped (not physical,
+       reaches it)
+    16 depression evaporation limited by the unsatisfied ET (10 acres)
+    17 seepage rates above 1/day: volumes driven negative, clamped (not
+       physical, reaches it)
+    18 outflow coefficient above 1/day with no threshold: open volume
+       driven negative, clamped (not physical, reaches it)
+    19 empty depressions: the area stays the bare-zero initial value
+       (_ZERO_ACRES -- statement coverage alone would not need this hru)
+    """
+    nhru = 20
+
+    def full(value, dtype=np.float64):
+        return np.full(nhru, value, dtype=dtype)
+
+    def at(default, dtype=np.float64, **by_hru):
+        arr = full(default, dtype)
+        for key, value in by_hru.items():
+            arr[int(key[1:])] = value
+        return arr
+
+    zeros = full(0.0)
+    rain = dict(h1=0.5, h8=0.5, h9=0.5, h12=0.5, h16=0.5)
+    return {
+        # in/out state + outputs
+        "contrib_fraction": zeros.copy(),
+        "infil": zeros.copy(),
+        "infil_hru": zeros.copy(),
+        "sroff": zeros.copy(),
+        "sroff_vol": zeros.copy(),
+        "hru_sroffp": zeros.copy(),
+        "hru_sroffi": zeros.copy(),
+        "imperv_stor": at(0.0, h10=0.02),
+        "imperv_evap": zeros.copy(),
+        "hru_impervevap": zeros.copy(),
+        "hru_impervstor": zeros.copy(),
+        "hru_impervstor_change": zeros.copy(),
+        "dprst_vol_open": at(6.0, h13=1.0e-8, h14=15.0, h19=0.0),
+        "dprst_vol_clos": at(4.0, h13=1.0e-8, h14=10.0, h19=0.0),
+        "dprst_vol_open_frac": zeros.copy(),
+        "dprst_vol_clos_frac": zeros.copy(),
+        "dprst_vol_frac": zeros.copy(),
+        "dprst_area_open": zeros.copy(),
+        "dprst_area_clos": full(1.0),
+        "dprst_sroff_hru": zeros.copy(),
+        "dprst_seep_hru": zeros.copy(),
+        "dprst_evap_hru": zeros.copy(),
+        "dprst_insroff_hru": zeros.copy(),
+        "dprst_stor_hru": zeros.copy(),
+        "dprst_stor_hru_change": zeros.copy(),
+        "dprst_in": zeros.copy(),
+        # prior state
+        "hru_impervstor_old": zeros.copy(),
+        "dprst_stor_hru_old": zeros.copy(),
+        # inputs
+        "soil_lower_prev": at(1.0, h5=3.0, h8=30.0),
+        "soil_rechr_prev": at(0.5, h5=0.9, h8=0.0),
+        "net_rain": at(0.0, h3=0.2, h6=0.2, **rain),
+        "net_ppt": at(0.0, h3=0.3, h6=0.2, **rain),
+        "net_snow": at(0.0, h3=0.1),
+        "potet": at(0.2, h2=0.01, h10=0.0),
+        "snowmelt": at(0.0, h4=0.3, h5=1.0, h6=0.3, h7=0.3),
+        "snow_evap": zeros.copy(),
+        "pkwater_equiv": at(0.0, h3=0.5, h4=1.0, h5=1.0),
+        "pptmix_nopack": at(0.0, h3=1.0),
+        "snowcov_area": at(0.0, h10=1.0),
+        "through_rain": at(0.0, h3=0.2, **rain),
+        "hru_intcpevap": at(0.01, h10=0.01, h16=0.18),
+        "intcp_changeover": at(0.0, h2=0.3),
+        # parameters + derived
+        "hru_type": at(1, np.int64, h11=2),
+        "hru_area": at(100.0, h16=10.0),
+        "hru_in_to_cf": full(3000.0),
+        "hru_percent_imperv": full(0.1),
+        "imperv_stor_max": full(0.05),
+        "carea_max": full(0.6),
+        "smidx_coef": at(0.005, h9=1.0),
+        "smidx_exp": full(0.3),
+        "soil_moist_max": full(4.0),
+        "snowinfil_max": at(2.0, h5=0.5),
+        "dprst_et_coef": full(1.0),
+        "dprst_flow_coef": at(0.05, h18=3.0),
+        "dprst_frac_open": full(0.6),
+        "dprst_seep_rate_clos": at(0.02, h17=2.0),
+        "dprst_seep_rate_open": at(0.02, h17=2.0),
+        "sro_to_dprst_imperv": at(0.2, h12=2.0),
+        "sro_to_dprst_perv": at(0.2, h12=2.0),
+        "va_open_exp": at(0.5, h15=-0.5),
+        "va_clos_exp": at(0.5, h15=-0.5),
+        "hru_perv": at(85.0, h16=4.0),
+        "hru_frac_perv": at(0.85, h16=0.4),
+        "hru_imperv": at(10.0, h16=1.0),
+        "dprst_area_max": full(5.0),
+        "dprst_area_open_max": full(3.0),
+        "dprst_area_clos_max": full(2.0),
+        "dprst_frac_clos": full(0.4),
+        "dprst_vol_open_max": full(12.0),
+        "dprst_vol_clos_max": full(8.0),
+        "dprst_vol_thres_open": at(6.0, h18=0.0),
+        # option (set per run)
+        "intcp_changeover_in_net_rain": np.bool_(False),
+    }
+
+
+RUNOFF_CLASSES = [PRMSRunoffNoDprst, PRMSRunoff]
+
+
+def runoff_patches(cls) -> dict:
+    """RUNOFF_PATCHES, less dprst_comp for the NoDprst kernel (a
+    patched helper is coverage-traced, so it must be one the kernel
+    calls)."""
+    if cls is PRMSRunoff:
+        return RUNOFF_PATCHES
+    return {
+        kk: vv for kk, vv in RUNOFF_PATCHES.items() if kk[1] != "dprst_comp"
+    }
+
+
+def runoff_both_options(cls, data) -> tuple[dict, dict]:
+    """The kernel under intcp_changeover_in_net_rain False and True,
+    line coverage accumulated over both; returns the compiled arrays
+    of each."""
+    fired: dict = {}
+    out = []
+    for option in (False, True):
+        out.append(
+            assert_kernel_dimensionally_consistent(
+                cls,
+                data | {"intcp_changeover_in_net_rain": np.bool_(option)},
+                patches=runoff_patches(cls),
+                fired=fired,
+                require_all_lines=option,
+            )
+        )
+    return out[0], out[1]
+
+
+@pytest.mark.parametrize("cls", RUNOFF_CLASSES)
+def test_runoff_kernel_units(cls, runoff_data):
+    out, out_in_net_rain = runoff_both_options(cls, runoff_data)
+    # each case did what the fixture says (the harness already required
+    # every line to run; these pin WHICH hru ran it)
+    assert out["infil"][0] == 0.0  # dry
+    assert out["hru_sroffp"][1] > 0.0 and out["hru_sroffi"][1] > 0.0
+    assert out["infil"][2] > 0.0  # changeover water infiltrates ...
+    assert out_in_net_rain["infil"][2] == 0.0  # ... unless in net_rain
+    assert out["imperv_stor"][2] == 0.05  # filled to imperv_stor_max
+    assert out["hru_impervevap"][2] == 0.0  # avail_et exhausted
+    # smidx on the rain part first, then the capacity check
+    assert out["contrib_fraction"][3] > 0.0
+    assert out["infil"][3] > 0.0
+    assert out["infil"][4] == pytest.approx(0.3)  # all melt infiltrates
+    # over capacity: snowinfil_max x 1 day + capacity (4 - 3.9)
+    assert out["infil"][5] == pytest.approx(0.5 + 0.1)
+    assert out["contrib_fraction"][6] > 0.0  # smidx on melt + rain
+    assert out["contrib_fraction"][7] == 0.0  # capacity check
+    assert out["contrib_fraction"][8] == 0.6  # smidx > 25: carea_max
+    assert out["contrib_fraction"][9] == 0.6  # clamped to carea_max
+    assert out["hru_impervevap"][10] == 0.0  # negative, clamped
+    assert out["sroff"][11] == 0.0  # lake
+    if cls is not PRMSRunoff:
+        return
+    assert out["dprst_in"][1] > 0.0
+    assert out["hru_sroffp"][12] == 0.0 and out["hru_sroffi"][12] == 0.0
+    assert out["dprst_area_open"][13] == 0.0
+    assert out["dprst_area_open"][14] == 3.0  # full
+    assert out["dprst_sroff_hru"][14] > 0.0  # spill
+    assert out["dprst_area_open"][15] == 3.0  # clamped
+    assert out["dprst_evap_hru"][16] == pytest.approx(0.2 - 0.18)
+    assert out["dprst_vol_open"][17] == 0.0
+    assert out["dprst_vol_clos"][17] == 0.0
+    assert out["dprst_vol_open"][18] == 0.0
+    assert out["dprst_area_open"][19] == 0.0
+
+
+@pytest.mark.parametrize(
+    "dropped, error, match",
+    [
+        # a bare float compared with a Quantity
+        ("_NEARZERO_INCHES", ValueError, "Cannot compare"),
+        ("_NEARZERO_ACRES", ValueError, "Cannot compare"),
+        ("_DNEARZERO", ValueError, "Cannot compare"),
+        ("_SMIDX_MAX_INCHES", ValueError, "Cannot compare"),
+        # a bare 0.0 assigned into a dimensional array (acre-inches:
+        # dprst_in's bare start divided by hru_area is 1/acre)
+        ("_ZERO_INCHES", pint.DimensionalityError, "from '0.0' to 'inch'"),
+        ("_ZERO_ACRES", pint.DimensionalityError, "from '0.0' to 'acre'"),
+        (
+            "_ZERO_ACRE_INCHES",
+            pint.DimensionalityError,
+            "from '0.0 / acre' to 'inch'",
+        ),
+        # a compiled helper cannot type a Quantity
+        ("perv_comp", numba.core.errors.TypingError, "nopython"),
+        ("check_capacity", numba.core.errors.TypingError, "nopython"),
+        ("imperv_et", numba.core.errors.TypingError, "nopython"),
+        ("compute_infil", numba.core.errors.TypingError, "nopython"),
+        ("dprst_comp", numba.core.errors.TypingError, "nopython"),
+    ],
+)
+def test_runoff_patches_are_load_bearing(runoff_data, dropped, error, match):
+    """Each patch is needed: without it the Quantity run fails."""
+    patches = {kk: vv for kk, vv in RUNOFF_PATCHES.items() if kk[1] != dropped}
+    assert len(patches) == len(RUNOFF_PATCHES) - 1
+    with pytest.raises(error, match=match):
+        run_quantified(PRMSRunoff, runoff_data, patches=patches)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "snowinfil_max",
+        "dprst_flow_coef",
+        "dprst_seep_rate_open",
+        "dprst_seep_rate_clos",
+    ],
+)
+def test_runoff_per_day_is_load_bearing(runoff_data, name):
+    """Each runoff rate needs its 1 day: without it the run fails."""
+    with pytest.raises(pint.DimensionalityError, match="day"):
+        run_quantified(
+            PRMSRunoff,
+            runoff_data,
+            patches=RUNOFF_PATCHES,
+            per_day=PER_DAY - {name},
+        )
