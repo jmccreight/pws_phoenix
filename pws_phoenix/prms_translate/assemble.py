@@ -126,6 +126,45 @@ def requested_output_names(
     return kept, dropped
 
 
+def seg_inflow_from_segment_flow_init(
+    segment_flow_init: xr.DataArray, tosegment: xr.DataArray
+) -> xr.DataArray:
+    """PRMS's segment_flow_init -> the starting seg_inflow: each
+    segment's initial flow becomes its downstream segment's inflow.
+    pywatershed's channel initialization VERBATIM, including the
+    ASSIGNMENT at confluences (the last upstream segment in index
+    order wins, not the sum). `tosegment` is 1-based, 0 = outlet."""
+    tosegment0 = tosegment.values - 1
+    seg_inflow = np.zeros(segment_flow_init.shape, dtype=np.float64)
+    for iseg in range(tosegment0.shape[0]):
+        jseg = tosegment0[iseg]
+        if jseg < 0:
+            continue
+        seg_inflow[jseg] = segment_flow_init.values[iseg]
+    return xr.DataArray(seg_inflow, dims=segment_flow_init.dims)
+
+
+def prms_initial_state(params: xr.Dataset) -> dict[str, xr.DataArray]:
+    """Translate PRMS's initial-condition PARAMETERS into pws_phoenix
+    supplied initial state: restart variables under their OWN names.
+    PRMS consumes state from parameters; pws_phoenix does not -- this
+    is the one place that convention lives. Only names present in
+    `params` are translated (an absent one leaves the state to the
+    process's initialize() default).
+
+    - gwres_stor <- gwstor_init (a rename).
+    - seg_inflow <- segment_flow_init, propagated one segment
+      downstream (seg_inflow_from_segment_flow_init)."""
+    state: dict[str, xr.DataArray] = {}
+    if "gwstor_init" in params:
+        state["gwres_stor"] = params["gwstor_init"]
+    if "segment_flow_init" in params:
+        state["seg_inflow"] = seg_inflow_from_segment_flow_init(
+            params["segment_flow_init"], params["tosegment"]
+        )
+    return state
+
+
 def assemble_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
@@ -305,9 +344,15 @@ def assemble_from_control(
         for name, path in cfg.dyn_param_paths.items()
     }
 
+    # PRMS initial-condition parameters -> supplied state, given to the
+    # process that owns each restart variable
+    initial_state = prms_initial_state(params)
+    for entry in process_dict.values():
+        for name in entry["class"].get_restart_variables():
+            if name in initial_state:
+                entry[name] = initial_state[name]
+
     for grid, gg in spec["required"].items():
-        for init_name, info in gg["initial_values"].items():
-            process_dict[info["process"]][init_name] = params[init_name]
         for name, info in gg["external_inputs"].items():
             consumer = info["consumers"][0]
             if name in dyn_inputs:

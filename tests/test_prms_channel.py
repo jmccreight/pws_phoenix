@@ -59,6 +59,7 @@ from pws_phoenix.hydrology.prms_snow import PRMSSnow
 from pws_phoenix.hydrology.prms_soilzone import PRMSSoilzone
 from pws_phoenix.maps import Map
 from pws_phoenix.model import Model
+from pws_phoenix.prms_translate import seg_inflow_from_segment_flow_init
 
 DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
 GEN_DIR = DOMAIN_DIR / "output"
@@ -269,13 +270,18 @@ def model_run(request, channel_parameters, weights, tmp_path_factory):
             "class": PRMSGroundwater,
             "discretization": "nhru",
             "parameters": gw_parameters,
-            "gwstor_init": gw_parameters["gwstor_init"],
+            "gwres_stor": gw_parameters["gwstor_init"],
         },
         "prms_channel": {
             "class": PRMSChannel,
             "discretization": "nsegment",
             "parameters": channel_parameters,
-            "segment_flow_init": channel_parameters["segment_flow_init"],
+            "seg_inflow": seg_inflow_from_segment_flow_init(
+                channel_parameters["segment_flow_init"],
+                xr.load_dataset(DOMAIN_DIR / "parameters_dis_seg.nc")[
+                    "tosegment"
+                ],
+            ),
         },
     }
     maps = {

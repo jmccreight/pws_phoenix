@@ -50,12 +50,13 @@ Schema (maps and discretizations optional):
       upper:
         class: Upper
         discretization: hru
+        flow: flow_initial.nc
       lower:
         class: Lower
         discretization: segment
         parameters: low_params.nc
         forcing_low: forcing_low.nc
-        storage_initial: storage_initial.nc
+        storage: storage_initial.nc
     maps:
       hru_to_seg:
         class: MapMPI

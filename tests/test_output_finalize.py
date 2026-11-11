@@ -23,13 +23,13 @@ def _process_dict(toy_ds):
         "upper": {
             "class": Upper,
             "forcing_up": toy_ds["forcing_up"],
-            "flow_initial": toy_ds["flow_initial"],
+            "flow": toy_ds["flow_initial"],
             "parameters": toy_ds[PARAM_NAMES],
         },
         "lower": {
             "class": Lower,
             "forcing_low": toy_ds["forcing_low"],
-            "storage_initial": toy_ds["storage_initial"],
+            "storage": toy_ds["storage_initial"],
             "parameters": toy_ds[PARAM_NAMES],
         },
     }

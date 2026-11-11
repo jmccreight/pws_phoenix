@@ -42,7 +42,7 @@ import numpy as np
 import pytest
 import xarray as xr
 from mpi4py import MPI
-from conftest import PWS_TEST_DATA
+from conftest import PWS_TEST_DATA, cold_start_state
 from pws_phoenix.hydrology.prms_groundwater import PRMSGroundwater
 from pws_phoenix.maps import Map, MapMPI
 from pws_phoenix.model import Model, ModelMPI
@@ -115,7 +115,6 @@ def toy_paths(tmp_dir, dimensions, make_two_grid_toy):
                     param_up_0=toy["up_params"]["param_up_0"],
                     param_up_1=toy["up_params"]["param_up_1"],
                     param_shared_name=toy["up_params"]["param_shared_name"],
-                    flow_initial=toy["up_flow_initial"],
                 ),
             ).to_netcdf(paths[key])
     comm.Barrier()
@@ -131,13 +130,19 @@ def toy_run(toy_paths, two_grid_weights):
 
     def build_mpi(input_key, out_name, extra_control):
         process_dict = {
-            "upper": {"class": Upper, "discretization": "hru"},
+            "upper": {
+                "class": Upper,
+                "discretization": "hru",
+                **cold_start_state(extra_control, flow=toy["up_flow_initial"]),
+            },
             "lower": {
                 "class": Lower,
                 "discretization": "segment",
                 "parameters": toy["low_params"],
                 "forcing_low": toy["forcing_low"],
-                "storage_initial": toy["low_storage_initial"],
+                **cold_start_state(
+                    extra_control, storage=toy["low_storage_initial"]
+                ),
             },
         }
         maps = {
@@ -204,14 +209,12 @@ def toy_run(toy_paths, two_grid_weights):
                 "discretization": "hru",
                 "parameters": toy["up_params"],
                 "forcing_up": toy["forcing_up"],
-                "flow_initial": toy["up_flow_initial"],
             },
             "lower": {
                 "class": Lower,
                 "discretization": "segment",
                 "parameters": toy["low_params"],
                 "forcing_low": toy["forcing_low"],
-                "storage_initial": toy["low_storage_initial"],
             },
         }
         maps = {
@@ -328,7 +331,7 @@ def gw_paths(tmp_dir):
         ]
         combined = xr.merge(
             [
-                proc_params[["gwflow_coef", "gwsink_coef", "gwstor_init"]],
+                proc_params[["gwflow_coef", "gwsink_coef"]],
                 dis_hru[["hru_area", "hru_in_to_cf"]],
                 *forcings,
             ],
@@ -348,11 +351,18 @@ def gw_run(gw_paths):
     """The recipe on drb groundwater; every collective lives here."""
     restart_dir = gw_paths["restart_dir"]
 
+    # PRMS gwstor_init = the supplied gwres_stor (full extent, every
+    # rank; each takes its block)
+    gwres_stor = xr.load_dataset(DOMAIN_DIR / "parameters_PRMSGroundwater.nc")[
+        "gwstor_init"
+    ]
+
     def build(input_key, out_name, extra_control):
         process_dict = {
             "prms_groundwater": {
                 "class": PRMSGroundwater,
                 "discretization": "nhru",
+                **cold_start_state(extra_control, gwres_stor=gwres_stor),
             },
         }
         control = {

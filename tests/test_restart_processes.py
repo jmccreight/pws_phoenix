@@ -29,7 +29,7 @@ disk forcings, served full-length with only the first n days run.
 import numpy as np
 import pytest
 import xarray as xr
-from conftest import PWS_TEST_DATA
+from conftest import PWS_TEST_DATA, cold_start_state
 from pws_phoenix.atmosphere.prms_atmosphere import PRMSAtmosphere
 from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
 from pws_phoenix.discretization import Discretization
@@ -49,6 +49,7 @@ from pws_phoenix.hydrology.prms_stream_temp import (
 )
 from pws_phoenix.maps import Map
 from pws_phoenix.model import Model
+from pws_phoenix.prms_translate import seg_inflow_from_segment_flow_init
 from pws_phoenix.process import DataArrayMeta, Process
 
 DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
@@ -113,7 +114,9 @@ def test_groundwater(tmp_path):
                 "class": PRMSGroundwater,
                 "discretization": "nhru",
                 "parameters": gw_params,
-                "gwstor_init": gw_params["gwstor_init"],
+                **cold_start_state(
+                    control, gwres_stor=gw_params["gwstor_init"]
+                ),
                 **{
                     nn: _hru_forcing(nn)
                     for nn in ("soil_to_gw", "ssr_to_gw", "dprst_seep_hru")
@@ -411,7 +414,9 @@ def test_full_chain(tmp_path):
                 "class": PRMSGroundwater,
                 "discretization": "nhru",
                 "parameters": gw_params,
-                "gwstor_init": gw_params["gwstor_init"],
+                **cold_start_state(
+                    control, gwres_stor=gw_params["gwstor_init"]
+                ),
             },
             "humidity_carrier": {
                 "class": HumidityCarrier,
@@ -422,7 +427,13 @@ def test_full_chain(tmp_path):
                 "class": PRMSChannel,
                 "discretization": "nsegment",
                 "parameters": channel_params,
-                "segment_flow_init": channel_params["segment_flow_init"],
+                **cold_start_state(
+                    control,
+                    seg_inflow=seg_inflow_from_segment_flow_init(
+                        channel_params["segment_flow_init"],
+                        dis_seg["tosegment"],
+                    ),
+                ),
             },
             "prms_hydraulic_geometry": {
                 "class": PRMSHydraulicGeometryWidthOnly,

@@ -35,12 +35,9 @@ class _Bucket(Process):
 
     leak_coef = _meta("parameter", "fraction leaving per step", units=None)
     inflow = _meta("input", "inflow")
-    storage = _meta(
-        "variable", "storage", restart=True, initial="storage_init"
-    )
-    storage_prev = _meta(
-        "variable", "storage, previous step", initial="storage_init"
-    )
+    storage = _meta("variable", "storage", restart=True)
+    # set by advance() before any calculate()
+    storage_prev = _meta("variable", "storage, previous step")
     outflow = _meta("variable", "outflow")
     storage_change = _meta("variable", "storage - storage_prev")
 
@@ -241,7 +238,7 @@ def _inputs(rng):
         "parameters": xr.Dataset(
             {"leak_coef": ("space", rng.uniform(0.1, 0.5, N_SPACE))}
         ),
-        "storage_init": xr.DataArray(
+        "storage": xr.DataArray(
             rng.uniform(1.0, 3.0, N_SPACE), dims=("space",)
         ),
     }
@@ -254,7 +251,7 @@ def _model(cls, control, rng_seed=0):
         "class": cls,
         "inflow": inp["inflow"],
         "parameters": inp["parameters"],
-        "storage_init": inp["storage_init"],
+        "storage": inp["storage"],
     }
     if cls is _ExchangeBucket:
         entry["exchange"] = inp["exchange"]

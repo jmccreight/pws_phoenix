@@ -55,7 +55,6 @@ class Upper(Process):
         dims=("space",),
         dtype=np.float64,
         description="Flow (public -- shared downstream with Lower)",
-        initial="flow_initial",
         restart=True,  # prognostic; flow_previous regenerates at advance
     )
     flow_previous = DataArrayMeta(
@@ -128,7 +127,6 @@ class Lower(Process):
         dims=("space",),
         dtype=np.float64,
         description="Storage",
-        initial="storage_initial",
         restart=True,  # prognostic; storage_previous regenerates
     )
     storage_previous = DataArrayMeta(

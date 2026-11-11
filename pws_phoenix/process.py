@@ -61,7 +61,7 @@ class DataArrayMeta:
             forcing_up  = DataArrayMeta(kind="input",     dims=("space",),
                                        dtype=np.float64)
             flow       = DataArrayMeta(kind="variable",  dims=("space",),
-                                       dtype=np.float64, initial="flow_initial")
+                                       dtype=np.float64, restart=True)
     """
 
     kind: Literal[
@@ -79,14 +79,19 @@ class DataArrayMeta:
     dims: tuple[str, ...]
     dtype: type
     description: str = ""
-    initial: str | None = None  # kwarg name supplying initial values
     # PROGNOSTIC state marker (kind="variable" only): the variable
     # belongs in a restart file -- the minimal set that, restored at a
     # time step, reproduces the continuous run exactly (the perfect-
-    # restart tests police completeness). Flag CURRENT state variables
-    # only, never their *_prev copies: advance() runs before any
-    # calculate(), so restored currents regenerate the prevs. Also the
-    # natural cut at the prognostic variables for state-updating
+    # restart tests police completeness). It is also the INITIAL-STATE
+    # surface: at a cold start initialize() sets each restart
+    # variable's DEFAULT, and a value supplied in the process_dict
+    # entry under the variable's OWN name overrides it (Nov 2026;
+    # replaced the `initial=` seams). Not checked for nan: nan is a
+    # legitimate state value for some (e.g. stream temp's
+    # never-has-flow marker, FlowGraph union rows). Flag CURRENT state
+    # variables only, never their *_prev copies: advance() runs before
+    # any calculate(), so restored currents regenerate the prevs. Also
+    # the natural cut at the prognostic variables for state-updating
     # techniques (JLM, Aug 2026).
     restart: bool = False
     # SUPPLY-OR-DERIVE provenance (kind="parameter" only). THE

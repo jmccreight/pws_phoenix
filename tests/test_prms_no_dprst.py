@@ -334,13 +334,14 @@ def groundwater_pair(tmp_path_factory):
     forcings = _load_forcings(GW_INPUT_NAMES)
 
     params_full = xr.load_dataset(DOMAIN_DIR / "parameters_PRMSGroundwater.nc")
-    # gwstor_init must be supplied: an absent initial= name fills the
-    # state with nan silently (model.py), and nan == nan passes
-    # assert_array_equal -- the budget caught this test running on nan.
+    # gwres_stor supplied (PRMS gwstor_init under its own name) so
+    # both runs start from the same data value; the budget once caught
+    # this test running on nan state (nan == nan passes
+    # assert_array_equal) -- PRMSGroundwater now defaults to 2.0.
     forcings_full = (
         dict(forcings)
         | _zero_forcings(("dprst_seep_hru",), forcings["soil_to_gw"])
-        | {"gwstor_init": params_full["gwstor_init"]}
+        | {"gwres_stor": params_full["gwstor_init"]}
     )
     full = _run_one(
         "prms_groundwater",
@@ -358,7 +359,7 @@ def groundwater_pair(tmp_path_factory):
         "prms_groundwater",
         PRMSGroundwaterNoDprst,
         params_nodprst,
-        forcings | {"gwstor_init": params_nodprst["gwstor_init"]},
+        forcings | {"gwres_stor": params_nodprst["gwstor_init"]},
         GW_COMPARE_NAMES,
         out_dir,
     )

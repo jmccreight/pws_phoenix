@@ -37,9 +37,10 @@ process node (an HTML-like table): a white header (the process --
 computed) over gray sections for the required parameters (authored
 static | time-varying, classified from the declared dims; DERIVABLE
 -- required but obtainable by their declared derivation -- as their
-own section), the ``initial=`` value seams, and the RESTARTABLE
-INITIAL STATE (every ``restart=True`` variable is a settable
-initial condition -- a warm start supplies all of them). Section
+own section), and the RESTARTABLE INITIAL STATE (every
+``restart=True`` variable is a settable initial condition --
+supplied per variable under its own name, or all at once by a warm
+start). Section
 headers always carry counts; ``show_params=True`` expands the
 names. External inputs are gray nodes. Together with the edges,
 that IS the contract: gray = you supply it, white = the model
@@ -109,8 +110,7 @@ class ModelContractGraph:
         # -- the supply side of the contract, per process: required
         # parameters (authored static vs time-varying, classified
         # from the declared dims; DERIVABLE ones -- carrying a
-        # declared derivation -- are their own class) and the
-        # initial-value seams --
+        # declared derivation -- are their own class) --
         self.parameters: dict[str, dict[str, list[str]]] = {}
         for slot, entry in process_dict.items():
             static: list[str] = []
@@ -130,14 +130,9 @@ class ModelContractGraph:
                 "cyclic": cyclic,
                 "derivable": derivable,
             }
-        self.initial_values: dict[str, list[str]] = {}
-        for grid, gg in spec["required"].items():
-            for init_name, info in gg["initial_values"].items():
-                self.initial_values.setdefault(info["process"], []).append(
-                    init_name
-                )
         # every restart=True variable is a settable initial condition
-        # (a warm start supplies all of them; see Model.write_restart)
+        # (supplied per variable under its own name, or all at once by
+        # a warm start; see Model.write_restart)
         self.restart_vars: dict[str, list[str]] = {
             slot: list(entry["class"].get_restart_variables())
             for slot, entry in process_dict.items()
@@ -226,8 +221,8 @@ class ModelContractGraph:
     def _dot_table(self, slot: str, cls_name: str) -> str:
         """The process node as an HTML-like table: a white header (the
         process -- computed) over GRAY sections for everything the
-        modeler supplies -- parameters (static | time-varying),
-        initial values, and the restartable initial state. Section
+        modeler supplies -- parameters (static | time-varying) and
+        the restartable initial state. Section
         headers always show counts; ``show_params=True`` expands the
         names."""
 
@@ -266,9 +261,6 @@ class ModelContractGraph:
                     pp["derivable"],
                 )
             )
-        inits = self.initial_values.get(slot, [])
-        if inits:
-            rows.append(section(f"initial values: {len(inits)}", inits))
         state = self.restart_vars.get(slot, [])
         if state:
             rows.append(
@@ -307,12 +299,6 @@ class ModelContractGraph:
                 out.append(f'    ext_{name}(["{name}"])')
                 for consumer in consumers:
                     out.append(f"    ext_{name} --> {consumer}")
-        for slot, inits in self.initial_values.items():
-            for init_name in inits:
-                out.append(
-                    f'    init_{init_name}(["initial value: {init_name}"])'
-                )
-                out.append(f"    init_{init_name} --> {slot}")
         for (src_grid, tgt_grid), ww in self.map_weights.items():
             label = (
                 f"Map weights: {ww['count']} "

@@ -29,6 +29,8 @@ from pws_phoenix.prms_translate.assemble import (
     assemble_from_control,
     insert_flow_graph,
     model_from_control,
+    prms_initial_state,
+    seg_inflow_from_segment_flow_init,
 )
 from pws_phoenix.prms_translate.assemble_mpi import (
     mpi_model_from_control,
@@ -70,8 +72,10 @@ __all__ = [
     "mpi_model_from_control",
     "digest_array",
     "package_parameters",
+    "prms_initial_state",
     "prms_metadata",
     "resolve_classes",
+    "seg_inflow_from_segment_flow_init",
     "verify_preprocessed",
     "volume_map_weights",
     "write_mpi_input_file",

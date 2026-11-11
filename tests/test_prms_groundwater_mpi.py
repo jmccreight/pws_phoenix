@@ -98,7 +98,7 @@ def mpi_paths():
         ]
         combined = xr.merge(
             [
-                proc_params[["gwflow_coef", "gwsink_coef", "gwstor_init"]],
+                proc_params[["gwflow_coef", "gwsink_coef"]],
                 dis_hru[["hru_area", "hru_in_to_cf"]],
                 *forcings,
             ],
@@ -132,6 +132,11 @@ def mpi_run(mpi_paths):
         "prms_groundwater": {
             "class": PRMSGroundwater,
             "discretization": "nhru",
+            # PRMS gwstor_init = the supplied gwres_stor (full extent;
+            # each rank takes its block)
+            "gwres_stor": xr.load_dataset(
+                DOMAIN_DIR / "parameters_PRMSGroundwater.nc"
+            )["gwstor_init"],
         },
     }
     control = {

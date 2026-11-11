@@ -81,7 +81,7 @@ def model_run(parameters, tmp_path_factory):
             "class": PRMSGroundwater,
             "discretization": "nhru",
             "parameters": parameters,
-            "gwstor_init": parameters["gwstor_init"],
+            "gwres_stor": parameters["gwstor_init"],
             **forcings,
         },
     }

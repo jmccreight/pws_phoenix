@@ -182,9 +182,8 @@ def test_dot(nhm_graph):
 
 
 def test_supply_side(nhm_graph):
-    """The contract's supply half: parameter classification, the
-    initial-value seams, and the restartable state -- all sectioned
-    INSIDE the process node."""
+    """The contract's supply half: parameter classification and the
+    restartable state -- all sectioned INSIDE the process node."""
     # classification: dims for static/tv; a declared derivation
     # makes its own class
     atmos = nhm_graph.parameters["prms_atmosphere"]
@@ -192,12 +191,9 @@ def test_supply_side(nhm_graph):
     assert "soltab_potsw" in atmos["derivable"]  # declared derivation
     assert "temp_units" in atmos["static"]
     assert "hru_in_to_cf" in nhm_graph.parameters["prms_runoff"]["derivable"]
-    # initial-value seams attach to their processes
-    assert nhm_graph.initial_values == {
-        "prms_groundwater": ["gwstor_init"],
-        "prms_channel": ["segment_flow_init"],
-    }
     # every restart=True variable is a settable initial condition
+    # (the old initial= seams are gone)
+    assert not hasattr(nhm_graph, "initial_values")
     assert "pkwater_equiv" in nhm_graph.restart_vars["prms_snow"]
     # ... including the generated budget accumulator (restart=True)
     assert nhm_graph.restart_vars["prms_groundwater"] == [
@@ -208,7 +204,7 @@ def test_supply_side(nhm_graph):
     dot = nhm_graph.to_dot()
     assert "<B>prms_snow</B>" in dot
     assert "parameters: 21 static" in dot
-    assert "initial values: 1" in dot
+    assert "initial values" not in dot
     n_snow_state = len(nhm_graph.restart_vars["prms_snow"])
     assert f"initial state (restartable): {n_snow_state}" in dot
     assert "albset_rna" not in dot  # names only with show_params

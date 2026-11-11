@@ -12,8 +12,9 @@ the njit `substep` (pywatershed _calculate_subtimestep_numpy verbatim,
 scalars at [inode]), dispatched by the graph kernel via literal_unroll.
 
 Numerics notes (pywatershed node semantics, kept verbatim):
-- routing state starts at ZERO (the node maker passes no
-  segment_flow_init -- unlike array PRMSChannel).
+- routing state starts at ZERO (pywatershed's node maker passes no
+  segment_flow_init; array PRMSChannel gets a nonzero start only as
+  supplied seg_inflow, translated by prms_translate).
 - storage_change = seg_inflow - seg_outflow in FLOW-RATE units [cfs]
   (the array PRMSChannel multiplies by s_per_time; the node does not).
 - initialize_type computes coefficients over the FULL union arrays:

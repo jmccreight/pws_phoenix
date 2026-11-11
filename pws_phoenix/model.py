@@ -112,6 +112,9 @@ class Model:
 
         self.model_dict: Dict[str, Any] = {}
         self.inputs_dict: Dict[str, Input] = {}
+        # (grid, name) -> the caller's supplied initial-state array
+        # (a reference, not a copy)
+        self._supplied_state: Dict[tuple[str, str], Any] = {}
         self._initialize_inputs_and_proceses()
         del self._process_dict
 
@@ -119,10 +122,13 @@ class Model:
 
         # Warm start (construction-time option): restore the flagged
         # prognostic state written by write_restart() and resume AFTER
-        # the file's state time. Cold start: _start_index = 0.
+        # the file's state time. Cold start: _start_index = 0; the state
+        # is initialize()'s defaults overridden by any supplied state.
         self._start_index = 0
-        if control.get("restart_read") is not None:
-            self._read_restart(pl.Path(control["restart_read"]))
+        restart_read = control.get("restart_read")
+        if restart_read is not None:
+            self._raise_if_supplied_state_with_restart()
+            self._read_restart(pl.Path(restart_read))
 
         # the step cursor: step()/run() continue from here
         self._next_index = self._start_index
@@ -243,15 +249,13 @@ class Model:
           supplied -- you may just generate them instead of authoring
           them. (Under future compute-if-absent semantics this
           category may become optional-with-default.)
-        - "initial_values": {init_name: {"variable", "process"}} --
-          the DataArrayMeta ``initial=`` seams: OPTIONAL direct
-          supplies of a state variable's starting values via a
-          process_dict entry key.
         - "initial_state": {process: [variables]} -- the RESTARTABLE
-          warm-start surface: every ``restart=True`` variable is a
-          settable initial condition, supplied all-at-once via
-          ``control["restart_read"]`` (see ``write_restart``).
-          Optional supply, but part of the contract's surface.
+          state: every ``restart=True`` variable is a settable initial
+          condition, supplied EITHER per variable under its own name in
+          the process's process_dict entry (optional; otherwise
+          initialize() sets it), OR all at once via
+          ``control["restart_read"]`` (see ``write_restart``) -- never
+          both. Optional supply, but part of the contract's surface.
 
         spec["maps"] (present when maps are given) -- REQUIRED supply
         too, kept beside "required" because that dict's keys are
@@ -314,7 +318,6 @@ class Model:
             derivable: Dict[str, Dict[str, Any]] = {}
             internal: Dict[str, List[str]] = {}
             var_owner: Dict[str, str] = {}
-            initial_values: Dict[str, Any] = {}
             initial_state: Dict[str, List[str]] = {}
             for kk in proc_names:
                 pcls = process_dict[kk]["class"]
@@ -329,13 +332,8 @@ class Model:
                         parameters.setdefault(name, []).append(kk)
                 for name in pcls.get_parameters_internal():
                     internal.setdefault(name, []).append(kk)
-                for name, meta in pcls.get_variables().items():
+                for name in pcls.get_variables():
                     var_owner.setdefault(name, kk)
-                    if meta.initial is not None:
-                        initial_values[meta.initial] = {
-                            "variable": name,
-                            "process": kk,
-                        }
                 restartable = list(pcls.get_restart_variables())
                 if restartable:
                     initial_state[kk] = restartable
@@ -404,7 +402,6 @@ class Model:
                 "external_inputs": inputs_external,
                 "parameters": parameters,
                 "derivable_parameters": derivable,
-                "initial_values": initial_values,
                 "initial_state": initial_state,
             }
             if include_optional:
@@ -438,6 +435,7 @@ class Model:
             self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
 
         self._run_initialize_hooks()
+        self._apply_supplied_state()
         self._resolve_maps()
 
     def _set_budget_options(self, control: Dict[str, Any]) -> None:
@@ -499,6 +497,25 @@ class Model:
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             for name in proc.get_parameters_internal():
                 grid_ds[name].values.flags.writeable = False
+
+    def _apply_supplied_state(self) -> None:
+        """Write the supplied initial state (restart variables given in
+        process_dict under their own names) over initialize()'s
+        defaults. FULL-extent arrays; _restore_grid_var writes this
+        rank's block (the restart restore path)."""
+        for (grid, name), values in self._supplied_state.items():
+            self._restore_grid_var(grid, name, np.asarray(values))
+
+    def _raise_if_supplied_state_with_restart(self) -> None:
+        """One source of initial state: a restart and supplied state
+        together would silently let the restart win."""
+        if self._supplied_state:
+            raise ValueError(
+                "control['restart_read'] is set AND initial state is "
+                "supplied in process_dict "
+                f"({sorted(nn for _, nn in self._supplied_state)}): "
+                "use one source."
+            )
 
     def _validate_inputs_resolved(self) -> None:
         """Every declared process input must be present on its grid's shared
@@ -620,16 +637,12 @@ class Model:
                 dims=dims,
                 attrs=attrs,
             )
-            # a declared initial= name is REQUIRED (also under restart_read):
-            # filling silently would start the state as nan
-            if meta.initial is not None:
-                if meta.initial not in init_dict:
-                    raise ValueError(
-                        f"{cls.__name__}.{name} declares "
-                        f"initial={meta.initial!r} but "
-                        f"process_dict[{proc_name!r}] does not supply it."
-                    )
-                da[:] = init_dict[meta.initial]
+            # supplied initial state: a restart variable given in the
+            # process_dict entry under its OWN name (optional). Recorded
+            # here, written AFTER initialize() (_apply_supplied_state)
+            # so it overrides initialize()'s defaults, as a restart does.
+            if meta.restart and name in init_dict:
+                self._supplied_state[(grid, name)] = init_dict[name]
             grid_ds[name] = da
 
     def _resolve_maps(
@@ -1029,6 +1042,8 @@ class ModelMPI(Model):
         # Serial-grid Inputs, advanced in lockstep with the stream (the
         # distributed grid's inputs stream from step.mpi.src instead).
         self.inputs_dict: Dict[str, Input] = {}
+        # (grid, name) -> the caller's supplied initial-state array
+        self._supplied_state: Dict[tuple[str, str], Any] = {}
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._load_all = True  # serial-grid data are small; keep in memory
         self._set_budget_options(control)
@@ -1283,26 +1298,18 @@ class ModelMPI(Model):
 
         ds_mpi_stream.mpi.create(verbose=False)
 
-        # ---- Load initial conditions into state buffers. ICs are the
-        #      space-only vars loaded above (from the file). ----
-        #      A declared initial= name is REQUIRED (also under
-        #      restart_read): filling silently would start the state as nan.
-        for cls in mpi_classes.values():
-            for name, meta in cls.get_variables().items():
-                if meta.initial is None:
-                    continue
-                if meta.initial not in ds_mpi_stream.data_vars:
-                    raise ValueError(
-                        f"{cls.__name__}.{name} declares "
-                        f"initial={meta.initial!r} but the MPI input file "
-                        f"does not carry it."
-                    )
-                ds_mpi_stream[name].values[:] = ds_mpi_stream[
-                    meta.initial
-                ].values
-
         self._ds_mpi_stream = ds_mpi_stream
         self.discretizations[mpi_grid].dataset = ds_mpi_stream
+
+        # The decomposed extent: an allgather of local sizes (scheme
+        # "single" = contiguous rank-ordered blocks). This rank's block
+        # of the global extent is the restore arithmetic for supplied
+        # state (below), restarts, and the Maps' parallel boundary.
+        local_n = int(ds_mpi_stream.sizes[mpi_grid])
+        sizes = comm.allgather(local_n)
+        start = int(sum(sizes[: comm.rank]))
+        n_global = int(sum(sizes))
+        self._decomp_slice = (start, start + local_n)
 
         # ---- Serial grids (Step B): replicated on every rank. Assembled
         #      by the serial machinery, identically on each rank (from
@@ -1323,6 +1330,18 @@ class ModelMPI(Model):
                 self._add_process_fields(kk, grid, grid_ds)
             self.discretizations[grid].dataset = grid_ds
 
+        # ---- Supplied initial state (distributed grid): a restart
+        #      variable given in its process_dict entry under its OWN
+        #      name, FULL extent (a file path was opened just above).
+        #      Recorded here (serial grids: in _add_process_fields, as
+        #      in Model), written after the init hooks; each rank
+        #      restores its own block. ----
+        for kk, cls in mpi_classes.items():
+            entry = self._process_dict[kk]
+            for name in cls.get_restart_variables():
+                if name in entry:
+                    self._supplied_state[(mpi_grid, name)] = entry[name]
+
         self._validate_inputs_resolved()
         # ---- Bind in process_dict (author) order; distributed-grid
         #      processes are rebound to each streaming step in run(). ----
@@ -1334,17 +1353,10 @@ class ModelMPI(Model):
         # Per-process init hooks are LOCAL (collective-free) by contract,
         # so running them inside SPMD assembly is safe.
         self._run_initialize_hooks()
+        self._apply_supplied_state()
 
-        # ---- Maps: configure the parallel boundary, then resolve. The
-        #      decomposed extent comes from an allgather of local sizes
-        #      (scheme "single" = contiguous rank-ordered blocks). ----
-        local_n = int(ds_mpi_stream.sizes[mpi_grid])
-        sizes = comm.allgather(local_n)
-        start = int(sum(sizes[: comm.rank]))
-        n_global = int(sum(sizes))
-        # this rank's block of the global extent (contiguous
-        # rank-ordered) -- also the restart restore/gather arithmetic
-        self._decomp_slice = (start, start + local_n)
+        # ---- Maps: configure the parallel boundary (the decomposed
+        #      extent computed above), then resolve. ----
         for map_name, mm in self.maps.items():
             if mm.target_grid == mpi_grid:
                 raise ValueError(
@@ -1398,6 +1410,7 @@ class ModelMPI(Model):
         #      (SPMD-uniform, no collectives). Recomputes the same
         #      start index located by part 1. ----
         if restart_read is not None:
+            self._raise_if_supplied_state_with_restart()
             self._read_restart(pl.Path(restart_read))
 
     # -- run ------------------------------------------------------------
