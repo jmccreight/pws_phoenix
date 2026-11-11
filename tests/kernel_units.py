@@ -8,12 +8,14 @@ drive everything. A field without units, or of integer dtype, is
 passed as a plain array (an integer field may declare units, e.g.
 the channel's ``tsi`` in hours, but the kernel uses it as an integer:
 ``(ihr + 1) % tsi[jseg]``). A kernel argument that is not a field
-takes its units from ``NON_FIELD_UNITS``.
+takes its units from ``NON_FIELD_UNITS``; one that receives a derived
+field of another name is mapped in ``ARG_FIELDS``.
 
 ``func=`` runs a plain-numpy function instead of the kernel (an
 init-time derivation such as ``muskingum_mann_coefficients``): its
 argument names must also be ``cls``'s field names, and the plain-float
-run of the same function stands in for the compiled run. ``patches`` swaps module attributes for the duration of
+run of the same function stands in for the compiled run. ``patches``
+swaps module attributes for the duration of
 the Quantity run: implicit-unit module floats (``_NEARZERO``,
 ``_ZERO_INCHES``) become Quantities, and helper njit Dispatchers
 become their ``py_func`` (a Dispatcher cannot take a Quantity).
@@ -46,7 +48,33 @@ from pws_phoenix.process import _resolved_fields
 # parameters declared as rates (1/day) that the daily kernels apply
 # once per step; the Quantity run multiplies them by 1 day (JLM's
 # convention, Nov 5, 2026)
-PER_DAY = frozenset({"gwflow_coef", "gwsink_coef"})
+PER_DAY = frozenset(
+    {
+        "gwflow_coef",
+        "gwsink_coef",
+        # soilzone: the 1/day routing rates, the per-day cap
+        # soil2gw_max (inches/day) and the 1/(inch day) coefficients
+        "fastcoef_lin",
+        "slowcoef_lin",
+        "ssr2gw_rate",
+        "soil2gw_max",
+        "fastcoef_sq",
+        "slowcoef_sq",
+    }
+)
+
+# kernel arguments that receive a DERIVED field of another name:
+# argument name -> field name. Upstream's underscore names mark a
+# derived copy beside the raw parameter (``_sat_threshold`` = the
+# ``sat_threshold`` parameter zeroed for lake/inactive HRUs), so the
+# bare argument name is often ALSO a field -- an explicit table, never
+# a fallback rule.
+ARG_FIELDS = {
+    "sat_threshold": "_sat_threshold",
+    "pref_flow_den": "_pref_flow_den",
+    "pref_flow_flag": "_pref_flow_flag",
+    "soil2gw_flag": "_soil2gw_flag",
+}
 
 # kernel arguments that are not fields: argument name -> vocabulary key
 NON_FIELD_UNITS = {"s_per_time": "seconds"}  # the channel's dt
@@ -93,14 +121,16 @@ def kernel_units(
     func: Callable | None = None,
 ) -> dict[str, str | None]:
     """Kernel argument -> vocabulary key (None = passed plain: no units,
-    or an integer field): the declaration (`NON_FIELD_UNITS` for a
-    non-field argument), or the `declared` override (for the tests that
+    or an integer field): the declaration of the argument's field (its
+    own name, or `ARG_FIELDS`; `NON_FIELD_UNITS` for a non-field
+    argument), or the `declared` override (for the tests that
     prove a wrong declaration is caught)."""
     fields = _resolved_fields(cls)
     out: dict[str, str | None] = {}
     for name in kernel_arg_names(cls, func):
-        if name in fields:
-            meta = fields[name]
+        field = ARG_FIELDS.get(name, name)
+        if field in fields:
+            meta = fields[field]
             key = None if np.issubdtype(meta.dtype, np.integer) else meta.units
         else:
             key = NON_FIELD_UNITS[name]

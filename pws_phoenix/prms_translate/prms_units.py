@@ -63,6 +63,8 @@ PRMS_UNITS_BY_NAME: dict[str, str] = {
     "cecn_coef": "cal/(cm^2 delta_degC)",
     "jh_coef": "1/delta_degF",  # PRMS: "per degrees Fahrenheit"
     "soil2gw_max": "inches/day",  # PRMS: "inches"
+    "fastcoef_sq": "1/(inch day)",  # PRMS: dimensionless
+    "slowcoef_sq": "1/(inch day)",  # PRMS: dimensionless
     "tsi": "hours",
     "lso": "days",
 }

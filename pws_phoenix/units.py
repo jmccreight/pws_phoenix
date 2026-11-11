@@ -91,6 +91,7 @@ VOCABULARY: dict[str, str | None] = {
     "1/day": "1 / day",
     "inches/day": "inch / day",
     "1/inch": "1 / inch",
+    "1/(inch day)": "1 / (inch * day)",
     "seconds/m^(1/3)": "second / meter ** (1 / 3)",
     # -- time --
     "days": "day",

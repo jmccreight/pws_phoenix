@@ -420,7 +420,18 @@ declare units -- `tsi`; non-field kernel args take units from
 alone cannot see -- kcoef in seconds converts silently into hours; the
 magnitude comparison catches it). A `UnitStrippedWarning` is an error
 in the Quantity run (`np.full` and plain-array assignment drop units
-silently). Init derivations of the other ports are not yet checked. pint accepts a bare zero in `+` and comparisons but NOT
+silently). PRMSSoilzone{NoDprst,} (Nov 11, 2026; 4 helpers): the
+CORRECTED declaration -- `fastcoef_sq`/`slowcoef_sq` are `1/(inch
+day)`, not dimensionless as PRMS and pywatershed say
+(`1.0 + coef_sq * storage`; PRMS by-name entry); `ssr2gw_rate` is
+truly inch^(1-ssr2gw_exp)/day, its `1/day` exact only at exp = 1 (the
+fixture's value; a test pins the failure at 0.5); kernel arguments
+receiving a derived `_`-field (`sat_threshold` <- `_sat_threshold`)
+map through the harness's explicit `ARG_FIELDS` (also needed by the Ag
+and stream-temp kernels); compute_interflow's `c3 = sqrt(...)` is nan
+for `ssres_in < -coef_lin**2/(4 coef_sq)`, reachable only from a state
+initialize() never produces (slow_stor above pref_flow_thrsh). Init
+derivations of the other ports are not yet checked. pint accepts a bare zero in `+` and comparisons but NOT
 assigned into a dimensional array or after scaling (`0.0 * cov >
 potet`), so a kernel's zeros of a working unit are a named module
 float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code

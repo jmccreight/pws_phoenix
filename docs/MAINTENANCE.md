@@ -67,6 +67,40 @@ the HRU-day it runs.
 - **Not fixed** for the same reason as the snow entry: verbatim
   lines, no data reach them.
 
+## PRMSSoilzone: `compute_interflow` silently gives zero interflow from an inconsistent start state
+
+`pws_phoenix/hydrology/prms_soilzone.py`, `compute_interflow` (PRMS
+`soilzone.f90` verbatim, via pywatershed):
+
+```python
+        c3 = np.sqrt(coef_lin**2.0 + 4.0 * coef_sq * ssres_in)
+        ...
+        if (1.0 + c1 * c2) > 0.0:
+            inter_flow = ssres_in + ((sos * (1.0 + c1) * c2) / (1.0 + c1 * c2))
+        else:
+            inter_flow = ssres_in
+```
+
+For `ssres_in < -coef_lin**2 / (4 coef_sq)` the square root is nan,
+every comparison is False, the `else` sets `inter_flow = ssres_in`
+(negative) and the clamp makes it 0: no interflow that step, no
+message. For any real `c3` and `storage > 0`, `1 + c1*c2 > 0`, so the
+`else` is reached ONLY through the nan. (The `c3 == 0.0` raise needs
+`ssres_in` exactly `-coef_lin**2 / (4 coef_sq)`.) The mass budget
+stays closed (the storage keeps the water).
+
+- **Reachable only if** a step starts with `slow_stor >
+  pref_flow_thrsh` (slow path: `ssresin = pref_flow_thrsh -
+  slow_stor`) or `pref_flow_stor > pref_flow_max` (fast path).
+  `initialize()` never produces that state and each step preserves
+  it, so the one way in is a supplied state (restart, or an initial
+  state given under its own name). The Ag family shares the helper.
+- **Detector:** none yet. Planned: warn ONCE at run start where
+  supplied state enters (placed with the initial-state-eradication
+  arc), not a per-step check -- the state cannot arise mid-run.
+- **Not changed** in the kernel: verbatim lines; a raise or warning
+  inside njit code is not possible (warn) or a departure (raise).
+
 ## Report upstream (pywatershed): SourceSinkFlowNode harvests the last substep's outflow
 
 `pywatershed/hydrology/source_sink_flow_node.py:118,134`:
