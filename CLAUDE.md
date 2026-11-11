@@ -263,8 +263,13 @@ open_writer → declare buffers → create → iterate → write`.
   directly to its grid's shared dataset.)
 - Inputs: time-dimensioned file vars are windowed to one step by
   `as_iterable` and shadowed by `(hru,)` buffers refilled each step from
-  `step.mpi.src`; static space-only params/ICs stay whole on `ds_mpi`
+  `step.mpi.src`; static space-only params stay whole on `ds_mpi`
   (loaded into memory so their buffers are shared by reference).
+- Initial state is NOT in the input file (Nov 2026): it is supplied
+  FULL-extent in process_dict under the state variable's own name,
+  and each rank writes its `_decomp_slice` block after the init hooks
+  (`_restore_grid_var`, the restart restore path). See "Initial
+  state" below.
 - `control["progress"]` (default False) turns on mpixarray's rank-0
   progress bar over the time loop.
 - `parallelize()` now lives in **`Discretization`** (`discretization.py`):
@@ -461,9 +466,28 @@ the `epiweeks` dep).
   `config.load_model_yaml` builds serial Discretizations from its
   `discretizations:` section (Nov 2026); a future `Model.from_yaml()`
   classmethod is its evolution.
+- **Initial state (Nov 2026; `DataArrayMeta.initial` REMOVED)**:
+  starting state = the `restart=True` variables, ONE rule in both
+  paths: allocate -> `initialize()` sets each one's DEFAULT ->
+  supplied state (an array in the process_dict entry under the
+  variable's OWN name; recorded in `_supplied_state`, written by
+  `_apply_supplied_state` via `_restore_grid_var`) overrides it |
+  `control["restart_read"]` overrides it. Supplied state +
+  `restart_read` raises ("use one source"). No nan check: nan is a
+  legitimate state value (stream temp's never-has-flow marker,
+  FlowGraph union rows, STARFIT `lake_storage`). A process never
+  consumes state from a parameter: PRMS's `gwstor_init` /
+  `segment_flow_init` are translated only in
+  `prms_translate.prms_initial_state` (-> `gwres_stor`, and
+  `seg_inflow` by one-segment-downstream propagation).
+  PRMSGroundwater's default is PRMS's declared 2.0 inches. OPEN:
+  check every `initialize()` for values DERIVED from a restart
+  variable (supplied state lands after the hook); JLM's candidate
+  design if one exists: `init_from_params() -> init_state ->
+  init_diagnostic_state`.
 - **Per-process init hook (IMPLEMENTED July 2026)**:
   `Process.initialize()` (default no-op), called once by the Model
-  after binding/ICs/input-validation, before the run loop; contract =
+  after binding/input-validation, before the run loop; contract =
   LOCAL (no collectives), no `Time`. Computes
   **`kind="parameter_internal"`** fields (parameters COMPUTED at init
   rather than supplied -- e.g. Muskingum c0/c1/c2 from mann_n + dis
@@ -1384,9 +1408,14 @@ the mpixarray-fork problems.
 
 **The lever -- split static vs streamed inputs:**
 
-- _Static_ (params, ICs; space-only): trivially merged into the one `ds_mpi`
+- _Static_ (params; space-only): trivially merged into the one `ds_mpi`
   after `parallelize`, load-once. Multi-file here is ~free and keeps Phase 1's
-  structural sharing.
+  structural sharing. (ICs left the combined file Nov 2026 -- see "Initial
+  state" under the Phase 2 backlog. JLM, Nov 2026: the same argument
+  applies to parameters -- a combined file is "baked" to one parameter
+  set, and calibration swaps parameters -- so forcings, parameters and
+  ICs should be SEPARATE files; only streamed forcings need the one
+  streamed dataset.)
 - _Streamed_ (time-varying forcings; time x space): the **only** hard part --
   multiple streamed files = multiple `iterate` loops to co-step.
 

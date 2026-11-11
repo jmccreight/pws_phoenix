@@ -511,7 +511,7 @@ flow-driven variables see the knife-edge cascade).
   (July/Aug 2026): `Model.input_spec()` (dry-run classmethod from the
   DataArrayMeta declarations; pinned by tests/test_input_spec.py,
   data-free), hierarchy per JLM: required -> grid -> {external
-  inputs, parameters, initial values} first; the informational half
+  inputs, parameters, initial state} first; the informational half
   (internal inputs, derived params, map-fed) only on
   `include_optional=True`. Rendered by
   **`examples/00_input_contract.py`** -- a
@@ -521,9 +521,25 @@ flow-driven variables see the knife-edge cascade).
   `cbh.nc:rhavg` (pywatershed renames it humidity_hru);
   hru_slope/hru_lat/etc live in BOTH parameters_dis_both.nc and
   parameters_dis_hru.nc; CBH float32 -> f64 widening happens at
-  input preparation (exact; a translator responsibility). IC status:
-  only TWO `initial=` seams (gwstor_init, segment_flow_init); other
-  ICs are ordinary `*_init*` PARAMETERS consumed by initialize().
+  input preparation (exact; a translator responsibility). IC status
+  (Nov 2026; `DataArrayMeta.initial` REMOVED): initial state = the
+  `restart=True` variables. `initialize()` sets each one's default;
+  an array supplied in the process_dict entry under the variable's
+  OWN name is written after the init hooks and overrides it (the
+  restart restore path, `_restore_grid_var`); supplied state +
+  `control["restart_read"]` raises. PRMS's two state-in-a-parameter
+  names are translated ONLY in
+  `prms_translate.prms_initial_state`: `gwstor_init` -> `gwres_stor`
+  (a rename; PRMSGroundwater's own default is PRMS's declared 2.0
+  inches) and `segment_flow_init` -> `seg_inflow` (propagated one
+  segment downstream; `seg_outflow` is rebuilt from zero every step
+  and is not state). Under MPI the supplied arrays are FULL extent
+  in process_dict (not in the combined input file); each rank takes
+  its block. Other `*_init*` names are ordinary PARAMETERS that
+  initialize() reads to compute defaults. nan is a legitimate state
+  value (stream temp's never-has-flow marker, FlowGraph union rows,
+  STARFIT `lake_storage`), so supplied or default state is NOT
+  checked for nan.
 
   **prms_translate/ BUILT (Aug 2026) -- the legacy endpoint reached.**
   The translation layer lives at `prms_translate/` under the RULE
@@ -579,7 +595,7 @@ flow-driven variables see the knife-edge cascade).
   INPUTS) / INTERNAL (kind="parameter_internal", RENAMED from
   parameter_derived Aug 2026 -- init-computed, never supplied).
   `input_spec` states it all: required {parameters,
-  derivable_parameters, initial_values, initial_state}, top-level
+  derivable_parameters, initial_state}, top-level
   "maps" (one weights matrix per map, with derivation), optional
   {internal_inputs, internal_parameters, map_fed_inputs}.
   prms_translate/preprocess.py = the PRE-PROCESSING SUITE:

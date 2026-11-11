@@ -93,6 +93,57 @@ budget would see it for a source_sink node at an outlet.
 - **Detector:** `control["budget"] = "error"` on any composed graph.
 - **Status:** not yet reported.
 
+## Report upstream (pywatershed): `segment_flow_init` is ASSIGNED, not summed, at confluences
+
+`pywatershed/hydrology/prms_channel.py`, channel initialization,
+carried verbatim in
+`pws_phoenix/prms_translate/assemble.py:seg_inflow_from_segment_flow_init`:
+
+```python
+    for iseg in range(tosegment0.shape[0]):
+        jseg = tosegment0[iseg]
+        if jseg < 0:
+            continue
+        seg_inflow[jseg] = segment_flow_init.values[iseg]
+```
+
+A segment with several upstream segments starts with the initial flow
+of the LAST one in index order, not their sum.
+
+- **Reachable only if** `segment_flow_init` is nonzero on two or
+  more segments that share a downstream segment. It enters the
+  first step only (`inflow_ts_prev`, the c1 term of the muskingum
+  equation).
+- **Detector:** none (the channel declares no budget).
+- **Not fixed** because pywatershed's answers carry it; `+=` is the
+  one-character fix once upstream agrees.
+- **Status:** not yet reported.
+
+## A Model that raises during construction leaves its input files open
+
+`Model.__init__` opens files before assembly finishes: file-backed
+process_dict entries (`_load_paths_to_data` -> `self._opened_files`),
+`Input(path)` (`xr.open_dataarray`) and a `Discretization` given a
+parameter path (`xr.open_dataset`). `finalize()` is what closes
+them. When construction raises (an unresolved input, a dim mismatch,
+supplied state + `restart_read`), no object is returned, so nothing
+closes the handles.
+
+Seen Nov 2026: a serial pytest run in which many Models raised
+during construction (a since-removed check on unset state) then hung
+at ~56% CPU and, on another run, segfaulted, with the stack in
+xarray `file_manager._acquire_with_cache_info` -- the same place as
+the >128-open-handles hang recorded in PORTS.md. That the leaked
+handles were the cause was inferred, not isolated.
+
+- **Reachable only if** many Models fail in construction in one
+  Python session.
+- **Detector:** a pytest run that stops progressing with the process
+  still on the CPU.
+- **Fix (not done):** close what was opened when `Model.__init__` /
+  `ModelMPI.__init__` raise (a `try/except BaseException: <close>;
+  raise`); under MPI the cleanup must not add a collective call.
+
 ## Idea (later): one-off unit check of a whole configuration with `pint`
 
 Every budget term now carries `DataArrayMeta.units` (free text), and

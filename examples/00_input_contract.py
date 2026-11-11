@@ -24,8 +24,9 @@
 #
 # 1. **required** -> grid -> external inputs, parameters (authored
 #    vs DERIVABLE -- required either way, but derivable ones state
-#    how to generate them), initial values (the `initial=` seams),
-#    and initial state (the restartable warm-start surface)
+#    how to generate them), and initial state (the variables that
+#    carry state from one step to the next, each of which you MAY
+#    give a starting value)
 # 2. **maps** -> each Map in the configuration implies ONE weights
 #    matrix (required supply; kept beside "required" because that
 #    dict's keys are grids)
@@ -48,17 +49,22 @@
 #   name is a data-preparation (translation-layer) decision. The
 #   source scan at the bottom shows where each name lives in drb_2yr
 #   TODAY.
-# - **Initial conditions come in two forms.** (a) The `initial=`
-#   seams (spec "initial_values"): direct supplies of a state
-#   variable's start values via a process_dict entry. Only TWO exist
-#   (`gwstor_init`, `segment_flow_init`). (b) PRMS-convention
-#   `*_init*` PARAMETERS (soilzone's `soil_moist_init_frac`, runoff's
-#   `dprst_frac_init`, snow's `snowpack_init`, ...): ordinary
-#   supplied parameters, typically consumed by `initialize()` --
-#   listed by name in a cell below (the convention over-matches:
-#   snow's `den_init` is the density of new-fallen snow, a physics
-#   parameter, not a state IC). All other state initializes to fixed
-#   values in `initialize()`.
+# - **Initial state is supplied under the state variable's own
+#   name.** The spec's "initial_state" lists, per process, the
+#   variables that carry state. Every one has a default, set by the
+#   process's `initialize()`; to start somewhere else, put an array
+#   in the process_dict entry under the variable's name
+#   (`"gwres_stor": <array>`) and it replaces the default. PRMS
+#   keeps two starting states in PARAMETERS (`gwstor_init`,
+#   `segment_flow_init`); `prms_translate.prms_initial_state` turns
+#   them into `gwres_stor` and `seg_inflow`. The other
+#   PRMS-convention `*_init*` parameters (soilzone's
+#   `soil_moist_init_frac`, runoff's `dprst_frac_init`, snow's
+#   `snowpack_init`, ...) are ordinary supplied parameters that
+#   `initialize()` reads to compute its defaults -- listed by name
+#   in a cell below (the convention over-matches: snow's `den_init`
+#   is the density of new-fallen snow, a physics parameter, not a
+#   starting state).
 # - **Three kinds of parameter, patently.** AUTHORED (your data and
 #   calibration), DERIVABLE (required at assembly like any parameter,
 #   but the contract states the factory/formula that generates them
@@ -67,13 +73,14 @@
 #   `initialize()`, never supplied, reported only in the optional
 #   half). "Derivable" and "internal" are deliberately distinct
 #   words for distinct lifecycles.
-# - **Restart is the third source of initial state**, beyond the
-#   `initial=` seams and the `*_init*` parameters:
-#   `Model.write_restart(dir)` saves the prognostic state and
+# - **A restart supplies ALL of the initial state at once.**
+#   `Model.write_restart(dir)` saves every state variable and
 #   `control["restart_read"] = dir` warm-starts a new model from it.
-#   Conveniently, a warm start takes the SAME (superset) input files
-#   as the original run -- so no restart-specific input preparation
-#   exists in this contract. See `help(Model)` for the details.
+#   A restart and supplied initial state together raise an error:
+#   use one source. Conveniently, a warm start takes the SAME
+#   (superset) input files as the original run -- so no
+#   restart-specific input preparation exists in this contract. See
+#   `help(Model)` for the details.
 # - **CBH forcing files store float32; the model computes float64.**
 #   The widening happens at input preparation (it is exact -- every
 #   float32 value is exactly representable in float64) and matters
@@ -242,10 +249,10 @@ pprint(spec["maps"], sort_dicts=False)
 # the configuration from the declarations alone. Each grid is a
 # cluster; each process is a TABLE -- a white header (the process,
 # which the model computes) over GRAY sections for everything YOU
-# supply: its parameters (static | time-varying), any initial
-# values, and its restartable initial state (every prognostic
-# variable can be given a starting value -- a warm start supplies
-# all of them at once; see `help(Model)` on restart). Solid labeled
+# supply: its parameters (static | time-varying) and its initial
+# state (every variable that carries state can be given a starting
+# value -- a warm start supplies all of them at once; see
+# `help(Model)` on restart). Solid labeled
 # edges are on-grid couplings, dashed edges are the Maps carrying
 # variables between grids, gray ellipses are the external forcings,
 # and Time (the model clock) reaches every process. Gray = supplied,
@@ -350,7 +357,6 @@ for grid, gg in spec["required"].items():
         list(gg["external_inputs"])
         + list(gg["parameters"])
         + list(gg["derivable_parameters"])
-        + list(gg["initial_values"])
     )
     print(f"\n=== grid '{grid}' ===")
     pprint({nn: source_of(nn) for nn in supplied}, sort_dicts=False)
@@ -362,9 +368,10 @@ for grid, gg in spec["required"].items():
 # do it. The cells below fill `process_dict` generically FROM THE
 # CONTRACT: every required parameter is loaded by name from the
 # first file the scan found it in (duplicated names carry identical
-# NHM values), the `initial=` seams likewise, the computed names
-# come from their factories (the soltabs; `segment_order` rides the
-# Discretization), and the external inputs are loaded with the
+# NHM values), the computed names come from their factories (the
+# soltabs; `segment_order` rides the Discretization), the initial
+# state comes from PRMS's two initial-condition parameters, and the
+# external inputs are loaded with the
 # preparation steps done by hand -- float32 -> float64 widening, the
 # `nhm_id -> nhru` dim rename, and `humidity_hru` straight from its
 # native source, `cbh.nc:rhavg`. The dummy Maps are rebuilt with
@@ -397,7 +404,7 @@ dis_seg = domain_ds("parameters_dis_seg.nc")
 soltabs = compute_soltabs(dis_hru)
 
 # %% [markdown]
-# ### Parameters + initial values, from the contract
+# ### Parameters, from the contract
 
 # %%
 for entry in process_dict.values():
@@ -416,11 +423,38 @@ for entry in process_dict.values():
     if das:
         entry["parameters"] = xr.Dataset(das)
 
-for grid, gg in spec["required"].items():
-    for init_name, info in gg["initial_values"].items():
-        process_dict[info["process"]][init_name] = domain_ds(
-            sources[init_name][0]
-        )[init_name]
+# %% [markdown]
+# ### Initial state
+#
+# Every state variable in the contract's "initial_state" has a
+# default, so supplying none of them is a valid cold start. This
+# domain's PRMS files do carry two starting states, as the
+# PARAMETERS `gwstor_init` and `segment_flow_init`;
+# `prms_initial_state` turns them into the state variables they
+# start (`gwres_stor`, and `seg_inflow`: each segment's initial flow
+# becomes the inflow of the segment downstream of it). We hand each
+# to the process that lists it.
+
+# %%
+from pws_phoenix.prms_translate import prms_initial_state
+
+prms_state = prms_initial_state(
+    xr.Dataset(
+        {
+            "gwstor_init": domain_ds(sources["gwstor_init"][0])["gwstor_init"],
+            "segment_flow_init": domain_ds(sources["segment_flow_init"][0])[
+                "segment_flow_init"
+            ],
+            "tosegment": dis_seg["tosegment"],
+        }
+    )
+)
+for gg in spec["required"].values():
+    for proc_name, state_names in gg["initial_state"].items():
+        for name in state_names:
+            if name in prms_state:
+                process_dict[proc_name][name] = prms_state[name]
+                print(f"{proc_name}: supplied {name}")
 
 # %% [markdown]
 # ### External inputs, from their native sources

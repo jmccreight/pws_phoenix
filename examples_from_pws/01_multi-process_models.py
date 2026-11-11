@@ -76,6 +76,7 @@ from pws_phoenix.maps import Map
 from pws_phoenix.model import Model
 from pws_phoenix.model_contract_graph import ModelContractGraph
 from pws_phoenix.process import DataArrayMeta, Process
+from pws_phoenix.prms_translate import prms_initial_state
 
 try:
     import matplotlib.pyplot as plt
@@ -362,11 +363,17 @@ print({name: mm.weights.shape for name, mm in maps.items()})
 
 # %% [markdown]
 # *The process dictionary:* each entry names its class, its grid, its
-# parameters, and any inputs and initial values it takes from us. The
-# forcings go to the processes that consume them; the humidity carrier
-# slots in just before the first segment process; groundwater storage
-# and channel flow start from the `*_init` arrays in their parameter
-# files (as in PRMS).
+# parameters, and any inputs and initial state it takes from us. The
+# forcings go to the processes that consume them and the humidity
+# carrier slots in just before the first segment process.
+#
+# Initial state is supplied under the state variable's own name.
+# Every state variable has a default, so this is optional; PRMS and
+# pywatershed keep two starting states in parameters (`gwstor_init`
+# and `segment_flow_init`), and `prms_initial_state` turns them into
+# the variables they start: `gwres_stor`, and `seg_inflow` (each
+# segment's initial flow becomes the inflow of the segment downstream
+# of it).
 
 # %%
 process_dict: dict[str, dict[str, Any]] = {}
@@ -385,12 +392,19 @@ for slot, (cls, grid) in nhm_processes.items():
 process_dict["prms_atmosphere"] |= {
     nn: forcings[nn] for nn in ("prcp", "tmax", "tmin")
 }
-process_dict["prms_groundwater"]["gwstor_init"] = parameters[
-    "prms_groundwater"
-]["gwstor_init"]
-process_dict["prms_channel"]["segment_flow_init"] = parameters["prms_channel"][
-    "segment_flow_init"
-]
+initial_state = prms_initial_state(
+    xr.Dataset(
+        {
+            "gwstor_init": parameters["prms_groundwater"]["gwstor_init"],
+            "segment_flow_init": parameters["prms_channel"][
+                "segment_flow_init"
+            ],
+            "tosegment": dis_seg_ds["tosegment"],
+        }
+    )
+)
+process_dict["prms_groundwater"]["gwres_stor"] = initial_state["gwres_stor"]
+process_dict["prms_channel"]["seg_inflow"] = initial_state["seg_inflow"]
 
 pprint(
     {
@@ -436,13 +450,19 @@ print(f"{n_days} days; {len(control['output_var_names'])} output variables")
 # dictionary alone, because each process describes itself (as we saw
 # in the previous notebook). `Model.input_spec` lists what the
 # configuration needs from outside: for the full NHM, just the four
-# forcings and the two initial values.
+# forcings. It also lists each process's state variables, any of
+# which may be given a starting value (we supplied two of them
+# above); we print how many each process has.
 
 # %%
 spec = Model.input_spec(process_dict, maps=maps)
 for grid, gg in spec["required"].items():
     print(grid, "external inputs:", list(gg["external_inputs"]))
-    print(grid, "initial values: ", list(gg["initial_values"]))
+    print(
+        grid,
+        "state variables:",
+        {proc: len(names) for proc, names in gg["initial_state"].items()},
+    )
 
 # %% [markdown]
 # `ModelContractGraph` draws the same information (pywatershed's
@@ -497,7 +517,7 @@ print(f"clock: {model_mem.time.current}; wall time {time_mem:.1f} s")
 # a file, and each class becomes its name. We'll create a directory
 # for the YAML-based run and write the data there: the merged
 # parameter sets, the prepared forcings (already float64 on `nhru`),
-# the initial values, and the Maps' weights.
+# the initial state, and the Maps' weights.
 
 # %%
 run_dir = nb_dir / "nhm_yaml"
@@ -515,11 +535,8 @@ for slot, ds in parameters.items():
 for name, da in forcings.items():
     da.to_netcdf(run_dir / f"{name}.nc")
     written[name] = f"{name}.nc"
-for slot, name in (
-    ("prms_groundwater", "gwstor_init"),
-    ("prms_channel", "segment_flow_init"),
-):
-    process_dict[slot][name].to_netcdf(run_dir / f"{name}.nc")
+for name, da in initial_state.items():
+    da.rename(name).to_netcdf(run_dir / f"{name}.nc")
     written[name] = f"{name}.nc"
 for wkey, ww in weights.items():
     xr.DataArray(ww, dims=("nsegment", "nhru"), name="weights").to_netcdf(
@@ -568,7 +585,7 @@ for slot, entry in process_dict.items():
     if "parameters" in entry:
         yentry["parameters"] = written[f"parameters:{slot}"]
     for key in entry:
-        if key in written:  # a forcing or an initial value
+        if key in written:  # a forcing or an initial state
             yentry[key] = written[key]
     cfg["processes"][slot] = yentry
 for target, source in VOLUME_MAP_SPEC.items():
