@@ -24,7 +24,10 @@ numpy, run through the harness's ``func=``); the PRMSSoilzone family
 (four helpers, derived fields under other argument names via
 ``ARG_FIELDS``, the 1/(inch day) ``*coef_sq``); the PRMSRunoff family
 (five helpers; zeros and near-zeros in inches, acres and acre-inches;
-a bool kernel option run both ways, coverage accumulated). Harness:
+a bool kernel option run both ways, coverage accumulated); the
+PRMSSoilzoneAg family (the four soilzone helpers again, imported by
+name so patched in the Ag module; two bool options; the per-step area
+update, pre and post kernels via ``func=``). Harness:
 tests/kernel_units.py.
 Synthetic data, CI-able.
 """
@@ -47,6 +50,7 @@ from pws_phoenix.hydrology import (  # noqa: E402
     prms_channel,
     prms_runoff,
     prms_soilzone,
+    prms_soilzone_ag,
 )
 from pws_phoenix.hydrology.prms_canopy import PRMSCanopy  # noqa: E402
 from pws_phoenix.hydrology.prms_channel import PRMSChannel  # noqa: E402
@@ -57,6 +61,10 @@ from pws_phoenix.hydrology.prms_runoff import (  # noqa: E402
 from pws_phoenix.hydrology.prms_soilzone import (  # noqa: E402
     PRMSSoilzone,
     PRMSSoilzoneNoDprst,
+)
+from pws_phoenix.hydrology.prms_soilzone_ag import (  # noqa: E402
+    PRMSSoilzoneAg,
+    PRMSSoilzoneAgObsET,
 )
 from pws_phoenix.units import quantity, registry  # noqa: E402
 from pws_phoenix.hydrology.prms_groundwater import (  # noqa: E402
@@ -1057,4 +1065,474 @@ def test_runoff_per_day_is_load_bearing(runoff_data, name):
             runoff_data,
             patches=RUNOFF_PATCHES,
             per_day=PER_DAY - {name},
+        )
+
+
+# ----------------------------------------------------------------------
+# soilzone Ag family
+# ----------------------------------------------------------------------
+
+# the family kernel calls prms_soilzone's helpers through its OWN module
+# globals (imported by name), so they and _ZERO_INCHES are patched in
+# prms_soilzone_ag; the helpers' bodies read prms_soilzone's floats
+SOILZONE_AG_FLOAT_PATCHES = {
+    (prms_soilzone, "_NEARZERO"): inches(prms_soilzone._NEARZERO),
+    (prms_soilzone, "_ZERO_INCHES"): inches(prms_soilzone._ZERO_INCHES),
+    (prms_soilzone_ag, "_ZERO_INCHES"): inches(prms_soilzone_ag._ZERO_INCHES),
+    (prms_soilzone_ag, "_ISCLOSE_ATOL_ACRES"): acres(
+        prms_soilzone_ag._ISCLOSE_ATOL_ACRES
+    ),
+    (prms_soilzone_ag, "_AET_MISSING_INCHES"): inches(
+        prms_soilzone_ag._AET_MISSING_INCHES
+    ),
+    (prms_soilzone_ag, "_ZERO_ACRE_INCHES"): acre_inches(
+        prms_soilzone_ag._ZERO_ACRE_INCHES
+    ),
+}
+SOILZONE_AG_PATCHES = SOILZONE_AG_FLOAT_PATCHES | {
+    (prms_soilzone_ag, name): getattr(prms_soilzone, name).py_func
+    for name in (
+        "compute_soilmoist",
+        "compute_interflow",
+        "compute_gwflow",
+        "compute_szactet",
+    )
+}
+
+
+@pytest.fixture
+def soilzone_ag_data(soilzone_data) -> dict[str, np.ndarray]:
+    """soilzone_data's 24 hrus (the helper branches), each given an
+    agricultural area (ag_frac 0.2 of 100 acres; 10 impervious, 10
+    depression, 60 pervious), plus nine more for the Ag family kernel
+    (run under iter_aet_flag x pref_flow_flag, every line over the four
+    runs):
+
+    24 INACTIVE hru: skipped
+    25 lake hru: the evaporation seed only
+    26 no agricultural area
+    27 no pervious area (ag_frac 0.8)
+    28 ag ET target below the canopy evaporation
+    29 ag reservoir full: saturated flag
+    30 pref_flow_max = 0: gravity excess is dunnian under the flag off
+    31 soil_lower_ratio just above 1: the 1e-4 rounding cap
+    32 preferential storage above its maximum at the start, no
+       preferential infiltration (not physical, reaches the topfr < 0
+       clamp under the flag on)
+    """
+    nhru = 33
+
+    def grow(arr, fill):
+        out = np.full(nhru, fill, dtype=arr.dtype)
+        out[: arr.shape[0]] = arr
+        return out
+
+    def full(value, dtype=np.float64):
+        return np.full(nhru, value, dtype=dtype)
+
+    def at(default, dtype=np.float64, **by_hru):
+        arr = full(default, dtype)
+        for key, value in by_hru.items():
+            arr[int(key[1:])] = value
+        return arr
+
+    data = {}
+    for name, arr in soilzone_data.items():
+        if name in ("infil_hru", "pref_flow_flag", "soil2gw_flag"):
+            continue
+        fill = arr[0] if arr.dtype != np.bool_ else False
+        data[name] = grow(arr, fill)
+    data["hru_type"][24] = 0
+    data["hru_type"][25] = 2
+    # hru 2 (soil_moist above its maximum) also saturates the pervious
+    # flag; hru 31's lower zone sits 5e-5 above its maximum
+    data["soil_moist"][31] = 2.00005
+    data["soil_rechr"][31] = 1.0
+    data["soil_lower_max"][31] = 1.0
+    data["potet"][31] = 0.0
+    data["hru_intcpevap"][28] = 0.3
+    # hru 11 (avail_potet below _NEARZERO): the pervious ET runs only
+    # for avail_potet > 0, so just above the seed, and no ag ET first
+    data["potet"][11] = 0.03 + 5.0e-7
+    data["pref_flow_max"][30] = 0.0
+    data["pref_flow_stor"][32] = 0.6
+    infil = data.pop("infil_hru", None)
+    zeros = full(0.0)
+    ag_frac = at(0.2, h11=0.0, h24=0.0, h25=0.0, h26=0.0, h27=0.8)
+    data.update(
+        {
+            # options (set per run)
+            "iter_aet_flag": np.bool_(False),
+            "pref_flow_flag": np.bool_(False),
+            # inputs: pervious and ag infiltration depths
+            "infil": grow(soilzone_data["infil_hru"], 0.0),
+            "infil_ag": grow(soilzone_data["infil_hru"], 0.0),
+            "aet_external": full(0.15),
+            "AET_external": full(0.15),
+            "ag_irrigation_add": at(0.0, h0=0.1, h1=0.1, h3=0.1),
+            # areas (per-step variables)
+            "hru_area": full(100.0),
+            "hru_area_imperv": full(10.0),
+            "dprst_frac": full(0.1),
+            "ag_frac": ag_frac,
+            "ag_area": ag_frac * 100.0,
+            "hru_area_perv": 100.0 - 10.0 - 10.0 - ag_frac * 100.0,
+            "hru_frac_perv": (100.0 - 20.0 - ag_frac * 100.0) / 100.0,
+            # ag state + parameters
+            "ag_soil_moist": at(2.0, h1=3.95, h29=4.0),
+            "ag_soil_rechr": at(1.0, h29=1.5),
+            "ag_soil_moist_max": full(4.0),
+            "ag_soil_rechr_max": full(1.5),
+            "ag_cov_type": full(3, np.int64),
+            "ag_soil_type": full(2, np.int64),
+            "ag_soil_moist_prev": full(2.0),
+            "ag_soil_rechr_prev": full(1.0),
+            # ag outputs
+            "ag_soil_to_gw": zeros.copy(),
+            "ag_soil_to_gvr": zeros.copy(),
+            "ag_potet_rechr": zeros.copy(),
+            "ag_potet_lower": zeros.copy(),
+            "ag_cap_infil_tot": zeros.copy(),
+            "ag_actet": zeros.copy(),
+            "hru_ag_actet": zeros.copy(),
+            "ag_soil_lower": zeros.copy(),
+            "ag_hortonian": zeros.copy(),
+            "ag_soil_saturated": zeros.copy(),
+            "soil_saturated": zeros.copy(),
+            "perv_soil_to_gw": zeros.copy(),
+            "perv_soil_to_gvr": zeros.copy(),
+            # _pre / _post
+            "ag_soil_moist_redistribution": zeros.copy(),
+            "ag_soil_rechr_redistribution": zeros.copy(),
+            "soil_rechr_redistribution": zeros.copy(),
+            "soil_lower_redistribution": zeros.copy(),
+            "slow_stor_redistribution": zeros.copy(),
+            "ag_soil_moist_change": zeros.copy(),
+            "ag_soil_rechr_change": zeros.copy(),
+            "ag_soil_lower_change": zeros.copy(),
+            "ag_soil_moist_change_hru": zeros.copy(),
+            "ag_soil_rechr_change_hru": zeros.copy(),
+            "ag_soil_lower_change_hru": zeros.copy(),
+            "perv_infil_hru": zeros.copy(),
+            "ag_infil_hru": zeros.copy(),
+            # ObsET: observed AET (0 negative on an ag hru -> zeroed; 1
+            # missing; 26 negative on a no-ag hru -> kept); unsatisfied
+            # ag ET for the irrigation adjustment (0 adds; 3 above the
+            # ag capacity, capped; 2 converged; 29 full: no deficit);
+            # the deficit as _adjust_irrigation leaves it for _iter_diag
+            "aet_observed": at(0.15, h0=-0.5, h1=-1.0, h26=-0.5),
+            "unused_ag_et": at(0.0, h0=0.5, h3=5.0, h29=0.5),
+            "ag_soilwater_deficit": at(0.0, h0=0.5, h3=0.5),
+            "ag_soilwater_deficit_min": full(0.1),
+            "ag_irrigation_add_vol": zeros.copy(),
+            "ag_aet_external_vol": zeros.copy(),
+            "ag_irrigation_hru_source": zeros.copy(),
+            "iter_count": full(0, np.int64),
+            "iter_end_status": full(0, np.int64),
+            "max_soilzone_ag_iter": np.int64(30),
+            "soilzone_aet_converge": np.float64(0.001),
+            "soil_iter": np.int64(1),
+        }
+    )
+    assert infil is None
+    return data
+
+
+def soilzone_ag_both_options(data) -> dict[tuple[bool, bool], dict]:
+    """The family kernel (PRMSSoilzoneAgObsET's, the same code object
+    as PRMSSoilzoneAg's, with AET_external a field) under every
+    (iter_aet_flag, pref_flow_flag), line coverage accumulated over the
+    four runs; returns the compiled arrays of each."""
+    fired: dict = {}
+    out = {}
+    options = [(ii, pp) for ii in (False, True) for pp in (False, True)]
+    for iter_aet_flag, pref_flow_flag in options:
+        out[iter_aet_flag, pref_flow_flag] = (
+            assert_kernel_dimensionally_consistent(
+                PRMSSoilzoneAgObsET,
+                data
+                | {
+                    "iter_aet_flag": np.bool_(iter_aet_flag),
+                    "pref_flow_flag": np.bool_(pref_flow_flag),
+                },
+                patches=SOILZONE_AG_PATCHES,
+                fired=fired,
+                require_all_lines=(iter_aet_flag, pref_flow_flag)
+                == options[-1],
+            )
+        )
+    return out
+
+
+@SQRT_NAN
+def test_soilzone_ag_kernel_units(soilzone_ag_data):
+    outs = soilzone_ag_both_options(soilzone_ag_data)
+    out = outs[False, False]
+    seed = 0.01 + 0.01 + 0.0 + 0.01  # imperv + canopy + snow + dprst
+    # the shared helpers behave as in the plain soilzone test; these
+    # pin the Ag hrus
+    assert out["ag_actet"][0] > 0.0
+    assert out["ag_soil_to_gw"][1] == 0.1  # soil2gw_max x 1 day, ag too
+    assert out["hru_actet"][24] == 0.0  # inactive: untouched
+    assert out["unused_potet"][25] == pytest.approx(0.2 - seed)  # lake
+    assert out["ag_actet"][26] == 0.0  # no ag area
+    assert out["cap_waterin"][27] == 0.0  # no pervious area
+    assert out["ag_actet"][28] == 0.3  # target < canopy: only it
+    assert out["ag_soil_saturated"][29] == 1.0
+    assert out["soil_saturated"][2] == 1.0
+    assert out["soil_lower_ratio"][31] == 1.0  # capped
+    assert out["soil_lower"][31] == 1.0
+    # the iteration option: irrigation water and the external target
+    out_iter = outs[True, False]
+    assert out_iter["ag_cap_infil_tot"][0] > out["ag_cap_infil_tot"][0]
+    assert out_iter["ag_actet"][28] == 0.3  # 0.15 < canopy still
+    # the preferential-flow option
+    out_pref = outs[False, True]
+    assert out_pref["pref_flow"][3] > 0.0
+    assert out_pref["pref_flow_infil"][3] > 0.0
+    assert out_pref["dunnian_flow"][32] > 0.0  # excess storage
+
+
+@pytest.fixture
+def update_areas_data() -> dict[str, np.ndarray]:
+    """Eight hrus for _update_areas: ag_frac 0.2 -> 0.2 unchanged; 0.1
+    (decrease: excess ag water to slow_stor); 0.3 (increase: ag depths
+    scaled down); 0 (all ag water to slow_stor); 0.1 with no ag water;
+    0.8 (pervious area to zero: pervious storages zeroed); already
+    0.8 with no pervious area; INACTIVE."""
+    nhru = 8
+
+    def at(default, dtype=np.float64, **by_hru):
+        arr = np.full(nhru, default, dtype=dtype)
+        for key, value in by_hru.items():
+            arr[int(key[1:])] = value
+        return arr
+
+    ag_area = at(20.0, h6=80.0)
+    return {
+        "ag_area": ag_area,
+        "hru_area_perv": 100.0 - 20.0 - ag_area,
+        "hru_frac_perv": (100.0 - 20.0 - ag_area) / 100.0,
+        "ag_soil_moist": at(2.0, h4=0.0),
+        "ag_soil_rechr": at(1.0, h4=0.0),
+        "slow_stor": at(0.5),
+        "soil_moist": at(2.0),
+        "soil_rechr": at(1.0),
+        "ag_frac": at(0.2, h1=0.1, h2=0.3, h3=0.0, h4=0.1, h5=0.8, h6=0.8),
+        "hru_area": at(100.0),
+        "hru_area_imperv": at(10.0),
+        "dprst_frac": at(0.1),
+        "hru_type": at(1, np.int64, h7=0),
+    }
+
+
+def test_soilzone_ag_update_areas_units(update_areas_data):
+    out = assert_kernel_dimensionally_consistent(
+        PRMSSoilzoneAg,
+        update_areas_data,
+        func=PRMSSoilzoneAg._update_areas.py_func,
+        patches=SOILZONE_AG_FLOAT_PATCHES,
+    )
+    assert out["soil_moist"][0] == 2.0  # unchanged
+    assert out["slow_stor"][1] == pytest.approx(0.5 + 2.0 * 0.1)
+    assert out["soil_moist"][1] == pytest.approx(2.0 * 60.0 / 70.0)
+    assert out["ag_soil_moist"][2] == pytest.approx(2.0 * 0.2 / 0.3)
+    assert out["ag_soil_moist"][3] == 0.0
+    assert out["slow_stor"][3] == pytest.approx(0.5 + 2.0 * 0.2)
+    assert out["slow_stor"][4] == 0.5  # no ag water to move
+    assert out["hru_area_perv"][5] == 0.0
+    assert out["soil_moist"][5] == 0.0
+    assert out["soil_moist"][6] == 2.0  # already no pervious area
+    assert out["hru_area_perv"][7] == 90.0  # inactive: no carve-outs
+    assert out["hru_frac_perv"][7] == 0.6  # not updated
+
+
+@pytest.mark.parametrize("name", ["_pre", "_post"])
+def test_soilzone_ag_pre_post_units(soilzone_ag_data, name):
+    """The per-step bookkeeping kernels: differences and area-weighted
+    products, no literals."""
+    assert_kernel_dimensionally_consistent(
+        PRMSSoilzoneAg,
+        soilzone_ag_data,
+        func=getattr(PRMSSoilzoneAg, name).py_func,
+    )
+
+
+@pytest.mark.parametrize(
+    "dropped, error, match",
+    [
+        ((prms_soilzone, "_NEARZERO"), ValueError, "Cannot compare"),
+        (
+            (prms_soilzone, "_ZERO_INCHES"),
+            pint.DimensionalityError,
+            "to 'inch'",
+        ),
+        (
+            (prms_soilzone_ag, "_ZERO_INCHES"),
+            pint.DimensionalityError,
+            "to 'inch'",
+        ),
+        (
+            (prms_soilzone_ag, "compute_soilmoist"),
+            numba.core.errors.TypingError,
+            "nopython",
+        ),
+        (
+            (prms_soilzone_ag, "compute_interflow"),
+            numba.core.errors.TypingError,
+            "nopython",
+        ),
+        (
+            (prms_soilzone_ag, "compute_gwflow"),
+            numba.core.errors.TypingError,
+            "nopython",
+        ),
+        (
+            (prms_soilzone_ag, "compute_szactet"),
+            numba.core.errors.TypingError,
+            "nopython",
+        ),
+    ],
+)
+@SQRT_NAN
+def test_soilzone_ag_patches_are_load_bearing(
+    soilzone_ag_data, dropped, error, match
+):
+    """Each patch of the family kernel is needed: without it the
+    Quantity run fails (both options off: the smallest run)."""
+    patches = {
+        kk: vv for kk, vv in SOILZONE_AG_PATCHES.items() if kk != dropped
+    }
+    assert len(patches) == len(SOILZONE_AG_PATCHES) - 1
+    with pytest.raises(error, match=match):
+        run_quantified(PRMSSoilzoneAgObsET, soilzone_ag_data, patches=patches)
+
+
+def test_soilzone_ag_isclose_atol_is_load_bearing(update_areas_data):
+    """A bare 1e-8 added to acres."""
+    patches = {
+        kk: vv
+        for kk, vv in SOILZONE_AG_FLOAT_PATCHES.items()
+        if kk[1] != "_ISCLOSE_ATOL_ACRES"
+    }
+    with pytest.raises(pint.DimensionalityError, match="acre"):
+        run_quantified(
+            PRMSSoilzoneAg,
+            update_areas_data,
+            func=PRMSSoilzoneAg._update_areas.py_func,
+            patches=patches,
+        )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "fastcoef_lin",
+        "slowcoef_lin",
+        "ssr2gw_rate",
+        "soil2gw_max",
+        "fastcoef_sq",
+        "slowcoef_sq",
+    ],
+)
+@SQRT_NAN
+def test_soilzone_ag_per_day_is_load_bearing(soilzone_ag_data, name):
+    with pytest.raises(pint.DimensionalityError, match="day"):
+        run_quantified(
+            PRMSSoilzoneAgObsET,
+            soilzone_ag_data | {"pref_flow_flag": np.bool_(True)},
+            patches=SOILZONE_AG_PATCHES,
+            per_day=PER_DAY - {name},
+        )
+
+
+def test_soilzone_ag_obs_et_prep_units(soilzone_ag_data):
+    out = assert_kernel_dimensionally_consistent(
+        PRMSSoilzoneAgObsET,
+        soilzone_ag_data,
+        func=PRMSSoilzoneAgObsET._prep_aet.py_func,
+        patches=SOILZONE_AG_FLOAT_PATCHES,
+    )
+    assert out["AET_external"][0] == 0.0  # negative on an ag hru
+    assert out["AET_external"][1] == -1.0  # missing, kept
+    assert out["AET_external"][26] == -0.5  # no ag area, kept
+    assert out["ag_irrigation_add"][0] == 0.0
+
+
+def soilzone_ag_iterations(data, func, iterations) -> dict[int, dict]:
+    """`func` (an ObsET iteration kernel) once per soil_iter value in
+    `iterations`, line coverage accumulated; returns the compiled
+    arrays of each."""
+    fired: dict = {}
+    out = {}
+    for soil_iter in iterations:
+        out[soil_iter] = assert_kernel_dimensionally_consistent(
+            PRMSSoilzoneAgObsET,
+            data | {"soil_iter": np.int64(soil_iter)},
+            func=func,
+            fired=fired,
+            require_all_lines=soil_iter == iterations[-1],
+        )
+    return out
+
+
+def test_soilzone_ag_obs_et_adjust_irrigation_units(soilzone_ag_data):
+    """Iteration 1 (adds the unsatisfied ET) and 25 (the after-20
+    doubling), both below the 30 cap."""
+    outs = soilzone_ag_iterations(
+        soilzone_ag_data,
+        PRMSSoilzoneAgObsET._adjust_irrigation.py_func,
+        [1, 25],
+    )
+    assert outs[1]["ag_irrigation_add"][0] == pytest.approx(0.1 + 0.5)
+    assert outs[1]["ag_irrigation_add"][3] == pytest.approx(0.1 + 4.0)
+    assert outs[1]["ag_irrigation_add"][2] == 0.0  # converged
+    assert outs[1]["ag_irrigation_add"][29] == 0.0  # no deficit
+    assert outs[25]["ag_irrigation_add"][0] == pytest.approx(0.1 + 1.0)
+
+
+def test_soilzone_ag_obs_et_iter_diag_units(soilzone_ag_data):
+    """Iteration 1 (converged / deficit-limited / never) and 30 (the
+    cap)."""
+    outs = soilzone_ag_iterations(
+        soilzone_ag_data,
+        PRMSSoilzoneAgObsET._iter_diag.py_func,
+        [1, 30],
+    )
+    status = outs[1]["iter_end_status"]
+    assert status[24] == -1 and status[26] == -1  # no ag area
+    assert status[12] == 3  # no transpiration
+    assert status[2] == 0  # converged
+    assert status[29] == 1  # no deficit
+    assert status[0] == -9  # upstream's "should never"
+    assert outs[30]["iter_end_status"][0] == 2  # the cap
+    assert outs[1]["ag_irrigation_add_vol"][0] == pytest.approx(0.1 * 20.0)
+
+
+@pytest.mark.parametrize(
+    "dropped, error, match",
+    [
+        # pint's == / != with a bare number is False / True, never an
+        # error: a bare sentinel makes every missing value "present"
+        # (zeroed), and the magnitude comparison catches it
+        ("_AET_MISSING_INCHES", AssertionError, "AET_external"),
+        ("_ZERO_ACRE_INCHES", pint.DimensionalityError, "acre"),
+        ("_ZERO_INCHES", pint.DimensionalityError, "inch"),
+    ],
+)
+def test_soilzone_ag_obs_et_prep_patches_are_load_bearing(
+    soilzone_ag_data, dropped, error, match
+):
+    patches = {
+        kk: vv
+        for kk, vv in SOILZONE_AG_FLOAT_PATCHES.items()
+        if kk != (prms_soilzone_ag, dropped)
+    }
+    assert len(patches) == len(SOILZONE_AG_FLOAT_PATCHES) - 1
+    with pytest.raises(error, match=match):
+        assert_kernel_dimensionally_consistent(
+            PRMSSoilzoneAgObsET,
+            soilzone_ag_data,
+            func=PRMSSoilzoneAgObsET._prep_aet.py_func,
+            patches=patches,
         )

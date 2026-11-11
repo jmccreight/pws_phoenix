@@ -114,12 +114,25 @@ from pws_phoenix.hydrology.prms_soilzone import (
     _INACTIVE,
     _LAKE,
     _SWALE,
+    _ZERO_INCHES,
     compute_gwflow,
     compute_interflow,
     compute_soilmoist,
     compute_szactet,
 )
 from pws_phoenix.process import DataArrayMeta, Process
+
+# _update_areas's np.isclose on the pervious AREA: its absolute
+# tolerance is in acres (the fraction isclose beside it stays bare).
+# Named so the units test (tests/test_kernel_units.py) can patch it to
+# a Quantity; numba freezes it, compiled code unchanged.
+_ISCLOSE_ATOL_ACRES = 1.0e-8
+
+# ObsET's _prep_aet: the observed-AET missing-value sentinel is in
+# inches (compared with the inch input), and its volume outputs are
+# acre-inches; named for the same reason as above
+_AET_MISSING_INCHES = -1.0
+_ZERO_ACRE_INCHES = 0.0
 
 # the state the obs-ET iteration rewinds between passes (Fortran It0
 # variables), in the order the It0 buffers are held
@@ -1095,21 +1108,22 @@ class PRMSSoilzoneAg(Process):
                         slow_stor[hh] = (
                             slow_stor[hh] + ag_soil_moist[hh] * old_ag_frac
                         )
-                        ag_soil_moist[hh] = 0.0
-                        ag_soil_rechr[hh] = 0.0
+                        ag_soil_moist[hh] = _ZERO_INCHES
+                        ag_soil_rechr[hh] = _ZERO_INCHES
 
             # pervious scaling when pervious area changed
             # (isclose b = new_perv)
             perv_changed = not (
-                abs(old_perv - new_perv) <= 1.0e-8 + 1.0e-5 * abs(new_perv)
+                abs(old_perv - new_perv)
+                <= _ISCLOSE_ATOL_ACRES + 1.0e-5 * abs(new_perv)
             )
             if perv_changed and (new_perv > 0.0):
                 scale_perv = old_perv / new_perv
                 soil_moist[hh] = soil_moist[hh] * scale_perv
                 soil_rechr[hh] = soil_rechr[hh] * scale_perv
-            if (old_perv > 0.0) and (abs(new_perv) <= 1.0e-8):
-                soil_moist[hh] = 0.0
-                soil_rechr[hh] = 0.0
+            if (old_perv > 0.0) and (abs(new_perv) <= _ISCLOSE_ATOL_ACRES):
+                soil_moist[hh] = _ZERO_INCHES
+                soil_rechr[hh] = _ZERO_INCHES
 
             ag_area[hh] = new_ag_area
             hru_area_perv[hh] = new_perv
@@ -1255,32 +1269,32 @@ class PRMSSoilzoneAg(Process):
         # _adjust_irrigation) and the storage-change lines (_post)
         nhru = hru_type.shape[0]
 
-        soil_to_gw[:] = 0.0
-        soil_to_ssr[:] = 0.0
-        perv_soil_to_gw[:] = 0.0
-        perv_soil_to_gvr[:] = 0.0
-        ag_soil_to_gw[:] = 0.0
-        ag_soil_to_gvr[:] = 0.0
-        ssr_to_gw[:] = 0.0
-        slow_flow[:] = 0.0
-        ssres_flow[:] = 0.0
-        potet_rechr[:] = 0.0
-        potet_lower[:] = 0.0
-        ag_potet_rechr[:] = 0.0
-        ag_potet_lower[:] = 0.0
-        ag_actet[:] = 0.0
-        hru_ag_actet[:] = 0.0
+        soil_to_gw[:] = _ZERO_INCHES
+        soil_to_ssr[:] = _ZERO_INCHES
+        perv_soil_to_gw[:] = _ZERO_INCHES
+        perv_soil_to_gvr[:] = _ZERO_INCHES
+        ag_soil_to_gw[:] = _ZERO_INCHES
+        ag_soil_to_gvr[:] = _ZERO_INCHES
+        ssr_to_gw[:] = _ZERO_INCHES
+        slow_flow[:] = _ZERO_INCHES
+        ssres_flow[:] = _ZERO_INCHES
+        potet_rechr[:] = _ZERO_INCHES
+        potet_lower[:] = _ZERO_INCHES
+        ag_potet_rechr[:] = _ZERO_INCHES
+        ag_potet_lower[:] = _ZERO_INCHES
+        ag_actet[:] = _ZERO_INCHES
+        hru_ag_actet[:] = _ZERO_INCHES
         ag_soil_saturated[:] = 0.0
-        ag_hortonian[:] = 0.0
-        unused_ag_et[:] = 0.0
-        ag_cap_infil_tot[:] = 0.0
-        ag_soil_lower[:] = 0.0
-        swale_actet[:] = 0.0
+        ag_hortonian[:] = _ZERO_INCHES
+        unused_ag_et[:] = _ZERO_INCHES
+        ag_cap_infil_tot[:] = _ZERO_INCHES
+        ag_soil_lower[:] = _ZERO_INCHES
+        swale_actet[:] = _ZERO_INCHES
         soil_saturated[:] = 0.0
-        dunnian_flow[:] = 0.0
-        pref_flow_infil[:] = 0.0
-        pref_flow_in[:] = 0.0
-        pref_flow[:] = 0.0
+        dunnian_flow[:] = _ZERO_INCHES
+        pref_flow_infil[:] = _ZERO_INCHES
+        pref_flow_in[:] = _ZERO_INCHES
+        pref_flow[:] = _ZERO_INCHES
 
         for hh in numba.prange(nhru):
             if hru_type[hh] == _INACTIVE:
@@ -1306,22 +1320,22 @@ class PRMSSoilzoneAg(Process):
 
             avail_potet = potet[hh] - hruactet
             if avail_potet < 0.0:
-                avail_potet = 0.0
+                avail_potet = _ZERO_INCHES
                 hruactet = potet[hh]
 
-            dunnianflw = 0.0
-            dunnianflw_pfr = 0.0
+            dunnianflw = _ZERO_INCHES
+            dunnianflw_pfr = _ZERO_INCHES
 
             capwater_maxin = infil[hh]
             ag_water_maxin = infil_ag[hh]
             if iter_aet_flag:
                 ag_water_maxin = ag_water_maxin + ag_irrigation_add[hh]
 
-            prefflow = 0.0
+            prefflow = _ZERO_INCHES
             if pref_flow_flag:
                 if pref_flow_infil_frac[hh] > 0.0:
-                    ag_pref_flow_maxin = 0.0
-                    cap_pref_flow_maxin = 0.0
+                    ag_pref_flow_maxin = _ZERO_INCHES
+                    cap_pref_flow_maxin = _ZERO_INCHES
 
                     if ag_water_maxin > 0.0:
                         ag_pref_flow_maxin = (
@@ -1340,7 +1354,7 @@ class PRMSSoilzoneAg(Process):
                     pref_flow_maxin = cap_pref_flow_maxin + ag_pref_flow_maxin
                     pref_flow_stor[hh] = pref_flow_stor[hh] + pref_flow_maxin
                     dunnianflw_pfr = max(
-                        0.0, pref_flow_stor[hh] - pref_flow_max[hh]
+                        _ZERO_INCHES, pref_flow_stor[hh] - pref_flow_max[hh]
                     )
                     if dunnianflw_pfr > 0.0:
                         pref_flow_stor[hh] = pref_flow_max[hh]
@@ -1354,7 +1368,7 @@ class PRMSSoilzoneAg(Process):
             # soil moisture, pervious then agricultural (the AG call
             # uses soil2gw_max NOT ag_soil2gw_max: upstream-preserved
             # Fortran bug)
-            perv_soil_to_gvr[hh] = 0.0
+            perv_soil_to_gvr[hh] = _ZERO_INCHES
             if perv_on_flag:
                 if capwater_maxin + soil_moist[hh] > 0.0:
                     (
@@ -1403,10 +1417,10 @@ class PRMSSoilzoneAg(Process):
 
             # slow interflow and gravity drainage
             availh2o = slow_stor[hh] + soil_to_ssr[hh]
-            topfr = 0.0
+            topfr = _ZERO_INCHES
             if hru_type[hh] != _SWALE:
                 if pref_flow_flag:
-                    topfr = max(0.0, availh2o - pref_flow_thrsh[hh])
+                    topfr = max(_ZERO_INCHES, availh2o - pref_flow_thrsh[hh])
                 ssresin = soil_to_ssr[hh] - topfr
                 slow_stor[hh] = availh2o - topfr
                 if slow_stor[hh] > 0.0:
@@ -1428,15 +1442,17 @@ class PRMSSoilzoneAg(Process):
                 )
 
             # dunnian from PFR (upstream's exact branch structure)
-            dunnianflw_gvr = 0.0
+            dunnianflw_gvr = _ZERO_INCHES
             if pref_flow_flag:
                 if pref_flow_max[hh] > 0.0:
                     availh2o = pref_flow_stor[hh] + topfr
-                    dunnianflw_gvr = max(0.0, availh2o - pref_flow_max[hh])
+                    dunnianflw_gvr = max(
+                        _ZERO_INCHES, availh2o - pref_flow_max[hh]
+                    )
                     if dunnianflw_gvr > 0.0:
                         topfr = topfr - dunnianflw_gvr
                         if topfr < 0.0:
-                            topfr = 0.0
+                            topfr = _ZERO_INCHES
                     pref_flow_in[hh] = pref_flow_infil[hh] + topfr
                     pref_flow_stor[hh] = pref_flow_stor[hh] + topfr
                     if pref_flow_stor[hh] > 0.0:
@@ -1455,10 +1471,10 @@ class PRMSSoilzoneAg(Process):
                     dunnianflw_gvr = topfr
 
             # actual evapotranspiration: ag first, then pervious
-            pervactet = 0.0
-            agactet = 0.0
-            ag_hruactet = 0.0
-            unsatisfied_ag_et = 0.0
+            pervactet = _ZERO_INCHES
+            agactet = _ZERO_INCHES
+            ag_hruactet = _ZERO_INCHES
+            unsatisfied_ag_et = _ZERO_INCHES
 
             if ag_on_flag:
                 if iter_aet_flag:
@@ -1468,7 +1484,7 @@ class PRMSSoilzoneAg(Process):
 
                 ag_avail_targetAET = ag_AETtarget - hru_intcpevap[hh]
                 if ag_avail_targetAET < 0.0:
-                    ag_avail_targetAET = 0.0
+                    ag_avail_targetAET = _ZERO_INCHES
 
                 if ag_avail_targetAET > 0.0:
                     ag_et_type_gt_1 = (
@@ -1508,7 +1524,7 @@ class PRMSSoilzoneAg(Process):
 
             avail_potet = potet[hh] - hruactet - ag_hruactet
             if avail_potet < 0.0:
-                avail_potet = 0.0
+                avail_potet = _ZERO_INCHES
 
             if soil_moist[hh] > 0.0 and avail_potet > 0.0:
                 et_type_gt_1 = (
@@ -1564,7 +1580,7 @@ class PRMSSoilzoneAg(Process):
                     ssres_stor[hh] = ssres_stor[hh] + pref_flow_stor[hh]
             else:
                 availh2o = slow_stor[hh] - sat_threshold[hh]
-                swale_actet[hh] = 0.0
+                swale_actet[hh] = _ZERO_INCHES
                 if availh2o > 0.0:
                     unsatisfied_et = potet[hh] - hru_actet[hh]
                     if unsatisfied_et > 0.0:
@@ -1990,16 +2006,16 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         (the loop's transp_on.any())."""
         n_transp = 0
         for hh in range(AET_external.shape[0]):
-            ag_irrigation_add[hh] = 0.0
-            ag_irrigation_add_vol[hh] = 0.0
-            ag_aet_external_vol[hh] = 0.0
+            ag_irrigation_add[hh] = _ZERO_INCHES
+            ag_irrigation_add_vol[hh] = _ZERO_ACRE_INCHES
+            ag_aet_external_vol[hh] = _ZERO_ACRE_INCHES
             AET_external[hh] = aet_observed[hh]
             if (
                 (AET_external[hh] < 0.0)
-                and (AET_external[hh] != -1.0)
+                and (AET_external[hh] != _AET_MISSING_INCHES)
                 and (ag_frac[hh] > 0.0)
             ):
-                AET_external[hh] = 0.0
+                AET_external[hh] = _ZERO_INCHES
             if transp_on[hh] != 0.0:
                 n_transp += 1
         return n_transp

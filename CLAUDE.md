@@ -446,7 +446,18 @@ the bool option `intcp_changeover_in_net_rain` runs both ways with
 coverage accumulated (`fired=`); a patched helper the kernel never
 calls fails coverage (NoDprst omits `dprst_comp`). A must-fail test
 that unexpectedly PASSES marks a path statement coverage missed
-(`_ZERO_ACRES` needed an empty-depression hru). pint accepts a bare zero in `+` and comparisons but NOT
+(`_ZERO_ACRES` needed an empty-depression hru).
+PRMSSoilzoneAg{,ObsET} (Nov 11, 2026; 7 code objects: the family
+kernel under both bool options x both, `_update_areas`/`_pre`/`_post`
+and ObsET's three iteration kernels via `func=`, each run per
+`soil_iter` value with `fired=`): the shared soilzone helpers are
+imported BY NAME, so they and `_ZERO_INCHES` are patched in the Ag
+module while the helpers' own bodies read prms_soilzone's floats;
+`_update_areas`'s pervious-area isclose added a bare 1e-8 to acres ->
+`_ISCLOSE_ATOL_ACRES`; ObsET's missing-value sentinel is in inches
+(`_AET_MISSING_INCHES`) and pint's `==`/`!=` with a bare number is
+False/True, NEVER an error -- only the magnitude comparison catches a
+bare sentinel; no marker needed; no declaration errors. pint accepts a bare zero in `+` and comparisons but NOT
 assigned into a dimensional array or after scaling (`0.0 * cov >
 potet`), so a kernel's zeros of a working unit are a named module
 float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code

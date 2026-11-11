@@ -80,6 +80,7 @@ ARG_FIELDS = {
     "pref_flow_den": "_pref_flow_den",
     "pref_flow_flag": "_pref_flow_flag",
     "soil2gw_flag": "_soil2gw_flag",
+    "aet_external": "AET_external",  # soilzone Ag family (ObsET field)
 }
 
 # kernel arguments that are not fields: argument name -> vocabulary key
@@ -87,6 +88,13 @@ ARG_FIELDS = {
 NON_FIELD_UNITS: dict[str, str | None] = {
     "s_per_time": "seconds",  # the channel's dt
     "intcp_changeover_in_net_rain": None,  # runoff's bool option
+    # the soilzone Ag family's bool options (pref_flow_flag is a field
+    # of PRMSSoilzone but an attribute there), its iteration counter,
+    # and the AET target when run as the core class (no AET_external)
+    "iter_aet_flag": None,
+    "pref_flow_flag": None,
+    "soil_iter": None,
+    "aet_external": "inches",
 }
 
 Patches = dict[tuple[Any, str], Any]
