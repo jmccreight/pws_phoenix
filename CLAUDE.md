@@ -480,11 +480,27 @@ the `epiweeks` dep).
   `segment_flow_init` are translated only in
   `prms_translate.prms_initial_state` (-> `gwres_stor`, and
   `seg_inflow` by one-segment-downstream propagation).
-  PRMSGroundwater's default is PRMS's declared 2.0 inches. OPEN:
-  check every `initialize()` for values DERIVED from a restart
-  variable (supplied state lands after the hook); JLM's candidate
-  design if one exists: `init_from_params() -> init_state ->
-  init_diagnostic_state`.
+  PRMSGroundwater's default is PRMS's declared 2.0 inches.
+  `Process.state_groups` (tuples of restart variables): the Model
+  raises when only PART of a group is supplied, because
+  `initialize()` computes some members from the others' defaults
+  and supplied state lands after the hook. Declared on
+  PRMSSoilzone{NoDprst,Ag} (`soil_moist`, `soil_rechr`,
+  `soil_lower`) and PRMSRunoff (the two dprst volumes, two areas,
+  `dprst_stor_hru`). Supplying EVERY restart variable is the restart
+  case, policed by the perfect-restart tests. Every `initialize()`
+  was read for this (Nov 11, 2026): no other hook computes one
+  restart variable from another. LATER, when someone needs to set
+  e.g. soil moisture alone (data assimilation): JLM's split
+  `init_from_params() -> init_state -> init_diagnostic_state`, so
+  derived state is recomputed from whatever state is in place --
+  not uniformly clean (`dprst_area_clos` is frozen at its initial
+  value and must stay stored). KNOWN GAPS: three first-step blocks
+  overwrite supplied state on a cold start (a restart resumes past
+  them): PRMSAtmosphere `_transp_tindex` at `istep0`,
+  PRMSSoilzoneAg `_istep0_areas`, StarfitDailyFlowNode's first
+  substep; and `prms_translate.insert_flow_graph` drops the channel
+  entry's supplied `seg_inflow` (the graph starts from zero).
 - **Per-process init hook (IMPLEMENTED July 2026)**:
   `Process.initialize()` (default no-op), called once by the Model
   after binding/input-validation, before the run loop; contract =

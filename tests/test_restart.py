@@ -186,6 +186,86 @@ def test_supplied_state_overrides_initialize(toy_ds):
         assert level is not supplied.values  # copied in (state), not shared
 
 
+class _TwoLevels(Process):
+    """initialize() computes `level_b` from `level_a`'s default, so
+    the two are one state group."""
+
+    level_a = DataArrayMeta(
+        kind="variable", dims=("space",), dtype=np.float64, restart=True
+    )
+    level_b = DataArrayMeta(
+        kind="variable", dims=("space",), dtype=np.float64, restart=True
+    )
+    state_groups = (("level_a", "level_b"),)
+
+    def initialize(self) -> None:
+        self._refs["level_a"][:] = 1.0
+        self._refs["level_b"][:] = 2.0 * self._refs["level_a"]
+
+    def advance(self) -> None:
+        pass
+
+    def calculate(self, dt, time) -> None:
+        pass
+
+
+def _two_levels_model(toy_ds, **state):
+    process_dict = {
+        # FIRST: gives the grid its time axis and "space" size
+        "upper": {
+            "class": Upper,
+            "forcing_up": toy_ds["forcing_up"],
+            "flow": toy_ds["flow_initial"],
+            "parameters": toy_ds[PARAM_NAMES],
+        },
+        "proc": {"class": _TwoLevels, **state},
+    }
+    return Model(process_dict, {})
+
+
+def test_partial_state_group_raises(toy_ds):
+    """Part of a state group raises, naming what is missing; the whole
+    group, or none of it, is accepted."""
+    n_space = toy_ds.sizes["space"]
+    level_a = xr.DataArray(np.full(n_space, 5.0), dims="space")
+    level_b = xr.DataArray(np.full(n_space, 7.0), dims="space")
+
+    with pytest.raises(ValueError, match=r"without \['level_b'\]"):
+        _two_levels_model(toy_ds, level_a=level_a)
+
+    with _two_levels_model(toy_ds) as model:
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level_b"].values, 2.0
+        )
+    with _two_levels_model(toy_ds, level_a=level_a, level_b=level_b) as model:
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level_a"].values, 5.0
+        )
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level_b"].values, 7.0
+        )
+
+
+def test_state_groups_are_restart_variables():
+    """Guard: every name in a declared state group is one of that
+    class's restart variables."""
+    # importing registers the classes that declare groups
+    from pws_phoenix.hydrology import (  # noqa: F401
+        prms_runoff,
+        prms_soilzone,
+        prms_soilzone_ag,
+    )
+
+    declaring = [cc for cc in Process._registry.values() if cc.state_groups]
+    assert {"PRMSSoilzone", "PRMSSoilzoneAg", "PRMSRunoffAg"} <= {
+        cc.__name__ for cc in declaring
+    }
+    for name, cls in Process._registry.items():
+        restart = set(cls.get_restart_variables())
+        for group in cls.state_groups:
+            assert set(group) <= restart, f"{name}: {group}"
+
+
 def test_flags_are_variables_only():
     """Guard: restart flags only make sense on variables (declared or
     generated budget terms) -- every flagged field in the registry is

@@ -303,6 +303,16 @@ class Process(ABC):
     # dict.
     budgets: dict[str, dict[str, tuple[str, ...]]] = {}
 
+    # Restart variables that must be SUPPLIED TOGETHER as initial state
+    # (the Model raises on part of a group; none of it, or a restart,
+    # is fine). Declare a group when initialize() computes some of its
+    # members from the DEFAULTS of others (e.g. soil_lower =
+    # soil_moist - soil_rechr): supplied state is written after
+    # initialize(), so supplying one member alone would leave the rest
+    # computed from a default that was then replaced. A variant
+    # inherits the tuple or redeclares it whole.
+    state_groups: tuple[tuple[str, ...], ...] = ()
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         Process._registry[cls.__name__] = cls

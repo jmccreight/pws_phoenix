@@ -517,6 +517,26 @@ class Model:
                 "use one source."
             )
 
+    @staticmethod
+    def _raise_if_partial_state_group(
+        proc_name: str, cls: Any, entry: Dict[str, Any]
+    ) -> None:
+        """A process's state group (Process.state_groups) is supplied
+        whole or not at all: its initialize() computes some members
+        from the defaults of others, and supplied state lands after
+        that hook."""
+        for group in cls.state_groups:
+            missing = [nn for nn in group if nn not in entry]
+            if missing and len(missing) < len(group):
+                given = [nn for nn in group if nn in entry]
+                raise ValueError(
+                    f"process '{proc_name}' ({cls.__name__}): initial "
+                    f"state {given} is supplied without {missing}. "
+                    f"{list(group)} must be supplied together: "
+                    f"{cls.__name__}.initialize() computes some of them "
+                    "from the others."
+                )
+
     def _validate_inputs_resolved(self) -> None:
         """Every declared process input must be present on its grid's shared
         dataset after assembly -- supplied in the process_dict entry, produced
@@ -552,6 +572,7 @@ class Model:
             for kkk, vvv in vv.items()
             if kkk not in ("class", "discretization")
         }
+        self._raise_if_partial_state_group(proc_name, cls, init_dict)
 
         # -- parameters: sourced DIS-FIRST (grid-owned variables live on
         # the Discretization's own dataset -- dis_hru/dis_seg style), then
@@ -1338,6 +1359,8 @@ class ModelMPI(Model):
         #      restores its own block. ----
         for kk, cls in mpi_classes.items():
             entry = self._process_dict[kk]
+            # deterministic from process_dict: every rank raises together
+            self._raise_if_partial_state_group(kk, cls, entry)
             for name in cls.get_restart_variables():
                 if name in entry:
                     self._supplied_state[(mpi_grid, name)] = entry[name]
