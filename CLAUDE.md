@@ -107,8 +107,8 @@ populated + derived from the pws-prms-oracle by pywatershed's
 `tests/prms_oracle.toml` (macos-arm64 only so far) and checked at
 session start -- a regenerated oracle = a reviewed key bump, never a
 silent shift. Run tests from the repo root:
-`./tests/run_tests.sh` (serial + MPI, no skips allowed) or
-`pytest tests/ -q --ignore-glob='tests/*_mpi.py'` (serial only).
+`./tests/run_tests.sh` (serial + MPI, no skips allowed;
+`--serial-only` / `--parallel-only` for one half).
 
 # python assumptions/conventions
 
@@ -364,7 +364,13 @@ in the graph's io units declare the placeholders `io flow units` /
 `io flow units x s` / `io storage units`, resolved over the whole field
 union at composition (`IO_PLACEHOLDERS`). `tests/test_units.py`
 enforces: every expression parses, every declared string is a key,
-every float field has units, no placeholder survives composition.
+every float field has units, no placeholder survives composition --
+BOTH by a source scan of literal `DataArrayMeta(` calls AND over the
+resolved fields of every registered package class (Nov 11, 2026: the
+`_meta` helpers of prms_soilzone_ag.py and prms_stream_temp.py had
+hidden ~150 unit-less float fields from the scan; `units` is now a
+required argument of both helpers; `lat_temp_adj` is `delta_degC`,
+PRMS says degrees Celsius -- it is ADDED to a temperature).
 
 Two boundaries, deliberately separate:
 

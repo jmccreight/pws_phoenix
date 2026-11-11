@@ -5,6 +5,8 @@
 #   ./tests/run_tests.sh          # from the repo root (or anywhere)
 #   ./tests/run_tests.sh -vv -x   # extra args REPLACE the default -q on
 #                                 # every pytest invocation
+#   ./tests/run_tests.sh --serial-only     # the serial suite alone
+#   ./tests/run_tests.sh --parallel-only   # the MPI files alone
 #   MPI_CMD="srun -n 4" ./tests/run_tests.sh   # HPC (see mpix/detect_hpc.sh)
 #
 # MPI files run ONE PER LAUNCH (module-scoped fixtures stay isolated and
@@ -38,25 +40,37 @@ $(pwd -P) -- suggest: pip install -e . --no-deps in the right env"
 fi
 
 MPI_CMD=${MPI_CMD:-"mpirun -n 4"}
-if [ "$#" -gt 0 ]; then
-    pytest_opts=("$@")
-else
+run_serial=1
+run_mpi=1
+pytest_opts=()
+for arg in "$@"; do
+    case "${arg}" in
+        --serial-only) run_mpi=0 ;;
+        --parallel-only) run_serial=0 ;;
+        *) pytest_opts+=("${arg}") ;;
+    esac
+done
+if [ "${#pytest_opts[@]}" -eq 0 ]; then
     pytest_opts=(-q)
 fi
 failures=0
 
-serial_opts=(--error-for-skips --ignore-glob='tests/*_mpi.py')
-echo "==== serial: pytest tests/ ${serial_opts[*]} ${pytest_opts[*]}"
-pytest tests/ "${serial_opts[@]}" "${pytest_opts[@]}" \
-    || failures=$((failures + 1))
-
-mpi_opts=(--with-mpi --error-for-skips)
-for ff in tests/test_*_mpi.py; do
-    echo
-    echo "==== MPI: ${MPI_CMD} pytest ${mpi_opts[*]} ${ff} ${pytest_opts[*]}"
-    ${MPI_CMD} pytest "${mpi_opts[@]}" "${ff}" "${pytest_opts[@]}" \
+if [ "${run_serial}" -eq 1 ]; then
+    serial_opts=(--error-for-skips --ignore-glob='tests/*_mpi.py')
+    echo "==== serial: pytest tests/ ${serial_opts[*]} ${pytest_opts[*]}"
+    pytest tests/ "${serial_opts[@]}" "${pytest_opts[@]}" \
         || failures=$((failures + 1))
-done
+fi
+
+if [ "${run_mpi}" -eq 1 ]; then
+    mpi_opts=(--with-mpi --error-for-skips)
+    for ff in tests/test_*_mpi.py; do
+        echo
+        echo "==== MPI: ${MPI_CMD} pytest ${mpi_opts[*]} ${ff} ${pytest_opts[*]}"
+        ${MPI_CMD} pytest "${mpi_opts[@]}" "${ff}" "${pytest_opts[@]}" \
+            || failures=$((failures + 1))
+    done
+fi
 
 echo
 elapsed=$(( SECONDS - start_s ))

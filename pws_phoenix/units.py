@@ -71,6 +71,7 @@ VOCABULARY: dict[str, str | None] = {
     "cubic feet/inch": "foot ** 3 / inch",
     # -- SI (channel geometry, STARFIT) --
     "m": "meter",
+    "km": "kilometer",
     "m^2": "meter ** 2",
     "m/s": "meter / second",
     "cubic meters": "meter ** 3",
@@ -85,6 +86,7 @@ VOCABULARY: dict[str, str | None] = {
     # -- temperature (absolute vs difference) --
     "degF": "degF",
     "degC": "degC",
+    "delta_degC": "delta_degC",
     "1/delta_degF": "1 / delta_degF",
     "dday/delta_degF": "1 / delta_degF",
     # -- rates and reciprocals --
@@ -102,6 +104,7 @@ VOCABULARY: dict[str, str | None] = {
     "none": "dimensionless",
     "percent": "percent",
     "degrees": "degree",
+    "radians": "radian",
     # -- named but not expressible in pint --
     "dday": None,  # PRMS degree-day index (dimensionless by use)
     "day of year": None,  # a calendar ordinal stored as float
