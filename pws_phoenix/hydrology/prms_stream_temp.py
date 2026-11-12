@@ -1542,8 +1542,8 @@ class PRMSStreamTempSegHumidity(PRMSStreamTemp):
         units="fraction",
     )
 
-    def init_from_params(self) -> None:
-        super().init_from_params()
+    def init_state(self, time: Time) -> None:
+        super().init_state(time)
         self._refs["seg_humid"][:] = 0.0
 
     def calculate(self, dt: np.float64, time: Time) -> None:

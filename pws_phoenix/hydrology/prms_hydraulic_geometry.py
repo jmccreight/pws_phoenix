@@ -150,6 +150,9 @@ class PRMSHydraulicGeometryWidthOnly(Process):
     )
 
     def init_from_params(self) -> None:
+        self._set_depth_params()
+
+    def init_state(self, time: Time) -> None:
         refs = self._refs
         for name in (
             "seg_flow_width",
@@ -159,7 +162,6 @@ class PRMSHydraulicGeometryWidthOnly(Process):
             "seg_res_time",
         ):
             refs[name][:] = 0.0
-        self._set_depth_params()
 
     def _set_depth_params(self) -> None:
         """The strmflow_character defaults (Full overrides to no-op:

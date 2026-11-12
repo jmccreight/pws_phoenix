@@ -425,6 +425,18 @@ class PRMSAtmosphereBase(Process):
 
     def init_from_params(self) -> None:
         refs = self._refs
+
+        # upstream's is_summer logic assumes the northern hemisphere
+        if not (refs["hru_lat"] > 0.0).any():
+            raise NotImplementedError(
+                "PRMSAtmosphere: southern-hemisphere domains are not "
+                "implemented (upstream raises the same)"
+            )
+
+        refs["hru_cossl"][:] = np.cos(np.arctan(refs["hru_slope"]))
+
+    def init_state(self, time: Time) -> None:
+        refs = self._refs
         for name in (
             "tmaxf",
             "tminf",
@@ -443,15 +455,6 @@ class PRMSAtmosphereBase(Process):
             "transp_on",
         ):
             refs[name][:] = 0.0
-
-        # upstream's is_summer logic assumes the northern hemisphere
-        if not (refs["hru_lat"] > 0.0).any():
-            raise NotImplementedError(
-                "PRMSAtmosphere: southern-hemisphere domains are not "
-                "implemented (upstream raises the same)"
-            )
-
-        refs["hru_cossl"][:] = np.cos(np.arctan(refs["hru_slope"]))
 
     # ------------------------------------------------------------------
     # Computation
@@ -769,8 +772,6 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
     def init_from_params(self) -> None:
         super().init_from_params()
         refs = self._refs
-        refs["tmax_sum"][:] = 0.0
-        refs["transp_check"][:] = 0
 
         # transp_tmax units ("candidate for worst code lines" upstream)
         if int(refs["temp_units"][0]) == 0:
@@ -779,6 +780,12 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
             refs["transp_tmax_f"][:] = (
                 refs["transp_tmax"] * (9.0 / 5.0)
             ) + 32.0
+
+    def init_state(self, time: Time) -> None:
+        super().init_state(time)
+        refs = self._refs
+        refs["tmax_sum"][:] = 0.0
+        refs["transp_check"][:] = 0
 
     @staticmethod
     @numba.njit(cache=NUMBA_CACHE)

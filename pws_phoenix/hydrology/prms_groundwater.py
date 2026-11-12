@@ -185,7 +185,7 @@ class PRMSGroundwaterNoDprst(Process):
     # Computation
     # ------------------------------------------------------------------
 
-    def init_from_params(self) -> None:
+    def init_state(self, time: Time) -> None:
         """Cold-start default: gwres_stor = 2.0 inches, PRMS's declared
         default for gwstor_init (gwflow.f90 declparam, 5.2.1 and
         5.2.1.1; pywatershed declares none). A domain's own value is

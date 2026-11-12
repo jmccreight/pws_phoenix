@@ -445,38 +445,13 @@ class PRMSChannel(Process):
     # ------------------------------------------------------------------
 
     def init_from_params(self) -> None:
-        """Compute Muskingum coefficients and initial routing state,
-        replicating pywatershed _initialize_channel_data numerics (and
-        order) exactly. Temporaries here are INIT-time, not per-step."""
+        """Compute the Muskingum coefficients, replicating pywatershed
+        _initialize_channel_data numerics (and order) exactly.
+        Temporaries here are INIT-time, not per-step."""
         refs = self._refs
-
-        # -- init values: allocation fills nan; pywatershed zero-inits
-        # these (channel_outflow_vol is nan upstream but overwritten
-        # every step; zeroed here for tidiness) --
-        for name in (
-            "seg_lateral_inflow",
-            "seg_upstream_inflow",
-            "seg_inflow",
-            "seg_outflow",
-            "outflow_ts",
-            "seg_stor_change",
-            "channel_outflow_vol",
-            "inflow_ts",
-            "seg_current_sum",
-        ):
-            refs[name][:] = 0.0
-        # pywatershed order: inflow_ts_prev from seg_inflow (zero)
-        refs["inflow_ts_prev"][:] = refs["seg_inflow"]
 
         # -- 0-based connectivity for the kernel --
         refs["tosegment0"][:] = refs["tosegment"] - 1
-
-        # Initial state: the defaults above (zeros). A nonzero start is
-        # SUPPLIED state (seg_inflow, outflow_ts under their own names,
-        # written after this hook). PRMS's segment_flow_init parameter
-        # is translated to a supplied seg_inflow by prms_translate
-        # (pywatershed's propagation, verbatim); the channel no longer
-        # consumes state from parameters.
 
         # -- Muskingum coefficients (module function above; shared with
         # the FlowGraph channel node type) --
@@ -493,6 +468,34 @@ class PRMSChannel(Process):
             refs["segment_type"],
             refs["x_coef"],
         )
+
+    def init_state(self, time: Time) -> None:
+        """Initial routing state: zeros (pywatershed
+        _initialize_channel_data). A nonzero start is SUPPLIED state
+        (seg_inflow, outflow_ts under their own names, written after
+        this hook). PRMS's segment_flow_init parameter is translated
+        to a supplied seg_inflow by prms_translate (pywatershed's
+        propagation, verbatim); the channel does not consume state
+        from parameters."""
+        refs = self._refs
+
+        # allocation fills nan; pywatershed zero-inits these
+        # (channel_outflow_vol is nan upstream but overwritten every
+        # step; zeroed here for tidiness)
+        for name in (
+            "seg_lateral_inflow",
+            "seg_upstream_inflow",
+            "seg_inflow",
+            "seg_outflow",
+            "outflow_ts",
+            "seg_stor_change",
+            "channel_outflow_vol",
+            "inflow_ts",
+            "seg_current_sum",
+        ):
+            refs[name][:] = 0.0
+        # pywatershed order: inflow_ts_prev from seg_inflow (zero)
+        refs["inflow_ts_prev"][:] = refs["seg_inflow"]
 
     # ------------------------------------------------------------------
     # Computation

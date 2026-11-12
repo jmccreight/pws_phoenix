@@ -222,14 +222,6 @@ class PRMSChannelFlowNode:
     def init_from_params_type(dataset, n_substeps, io_in_cfs) -> None:
         # n_substeps unused: the muskingum ts/tsi ladder assumes 24.
         # io_in_cfs unused: muskingum is linear in flow (unit-agnostic)
-        for name in (
-            "seg_inflow",
-            "seg_outflow",
-            "inflow_ts",
-            "outflow_ts",
-            "inflow_ts_prev",
-        ):
-            dataset[name].values[:] = 0.0
         muskingum_mann_coefficients(
             dataset["ts"].values,
             dataset["tsi"].values,
@@ -243,6 +235,19 @@ class PRMSChannelFlowNode:
             dataset["segment_type"].values,
             dataset["x_coef"].values,
         )
+
+    @staticmethod
+    def init_state_type(dataset, time) -> None:
+        # routing state defaults to zero (see module docstring).
+        # Full-array writes are safe: this type is the sole owner.
+        for name in (
+            "seg_inflow",
+            "seg_outflow",
+            "inflow_ts",
+            "outflow_ts",
+            "inflow_ts_prev",
+        ):
+            dataset[name].values[:] = 0.0
 
     @staticmethod
     def advance_type(dataset) -> None:

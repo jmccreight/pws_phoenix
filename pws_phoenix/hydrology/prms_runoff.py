@@ -1323,23 +1323,6 @@ class PRMSRunoffNoDprst(Process):
         refs = self._refs
         nhru = refs["hru_area"].shape[0]
 
-        # -- zero-init all variables (pywatershed get_init_values) --
-        for name in (
-            "contrib_fraction",
-            "infil",
-            "infil_hru",
-            "sroff",
-            "sroff_vol",
-            "hru_sroffp",
-            "hru_sroffi",
-            "imperv_stor",
-            "imperv_evap",
-            "hru_impervevap",
-            "hru_impervstor",
-            "hru_impervstor_old",
-            "hru_impervstor_change",
-        ):
-            refs[name][:] = 0.0
         for name in (
             "hru_perv",
             "hru_frac_perv",
@@ -1363,6 +1346,26 @@ class PRMSRunoffNoDprst(Process):
 
             hru_perv[ii] = perv_area
             hru_frac_perv[ii] = perv_area / harea
+
+    def init_state(self, time: Time) -> None:
+        refs = self._refs
+        # -- zero-init all variables (pywatershed get_init_values) --
+        for name in (
+            "contrib_fraction",
+            "infil",
+            "infil_hru",
+            "sroff",
+            "sroff_vol",
+            "hru_sroffp",
+            "hru_sroffi",
+            "imperv_stor",
+            "imperv_evap",
+            "hru_impervevap",
+            "hru_impervstor",
+            "hru_impervstor_old",
+            "hru_impervstor_change",
+        ):
+            refs[name][:] = 0.0
 
     # ------------------------------------------------------------------
     # Computation

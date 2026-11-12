@@ -1934,7 +1934,24 @@ class PRMSSnow(Process):
     def init_from_params(self) -> None:
         refs = self._refs
 
+        # snarea_curve sanity: flat length must be n_curves * 11
+        if refs["snarea_curve"].shape[0] % 11 != 0:
+            raise ValueError("snarea_curve length must be a multiple of 11")
+
+        # nonzero snowpack_init requires upstream's (buggy) init block
+        # -- not ported; see module docstring
+        if (refs["snowpack_init"] > 0.0).any():
+            raise NotImplementedError(
+                "PRMSSnow: nonzero snowpack_init is not ported (upstream "
+                "initialization block is faulty; nhm domains use zero)"
+            )
+
+    def init_state(self, time: Time) -> None:
+        refs = self._refs
+
         # zero-init all float variables; flags to their upstream inits
+        # (pkwater_equiv/pss/pst = snowpack_init = 0: init_from_params
+        # rejects a nonzero snowpack_init)
         for name in (
             "ai",
             "albedo",
@@ -1974,19 +1991,6 @@ class PRMSSnow(Process):
         refs["iso"][:] = 1
         refs["mso"][:] = 1
         refs["lso"][:] = 0
-
-        # snarea_curve sanity: flat length must be n_curves * 11
-        if refs["snarea_curve"].shape[0] % 11 != 0:
-            raise ValueError("snarea_curve length must be a multiple of 11")
-
-        # nonzero snowpack_init requires upstream's (buggy) init block
-        # -- not ported; see module docstring
-        if (refs["snowpack_init"] > 0.0).any():
-            raise NotImplementedError(
-                "PRMSSnow: nonzero snowpack_init is not ported (upstream "
-                "initialization block is faulty; nhm domains use zero)"
-            )
-        # pkwater_equiv/pss/pst = snowpack_init = 0 (already zeroed)
 
     # ------------------------------------------------------------------
     # Computation
