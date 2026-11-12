@@ -81,6 +81,7 @@ def test_stream_temp_standalone_externals():
         "parameters",
         "derivable_parameters",
         "initial_state",
+        "required_initial_state",
     }
     # derivable: required, with a stated derivation (NOT the same as
     # internal parameters, which are never supplied)

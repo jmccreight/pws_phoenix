@@ -246,9 +246,84 @@ def test_partial_state_group_raises(toy_ds):
         )
 
 
+class _NoDefault(Process):
+    """`level` has no default (required state); a negative starting
+    level is reported by check_initial_state()."""
+
+    level = DataArrayMeta(
+        kind="variable", dims=("space",), dtype=np.float64, restart=True
+    )
+    required_state = ("level",)
+
+    def check_initial_state(self) -> list[str]:
+        n_bad = int((self._refs["level"] < 0.0).sum())
+        return [f"{n_bad} negative level(s)"] if n_bad else []
+
+    def advance(self) -> None:
+        pass
+
+    def calculate(self, dt, time) -> None:
+        pass
+
+
+def _no_default_process_dict(toy_ds, control=None, **state):
+    return {
+        # FIRST: gives the grid its time axis and "space" size
+        "upper": {
+            "class": Upper,
+            "forcing_up": toy_ds["forcing_up"],
+            **cold_start_state(control or {}, flow=toy_ds["flow_initial"]),
+            "parameters": toy_ds[PARAM_NAMES],
+        },
+        "proc": {"class": _NoDefault, **state},
+    }
+
+
+def test_required_state_missing_raises(toy_ds):
+    """Required state not supplied raises at assembly; supplied, it is
+    accepted and is what the model starts from."""
+    with pytest.raises(ValueError, match=r"\['level'\] has no default"):
+        Model(_no_default_process_dict(toy_ds), {})
+
+    n_space = toy_ds.sizes["space"]
+    level = xr.DataArray(np.full(n_space, 3.0), dims="space")
+    with Model(_no_default_process_dict(toy_ds, level=level), {}) as model:
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level"].values, 3.0
+        )
+
+
+def test_required_state_from_restart(toy_ds, tmp_path):
+    """A restart satisfies required state: nothing is supplied on the
+    warm start."""
+    n_space = toy_ds.sizes["space"]
+    level = xr.DataArray(np.full(n_space, 3.0), dims="space")
+    restart_dir = tmp_path / "restarts"
+    with Model(_no_default_process_dict(toy_ds, level=level), {}) as model:
+        model.run(DT, np.int32(2))
+        model.write_restart(restart_dir)
+    control = {"restart_read": restart_dir}
+    process_dict = _no_default_process_dict(toy_ds, control=control)
+    with Model(process_dict, control) as model:
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level"].values, 3.0
+        )
+
+
+def test_check_initial_state_raises(toy_ds):
+    """A problem a process reports about the starting state in place
+    (here: supplied) makes the Model raise, naming the process."""
+    n_space = toy_ds.sizes["space"]
+    level = xr.DataArray(np.full(n_space, -1.0), dims="space")
+    with pytest.raises(
+        ValueError, match=rf"process 'proc': {n_space} negative level"
+    ):
+        Model(_no_default_process_dict(toy_ds, level=level), {})
+
+
 def test_state_groups_are_restart_variables():
-    """Guard: every name in a declared state group is one of that
-    class's restart variables."""
+    """Guard: every name in a declared state group, and every required
+    state name, is one of that class's restart variables."""
     # importing registers the classes that declare groups
     from pws_phoenix.hydrology import (  # noqa: F401
         prms_runoff,
@@ -264,6 +339,7 @@ def test_state_groups_are_restart_variables():
         restart = set(cls.get_restart_variables())
         for group in cls.state_groups:
             assert set(group) <= restart, f"{name}: {group}"
+        assert set(cls.required_state) <= restart, f"{name}: required"
 
 
 def test_flags_are_variables_only():

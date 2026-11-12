@@ -107,6 +107,7 @@ class Model:
         else:
             self._load_all = load_all
         self._set_budget_options(control)
+        self._warm_start = control.get("restart_read") is not None
 
         self._load_paths_to_data()
 
@@ -129,6 +130,7 @@ class Model:
         if restart_read is not None:
             self._raise_if_supplied_state_with_restart()
             self._read_restart(pl.Path(restart_read))
+        self._check_initial_state()
 
         # the step cursor: step()/run() continue from here
         self._next_index = self._start_index
@@ -256,6 +258,10 @@ class Model:
           initialize() sets it), OR all at once via
           ``control["restart_read"]`` (see ``write_restart``) -- never
           both. Optional supply, but part of the contract's surface.
+        - "required_initial_state": {process: [variables]} -- the
+          subset of "initial_state" with NO initialize() default
+          (``Process.required_state``): supply it per variable, or
+          warm-start; the Model raises otherwise.
 
         spec["maps"] (present when maps are given) -- REQUIRED supply
         too, kept beside "required" because that dict's keys are
@@ -319,6 +325,7 @@ class Model:
             internal: Dict[str, List[str]] = {}
             var_owner: Dict[str, str] = {}
             initial_state: Dict[str, List[str]] = {}
+            required_state: Dict[str, List[str]] = {}
             for kk in proc_names:
                 pcls = process_dict[kk]["class"]
                 for name, meta in _dict_of_kind(pcls, "parameter").items():
@@ -337,6 +344,8 @@ class Model:
                 restartable = list(pcls.get_restart_variables())
                 if restartable:
                     initial_state[kk] = restartable
+                if pcls.required_state:
+                    required_state[kk] = list(pcls.required_state)
             # a name declared derivable by ANY process is derivable
             # (another process may declare it plain -- the derivation
             # knowledge counts once)
@@ -403,6 +412,7 @@ class Model:
                 "parameters": parameters,
                 "derivable_parameters": derivable,
                 "initial_state": initial_state,
+                "required_initial_state": required_state,
             }
             if include_optional:
                 spec["optional"][grid] = {
@@ -537,6 +547,43 @@ class Model:
                     "from the others."
                 )
 
+    def _raise_if_required_state_missing(
+        self, proc_name: str, cls: Any, entry: Dict[str, Any]
+    ) -> None:
+        """A process's required state (Process.required_state) has no
+        initialize() default: it is supplied, or comes from a restart."""
+        if self._warm_start:
+            return
+        missing = [nn for nn in cls.required_state if nn not in entry]
+        if missing:
+            raise ValueError(
+                f"process '{proc_name}' ({cls.__name__}): initial state "
+                f"{missing} has no default; supply it in the process "
+                "entry or set control['restart_read']."
+            )
+
+    def _check_initial_state(self) -> None:
+        """Ask every process to check the starting state now in place
+        (defaults, then supplied state or a restart); raise on any
+        problem (see _raise_if_bad_initial_state)."""
+        problems = [
+            f"process '{kk}': {msg}"
+            for kk, proc in self.model_dict.items()
+            for msg in proc.check_initial_state()
+        ]
+        self._raise_if_bad_initial_state(len(problems), problems)
+
+    def _raise_if_bad_initial_state(
+        self, n_bad: int, problems: List[str]
+    ) -> None:
+        """Serial: raise on a local problem. ModelMPI overrides to agree
+        across ranks first."""
+        if n_bad:
+            raise ValueError(
+                "\n".join(problems)
+                or "initial state was rejected on another rank"
+            )
+
     def _validate_inputs_resolved(self) -> None:
         """Every declared process input must be present on its grid's shared
         dataset after assembly -- supplied in the process_dict entry, produced
@@ -573,6 +620,7 @@ class Model:
             if kkk not in ("class", "discretization")
         }
         self._raise_if_partial_state_group(proc_name, cls, init_dict)
+        self._raise_if_required_state_missing(proc_name, cls, init_dict)
 
         # -- parameters: sourced DIS-FIRST (grid-owned variables live on
         # the Discretization's own dataset -- dis_hru/dis_seg style), then
@@ -1054,6 +1102,7 @@ class ModelMPI(Model):
         # grids only -- the distributed grid's data ride in input_file.
         self._provided_discs: Dict[str, Discretization] = discretizations or {}
         self._control = control
+        self._warm_start = control.get("restart_read") is not None
         self.maps: Dict[str, Any] = maps or {}
         self._proc_grid: Dict[str, str] = {
             kk: self._resolve_grid(vv) for kk, vv in self._process_dict.items()
@@ -1361,6 +1410,7 @@ class ModelMPI(Model):
             entry = self._process_dict[kk]
             # deterministic from process_dict: every rank raises together
             self._raise_if_partial_state_group(kk, cls, entry)
+            self._raise_if_required_state_missing(kk, cls, entry)
             for name in cls.get_restart_variables():
                 if name in entry:
                     self._supplied_state[(mpi_grid, name)] = entry[name]
@@ -1435,6 +1485,7 @@ class ModelMPI(Model):
         if restart_read is not None:
             self._raise_if_supplied_state_with_restart()
             self._read_restart(pl.Path(restart_read))
+        self._check_initial_state()
 
     # -- run ------------------------------------------------------------
 
@@ -1513,6 +1564,16 @@ class ModelMPI(Model):
 
         n_bad = self._comm.allreduce(int(n_bad), op=MPI.MAX)
         super()._raise_if_imbalanced(n_bad, proc)
+
+    def _raise_if_bad_initial_state(
+        self, n_bad: int, problems: List[str]
+    ) -> None:
+        """Agree across ranks before raising (one Allreduce(MAX) of the
+        local count), so every rank raises together."""
+        from mpi4py import MPI
+
+        n_bad = self._comm.allreduce(int(n_bad), op=MPI.MAX)
+        super()._raise_if_bad_initial_state(n_bad, problems)
 
     # -- restart ---------------------------------------------------------
 

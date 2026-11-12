@@ -490,7 +490,16 @@ the `epiweeks` dep).
   `dprst_stor_hru`). Supplying EVERY restart variable is the restart
   case, policed by the perfect-restart tests. Every `initialize()`
   was read for this (Nov 11, 2026): no other hook computes one
-  restart variable from another. LATER, when someone needs to set
+  restart variable from another. `Process.required_state` (restart
+  variables with NO default): the Model raises at assembly when one
+  is neither supplied nor coming from a restart; reported by
+  `input_spec` as "required_initial_state". `check_initial_state()`
+  (default: no problems) runs once after the starting state is in
+  place (cold start or restart) and RETURNS messages -- the Model
+  raises, on every rank under MPI (Allreduce, as for budgets). A
+  composed FlowGraph takes the union of its node types'
+  `required_state` and calls their optional
+  `check_initial_state_type(dataset)`. LATER, when someone needs to set
   e.g. soil moisture alone (data assimilation): JLM's split
   `init_from_params() -> init_state -> init_diagnostic_state`, so
   derived state is recomputed from whatever state is in place --
@@ -499,8 +508,9 @@ the `epiweeks` dep).
   overwrite supplied state on a cold start (a restart resumes past
   them): PRMSAtmosphere `_transp_tindex` at `istep0`,
   PRMSSoilzoneAg `_istep0_areas`, StarfitDailyFlowNode's first
-  substep; and `prms_translate.insert_flow_graph` drops the channel
-  entry's supplied `seg_inflow` (the graph starts from zero).
+  substep. (`prms_translate.insert_flow_graph` carries the channel
+  entry's supplied state onto the graph's channel rows, zero on the
+  new nodes -- Nov 11, 2026.)
 - **Per-process init hook (IMPLEMENTED July 2026)**:
   `Process.initialize()` (default no-op), called once by the Model
   after binding/input-validation, before the run loop; contract =

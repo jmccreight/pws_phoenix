@@ -595,7 +595,8 @@ flow-driven variables see the knife-edge cascade).
   INPUTS) / INTERNAL (kind="parameter_internal", RENAMED from
   parameter_derived Aug 2026 -- init-computed, never supplied).
   `input_spec` states it all: required {parameters,
-  derivable_parameters, initial_state}, top-level
+  derivable_parameters, initial_state,
+  required_initial_state}, top-level
   "maps" (one weights matrix per map, with derivation), optional
   {internal_inputs, internal_parameters, map_fed_inputs}.
   prms_translate/preprocess.py = the PRE-PROCESSING SUITE:

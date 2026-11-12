@@ -313,6 +313,11 @@ class Process(ABC):
     # inherits the tuple or redeclares it whole.
     state_groups: tuple[tuple[str, ...], ...] = ()
 
+    # Restart variables with NO default: initialize() leaves them
+    # unset, so they must be supplied as initial state or come from a
+    # restart. The Model raises at assembly when one is missing.
+    required_state: tuple[str, ...] = ()
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         Process._registry[cls.__name__] = cls
@@ -365,6 +370,14 @@ class Process(ABC):
         Model freezes them (read-only) after all hooks run. Contract:
         LOCAL (no collectives), reads params/dis vars off self._refs, no
         Time (construction, not runtime)."""
+
+    def check_initial_state(self) -> list[str]:
+        """Called ONCE by the Model after the starting state is in place
+        (initialize() defaults, then supplied state or a restart).
+        Returns this rank's problems as messages (default: none).
+        Contract: LOCAL (no collectives), never raises -- the Model
+        raises, on every rank under MPI."""
+        return []
 
     @abstractmethod
     def advance(self) -> None:
