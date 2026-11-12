@@ -436,6 +436,8 @@ def insert_flow_graph(
     the schedule) on a new ``nnodes`` grid; the three lateral-volume
     Maps are padded with zero rows for the new nodes and re-targeted to
     the graph's ``node_*_vol`` inputs; the ``nsegment`` grid goes away.
+    Initial state supplied in the channel entry (``seg_inflow``) is
+    carried onto the graph's channel rows, zero on the new nodes.
     ``control["output_var_names"]`` is re-filtered to the graph's
     variables (``seg_inflow``/``seg_outflow`` survive -- the channel
     node declares them as its rows' state, now on ``nnodes``; anything
@@ -480,11 +482,19 @@ def insert_flow_graph(
     process_dict: dict[str, dict[str, Any]] = {}
     for slot, entry in kit.process_dict.items():
         if slot == "prms_channel":
-            process_dict["flow_graph"] = {
+            graph_entry = {
                 "class": fg.graph_class,
                 "discretization": "nnodes",
                 "parameters": fg.parameters,
             }
+            # supplied channel state rides onto the graph: zeros on
+            # the new nodes' rows (what initialize_type writes there)
+            for name in fg.graph_class.get_restart_variables():
+                if name in entry:
+                    padded = np.zeros(fg.n_nodes, dtype=np.float64)
+                    padded[: fg.n_seg] = entry[name].values
+                    graph_entry[name] = xr.DataArray(padded, dims="nnodes")
+            process_dict["flow_graph"] = graph_entry
         else:
             process_dict[slot] = entry
 

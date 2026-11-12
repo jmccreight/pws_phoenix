@@ -241,6 +241,23 @@ def test_output_names_refiltered(tmp_path):
 
 
 @ucb_skipif
+def test_supplied_channel_state_carried_to_graph():
+    """Initial state supplied in the channel entry lands on the
+    graph's channel rows; the new nodes' rows are zero."""
+    kit = assemble_from_control(UCB_CONTROL)
+    channel = kit.process_dict["prms_channel"]
+    n_seg = kit.discretizations["nsegment"].parameters.sizes["nsegment"]
+    supplied = np.arange(1.0, n_seg + 1.0)
+    channel["seg_inflow"] = xr.DataArray(supplied, dims="nsegment")
+    nodes, _ = big_sandy_nodes()
+    graph_entry = insert_flow_graph(kit, nodes).process_dict["flow_graph"]
+    carried = graph_entry["seg_inflow"]
+    assert carried.dims == ("nnodes",)
+    np.testing.assert_array_equal(carried.values[:n_seg], supplied)
+    np.testing.assert_array_equal(carried.values[n_seg:], np.zeros(len(nodes)))
+
+
+@ucb_skipif
 def test_no_channel_slot_raises():
     kit = assemble_from_control(UCB_CONTROL)
     del kit.process_dict["prms_channel"]
