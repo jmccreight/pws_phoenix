@@ -79,8 +79,9 @@ tests are not available in CI; those tests skip cleanly.
 ### Running tests
 
 ```
-./tests/run_tests.sh          # serial suite + each MPI file under mpirun
-pytest tests/ -q              # serial only
+./tests/run_tests.sh                 # serial suite + each MPI file under mpirun
+./tests/run_tests.sh --serial-only   # the serial suite alone (no skips)
+./tests/run_tests.sh --parallel-only # the MPI files alone
 ```
 
 The pywatershed-validation tests read a pywatershed `test_data/` tree

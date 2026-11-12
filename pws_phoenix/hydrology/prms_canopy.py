@@ -58,6 +58,13 @@ _NEARZERO = 1.0e-6  # nearzero
 # dnearzero = epsilon64: pywatershed HARDCODES 2.23e-16 (slightly
 # above np.finfo(float64).eps) -- verbatim, threshold branches differ
 _DNEARZERO = 2.23e-16
+# a zero in the kernel's working unit (inches): every zero assigned to
+# an inches scalar in the kernel. numba freezes it as a constant (the
+# compiled code is unchanged); the stage-3 units test
+# (tests/test_kernel_units.py) patches it, _NEARZERO and _DNEARZERO to
+# pint Quantities in inches -- a bare 0.0 cannot be assigned into an
+# inches array under pint.
+_ZERO_INCHES = 0.0
 _BARESOIL = 0  # CovType.BARESOIL
 _GRASSES = 1  # CovType.GRASSES
 _LAND = 1  # HruType.LAND
@@ -402,16 +409,16 @@ class PRMSCanopy(Process):
                 intcp_form[ii] = _SNOW
 
             intcpstor = intcp_stor[ii]
-            intcpevap = 0.0
-            changeover = 0.0
-            extra_water = 0.0
+            intcpevap = _ZERO_INCHES
+            changeover = _ZERO_INCHES
+            extra_water = _ZERO_INCHES
 
             # lake or bare ground hrus (hru_type hardwired LAND -- the
             # LAKE half is dead, kept verbatim)
             if _HRU_TYPE == _LAKE or cov_type[ii] == _BARESOIL:
                 if cov_type[ii] == _BARESOIL and intcpstor > 0.0:
                     extra_water = intcp_stor[ii]
-                intcpstor = 0.0
+                intcpstor = _ZERO_INCHES
 
             # ***** go from summer to winter cover density
             if transp_on[ii] == _OFF and intcp_transp_on[ii] == _ACTIVE:
@@ -422,9 +429,9 @@ class PRMSCanopy(Process):
                     if cov > 0.0:
                         if changeover < 0.0:
                             intcpstor = intcpstor * covden_sum[ii] / cov
-                            changeover = 0.0
+                            changeover = _ZERO_INCHES
                     else:
-                        intcpstor = 0.0
+                        intcpstor = _ZERO_INCHES
 
             # **** go from winter to summer cover density
             elif transp_on[ii] == _ACTIVE and intcp_transp_on[ii] == _OFF:
@@ -435,9 +442,9 @@ class PRMSCanopy(Process):
                     if cov > 0.0:
                         if changeover < 0.0:
                             intcpstor = intcpstor * covden_win[ii] / cov
-                            changeover = 0.0
+                            changeover = _ZERO_INCHES
                     else:
-                        intcpstor = 0.0
+                        intcpstor = _ZERO_INCHES
 
             # ***** determine the amount of interception from rain
             if _HRU_TYPE != _LAKE and cov_type[ii] != _BARESOIL:
@@ -478,7 +485,7 @@ class PRMSCanopy(Process):
                         )
                         if netsnow < _NEARZERO:
                             netrain = netrain + netsnow
-                            netsnow = 0.0
+                            netsnow = _ZERO_INCHES
                             pptmix[ii] = 0
 
             # ***** evaporation or sublimation of interception
@@ -496,7 +503,7 @@ class PRMSCanopy(Process):
                             intcpevap = evsn
                         else:
                             intcpevap = intcpstor
-                            intcpstor = 0.0
+                            intcpstor = _ZERO_INCHES
                     else:
                         d = intcpstor - evrn
                         if d > 0.0:
@@ -504,14 +511,14 @@ class PRMSCanopy(Process):
                             intcpevap = evrn
                         else:
                             intcpevap = intcpstor
-                            intcpstor = 0.0
+                            intcpstor = _ZERO_INCHES
 
             if intcpevap * cov > potet[ii]:
                 last = intcpevap
                 if cov > 0.0:
                     intcpevap = potet[ii] / cov
                 else:
-                    intcpevap = 0.0
+                    intcpevap = _ZERO_INCHES
                 intcpstor = intcpstor + last - intcpevap
 
             # store calculated values in output variables

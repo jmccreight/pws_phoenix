@@ -5,8 +5,10 @@ resolves the io-units placeholders. No runtime behavior is tested here
 (stage 2); pint is a test dependency only."""
 
 import ast
+import importlib
 import pathlib
 
+import numpy as np
 import pytest
 from pws_phoenix import units as units_mod
 from pws_phoenix.flow_graph import make_flow_graph
@@ -19,7 +21,8 @@ from pws_phoenix.hydrology.starfit_flow_node import StarfitFlowNode
 from pws_phoenix.hydrology.starfit_source_sink_flow_node import (
     StarfitSourceSinkFlowNode,
 )
-from pws_phoenix.process import _resolved_fields
+from pws_phoenix.hydrology.prms_soilzone_ag import PRMSSoilzoneAg
+from pws_phoenix.process import Process, _resolved_fields
 from pws_phoenix.units import IO_PLACEHOLDERS, VOCABULARY, quantity
 
 PACKAGE = pathlib.Path(units_mod.__file__).parent
@@ -124,6 +127,31 @@ def test_float_fields_declare_units():
         row for row in DECLARATIONS if "float" in row[3] and row[4] is None
     ]
     assert missing == []
+
+
+def test_registered_float_fields_declare_units():
+    """The same rule on the RESOLVED fields of every registered Process
+    class, whatever constructed the declaration: the source scanner
+    above sees only literal ``DataArrayMeta(`` calls, and
+    prms_soilzone_ag.py's ``_meta`` helper hid ~100 unit-less float
+    fields from it (Nov 2026)."""
+    for path in sorted(PACKAGE.rglob("*.py")):
+        rel = path.relative_to(PACKAGE).with_suffix("")
+        if rel.name == "__init__":
+            rel = rel.parent
+        importlib.import_module(".".join(("pws_phoenix", *rel.parts)))
+    assert PRMSSoilzoneAg.__name__ in Process._registry
+    bad = []
+    for cls in Process._registry.values():
+        if not cls.__module__.startswith("pws_phoenix."):
+            continue  # a test module's own toy / carrier class
+        for name, meta in _resolved_fields(cls).items():
+            if not np.issubdtype(meta.dtype, np.floating):
+                continue
+            if meta.units in VOCABULARY or meta.units in IO_PLACEHOLDERS:
+                continue
+            bad.append((cls.__name__, name, meta.units))
+    assert bad == []
 
 
 @pytest.mark.parametrize("io_in_cfs", [True, False])
