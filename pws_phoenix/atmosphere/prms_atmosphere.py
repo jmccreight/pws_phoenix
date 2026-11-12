@@ -20,7 +20,9 @@ calculation except transpiration is per-day elementwise and folds
 straight into the in-place kernel; the transp_tindex season logic is
 genuinely sequential and becomes per-step STATE (transp_on, tmax_sum,
 and the private check flag), with upstream's "time zero calculations"
-run inside the kernel on the first step (istep0). Per-element
+run in init_state(time) from the START DATE (they read parameters and
+the date only, so they are the cold-start DEFAULT of that state:
+supplied state or a restart overrides them). Per-element
 operation order matches upstream's vectorized expressions, so results
 are unchanged.
 
@@ -786,6 +788,49 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
         refs = self._refs
         refs["tmax_sum"][:] = 0.0
         refs["transp_check"][:] = 0
+        # upstream's "time zero calculations", on the zeros just set
+        # (transp_on by the base class): the season state implied by
+        # the start date
+        self._transp_time_zero(
+            refs["transp_on"],
+            refs["transp_check"],
+            refs["transp_beg"],
+            refs["transp_end"],
+            np.int64(time.month),
+            np.int64(time.day_of_month),
+        )
+
+    @staticmethod
+    @numba.njit(cache=NUMBA_CACHE)
+    def _transp_time_zero(
+        transp_on: np.ndarray,
+        transp_check: np.ndarray,
+        transp_beg: np.ndarray,
+        transp_end: np.ndarray,
+        current_month: np.int64,
+        current_dom: np.int64,
+    ) -> None:
+        # upstream "time zero calculations", verbatim. Formerly the
+        # first block of _transp_tindex, gated on the first step; it
+        # reads only parameters and the start date, so it runs once in
+        # init_state() and the first step sees the same values.
+        for ii in range(transp_on.shape[0]):
+            motmp = current_month + 12
+            if current_month == transp_beg[ii]:
+                if current_dom > 10:
+                    transp_on[ii] = 1.0
+                else:
+                    transp_check[ii] = 1
+            elif transp_end[ii] > transp_beg[ii]:
+                if (current_month > transp_beg[ii]) and (
+                    current_month < transp_end[ii]
+                ):
+                    transp_on[ii] = 1.0
+            else:
+                if (current_month > transp_beg[ii]) or (
+                    motmp < transp_end[ii] + 12
+                ):
+                    transp_on[ii] = 1.0
 
     @staticmethod
     @numba.njit(cache=NUMBA_CACHE)
@@ -799,31 +844,11 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
         transp_tmax_f: np.ndarray,
         current_month: np.int64,
         current_dom: np.int64,
-        istep0: np.int64,
     ) -> None:
         # transp_tindex sequential state, extracted verbatim from the
         # (previously monolithic) atmosphere kernel -- it was the
         # final, self-contained section of the loop
         for ii in range(transp_on.shape[0]):
-            if istep0 == 1:
-                # upstream "time zero calculations" (start = this step)
-                motmp = current_month + 12
-                if current_month == transp_beg[ii]:
-                    if current_dom > 10:
-                        transp_on[ii] = 1.0
-                    else:
-                        transp_check[ii] = 1
-                elif transp_end[ii] > transp_beg[ii]:
-                    if (current_month > transp_beg[ii]) and (
-                        current_month < transp_end[ii]
-                    ):
-                        transp_on[ii] = 1.0
-                else:
-                    if (current_month > transp_beg[ii]) or (
-                        motmp < transp_end[ii] + 12
-                    ):
-                        transp_on[ii] = 1.0
-
             # (state carries between steps via the persistent arrays;
             # upstream's tt-1 copy is implicit)
             if current_dom == 1:
@@ -860,7 +885,6 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
             refs["transp_tmax_f"],
             np.int64(time.month),
             np.int64(time.day_of_month),
-            np.int64(1 if time.current_index == 0 else 0),
         )
 
 
