@@ -40,13 +40,13 @@ Numerics notes (pywatershed semantics, kept verbatim):
   do not refactor into a constant.
 - Unit constants IN the kernel: 1.0e6 (MCM -> m^3), `/ 24 / 60 / 60`
   (m^3/day -> m^3/s), and `m3ps_to_MCM` = nhrs_substep*3600/1e6
-  (= 0.0864 at nhrs_substep=24), computed in initialize_type from the
+  (= 0.0864 at nhrs_substep=24), computed in init_from_params_type from the
   graph n_substeps and broadcast per node so the njit substep can read
   it from state.
 - Data-prep moved OUT of the node (parameters freeze at assembly,
-  before the initialize hooks): nan `Obs_MEANFLOW_CUMECS` must be
+  before the init_from_params hooks): nan `Obs_MEANFLOW_CUMECS` must be
   filled with `inflow_mean` upstream (pywatershed does this in node
-  __init__); initialize_type RAISES on it, scoped to this type's own
+  __init__); init_from_params_type RAISES on it, scoped to this type's own
   rows.
 - Starting storage is STATE, not a parameter: pywatershed's
   `initial_storage` parameter is NOT declared. `lake_storage_sub`
@@ -370,7 +370,7 @@ def initialize_starfit_type(
     basis is the full day regardless of the graph n_substeps)."""
     # scope to the type's rows (other types' rows hold nan pad);
     # the code<->name map is stamped on node_type before the hooks
-    # run (see flow_graph.initialize)
+    # run (see flow_graph.init_from_params)
     names = list(dataset["node_type"].attrs["node_type_names"])
     code = names.index(type_name)
     mine = dataset["node_type"].values == code
@@ -638,7 +638,7 @@ class StarfitFlowNode:
             units="fraction",
             description="Release standardized-inflow coefficient [-]",
         ),
-        # -- derived parameters (initialize_type, then frozen) --
+        # -- derived parameters (init_from_params_type, then frozen) --
         "m3ps_to_MCM": DataArrayMeta(
             kind="parameter_internal",
             dims=("space",),
@@ -855,7 +855,7 @@ class StarfitFlowNode:
     finalize = starfit_finalize
 
     @staticmethod
-    def initialize_type(dataset, n_substeps, io_in_cfs) -> None:
+    def init_from_params_type(dataset, n_substeps, io_in_cfs) -> None:
         initialize_starfit_type(
             dataset, n_substeps, io_in_cfs, StarfitFlowNode.type_name
         )

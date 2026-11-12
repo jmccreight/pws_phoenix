@@ -356,9 +356,9 @@ def get_output_var_names() -> list[str]:
 
 
 def _unfreeze_parameters_internal(model: Model) -> None:
-    """Undo the Model's post-initialize freeze (model.py
+    """Undo the Model's post-init_from_params freeze (model.py
     _run_initialize_hooks sets writeable = False on every
-    parameter_internal array) so `initialize()` can be re-timed.
+    parameter_internal array) so `init_from_params()` can be re-timed.
     Benchmark-only: no kernel reads the flag."""
     for proc in model.model_dict.values():
         for name in proc.get_parameters_internal():

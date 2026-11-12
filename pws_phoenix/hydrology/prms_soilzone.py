@@ -25,7 +25,7 @@ here")**: pywatershed derives PRMSSoilzoneNoDprst FROM PRMSSoilzone by
 subtraction (re-declared interface, per-step zero arrays fed to the
 shared kernel). Here the hierarchy points the right way:
 ``PRMSSoilzoneNoDprst`` is the minimal core (its own kernel over the
-shared njit helpers; ``initialize()`` lives here with ONE overridable
+shared njit helpers; ``init_from_params()`` lives here with ONE overridable
 hook, ``_set_hru_frac_perv``) and ``PRMSSoilzone`` EXTENDS it:
 ``dprst_frac`` + the two dprst inputs ADDED, the hook (dprst area
 removed from the pervious fraction) and the kernel (dprst_evap_hru in
@@ -41,7 +41,7 @@ skips otherwise), so runoff's parity is unaffected there.
 
 Initialization -> framework seams:
 
-- ``_initialize_soilzone_data`` -> ``initialize()`` +
+- ``_initialize_soilzone_data`` -> ``init_from_params()`` +
   ``parameter_internal``: ``hru_frac_perv`` (variant hook -- see above;
   the full class matches PRMSRunoff's values), ``soil_rechr_max`` (+
   its two clamps, legal here: derived, pre-freeze), ``soil_lower_max``,
@@ -52,7 +52,7 @@ Initialization -> framework seams:
 - initial state (soil_moist/soil_rechr from init_frac params + the
   upstream value clamps, ssres_stor -> slow_stor/pref_flow_stor split,
   soil_lower, soil_lower_ratio, soil_moist_tot) is computed in
-  ``initialize()`` in upstream's exact order (soil_rechr seeds from
+  ``init_from_params()`` in upstream's exact order (soil_rechr seeds from
   the PRE-clamp soil_rechr_max, then clamps apply).
 
 Deliberately NOT ported (conventions in pws_phoenix/CLAUDE.md):
@@ -499,7 +499,7 @@ class PRMSSoilzoneNoDprst(Process):
         description="Initial fraction of gravity+pref storage [-]",
     )
 
-    # -- derived parameters (initialize(); frozen after) --
+    # -- derived parameters (init_from_params(); frozen after) --
     hru_frac_perv = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -944,7 +944,7 @@ class PRMSSoilzoneNoDprst(Process):
     }
     budgets = {"mass": _MASS_BUDGET}
 
-    # initialize() computes soil_lower = soil_moist - soil_rechr and
+    # init_from_params() computes soil_lower = soil_moist - soil_rechr and
     # clamps soil_rechr <= soil_moist from the DEFAULTS (see
     # Process.state_groups)
     state_groups = (("soil_moist", "soil_rechr", "soil_lower"),)
@@ -969,7 +969,7 @@ class PRMSSoilzoneNoDprst(Process):
             hru_area_perv[wh_active] / hru_area[wh_active]
         )
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         """Upstream ``_initialize_soilzone_data`` in its exact order
         (init-time numpy staging is fine here). Derived geometry ->
         parameter_internal (frozen after); initial state -> variables.

@@ -6,7 +6,7 @@ mpixarray streaming pipeline. Rank 0 assembles the ONE combined input
 file (params + dis vars + the 14 forcings); `sroff` streams to
 parallel NetCDF and is validated globally over all timesteps; a
 representative set of the remaining variables is validated from final
-state, gathered rank-ordered. PRMSRunoff's initialize()
+state, gathered rank-ordered. PRMSRunoff's init_from_params()
 (basin_init/dprst_init) is purely per-element, so each rank derives
 its own rows' geometry -- a first: the other MPI-tested processes have
 no init hook (groundwater) or run replicated (channel).

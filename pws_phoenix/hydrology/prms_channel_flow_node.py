@@ -5,7 +5,7 @@ PRMSChannelFlowNode: the Muskingum-Mann node TYPE for the FlowGraph.
 Ported from pywatershed hydrology/prms_channel_flow_graph.py
 (PRMSChannelFlowNode + PRMSChannelFlowNodeMaker), re-expressed as DATA
 (see flow_graph.py): the maker's coefficient derivation becomes
-initialize_type (SHARING muskingum_mann_coefficients with PRMSChannel
+init_from_params_type (SHARING muskingum_mann_coefficients with PRMSChannel
 -- one derivation, two consumers); the per-node scalar state becomes
 (nnodes,) arrays; the node's `_calculate_subtimestep` numerics become
 the njit `substep` (pywatershed _calculate_subtimestep_numpy verbatim,
@@ -18,7 +18,7 @@ Numerics notes (pywatershed node semantics, kept verbatim):
   channel entry's supplied state onto the graph's channel rows.
 - storage_change = seg_inflow - seg_outflow in FLOW-RATE units [cfs]
   (the array PRMSChannel multiplies by s_per_time; the node does not).
-- initialize_type computes coefficients over the FULL union arrays:
+- init_from_params_type computes coefficients over the FULL union arrays:
   rows belonging to other node types hold nan (or pad values) and fall
   through the Kcoef ladder to harmless defaults -- they are never read
   by other type branches. RULE for future types: a type must only
@@ -131,7 +131,7 @@ class PRMSChannelFlowNode:
             units="fraction",
             description="Muskingum storage weighting factor [-]",
         ),
-        # -- derived parameters (initialize_type, then frozen) --
+        # -- derived parameters (init_from_params_type, then frozen) --
         "ts": DataArrayMeta(
             kind="parameter_internal",
             dims=("space",),
@@ -219,7 +219,7 @@ class PRMSChannelFlowNode:
     finalize = _finalize
 
     @staticmethod
-    def initialize_type(dataset, n_substeps, io_in_cfs) -> None:
+    def init_from_params_type(dataset, n_substeps, io_in_cfs) -> None:
         # n_substeps unused: the muskingum ts/tsi ladder assumes 24.
         # io_in_cfs unused: muskingum is linear in flow (unit-agnostic)
         for name in (

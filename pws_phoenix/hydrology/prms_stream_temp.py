@@ -51,7 +51,7 @@ Conventions/seams:
 - ``_seg_slope`` / ``seg_length_km`` are derived copies (upstream
   edits the parameters in place: slope clamp to 1e-7, m -> km).
 - never-has-flow segments (no HRU area anywhere upstream, walked via
-  tosegment) get seg_tave_water = NaN once at initialize; the
+  tosegment) get seg_tave_water = NaN once at init_from_params; the
   ``hru_segment``/``hru_area`` ('nhru',)-dim parameters exist ONLY
   for that walk (foreign named dim, like nmonth/ndoy).
 - gw/ss silos ((nsegment, 366) circular buffers, init -99.9),
@@ -890,7 +890,7 @@ def _shade_statics_table(
 ) -> None:
     """_shday_statics for every (day of year, segment): the
     seg_width-independent sunrise/sunset geometry, computed once at
-    initialize (the Newton solves were 36% of the per-step shade)."""
+    init_from_params (the Newton solves were 36% of the per-step shade)."""
     for dd in range(declination.shape[0]):
         for ss in range(seg_lat_rad.shape[0]):
             (
@@ -1061,7 +1061,7 @@ class PRMSStreamTempBase(Process):
         dims=("scalar",),
         units=None,
     )
-    # ('nhru',)-dim: ONLY for the never-has-flow walk at initialize
+    # ('nhru',)-dim: ONLY for the never-has-flow walk at init_from_params
     hru_segment = _meta(
         "parameter",
         "HRU -> segment assignment (1-based; 0 = none) -- never-flow "
@@ -1162,7 +1162,7 @@ class PRMSStreamTempBase(Process):
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         refs = self._refs
         nsegment = refs["seg_length"].shape[0]
 
@@ -1374,7 +1374,7 @@ class PRMSStreamTempBase(Process):
     # -- restart hooks: the gw/ss running-average silos and their
     # circular-buffer indices are EVOLVING python-attr state (the
     # statics -- topology, declination table -- are rebuilt by
-    # initialize(); the other attrs are per-step scratch) --
+    # init_from_params(); the other attrs are per-step scratch) --
 
     def get_restart_state(self) -> dict[str, np.ndarray]:
         return {
@@ -1395,7 +1395,7 @@ class PRMSStreamTemp(PRMSStreamTempBase):
     """The core with DYNAMIC shade (stream_temp_shade_flag = 0, the
     drb configuration): per-day per-segment shday from the
     vegetation/topography parameters -- its sunrise/sunset geometry
-    tabulated per (day of year, segment) at initialize
+    tabulated per (day of year, segment) at init_from_params
     (prms_stream_shade._shday_statics), the seg_width-dependent
     vegetation shade per step (_shday_from_statics)."""
 
@@ -1432,11 +1432,11 @@ class PRMSStreamTemp(PRMSStreamTempBase):
         "parameter", "Min west bank vegetation density [-]", units="fraction"
     )
 
-    def initialize(self) -> None:
-        super().initialize()
+    def init_from_params(self) -> None:
+        super().init_from_params()
         # the seg_width-independent shade geometry per (day of year,
         # segment): 5 x (366, nsegment) float64 = 6.7 MB on drb, the
-        # same order as the gw/ss silos above; rebuilt by initialize
+        # same order as the gw/ss silos above; rebuilt by init_from_params
         # like the other statics (not restart state)
         refs = self._refs
         nsegment = refs["seg_length"].shape[0]
@@ -1497,7 +1497,7 @@ class PRMSStreamTempConstantShade(PRMSStreamTempBase):
     = segshade_sum on summer days (doy 121-273) and segshade_win
     otherwise; the vegetation shade index svi is 0.0 (so the hv
     longwave term in _equilb vanishes) -- _seg_svi stays at its
-    initialize() zeros and is never written."""
+    init_from_params() zeros and is never written."""
 
     segshade_sum = _meta(
         "parameter",
@@ -1542,8 +1542,8 @@ class PRMSStreamTempSegHumidity(PRMSStreamTemp):
         units="fraction",
     )
 
-    def initialize(self) -> None:
-        super().initialize()
+    def init_from_params(self) -> None:
+        super().init_from_params()
         self._refs["seg_humid"][:] = 0.0
 
     def calculate(self, dt: np.float64, time: Time) -> None:

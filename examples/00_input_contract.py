@@ -52,7 +52,7 @@
 # - **Initial state is supplied under the state variable's own
 #   name.** The spec's "initial_state" lists, per process, the
 #   variables that carry state. Every one has a default, set by the
-#   process's `initialize()`; to start somewhere else, put an array
+#   process's `init_from_params()`; to start somewhere else, put an array
 #   in the process_dict entry under the variable's name
 #   (`"gwres_stor": <array>`) and it replaces the default. PRMS
 #   keeps two starting states in PARAMETERS (`gwstor_init`,
@@ -61,7 +61,7 @@
 #   PRMS-convention `*_init*` parameters (soilzone's
 #   `soil_moist_init_frac`, runoff's `dprst_frac_init`, snow's
 #   `snowpack_init`, ...) are ordinary supplied parameters that
-#   `initialize()` reads to compute its defaults -- listed by name
+#   `init_from_params()` reads to compute its defaults -- listed by name
 #   in a cell below (the convention over-matches: snow's `den_init`
 #   is the density of new-fallen snow, a physics parameter, not a
 #   starting state).
@@ -70,7 +70,7 @@
 #   but the contract states the factory/formula that generates them
 #   -- the solar tables, `segment_order`, `hru_in_to_cf`), and
 #   INTERNAL (`kind="parameter_internal"`: computed by
-#   `initialize()`, never supplied, reported only in the optional
+#   `init_from_params()`, never supplied, reported only in the optional
 #   half). "Derivable" and "internal" are deliberately distinct
 #   words for distinct lifecycles.
 # - **A restart supplies ALL of the initial state at once.**
@@ -300,7 +300,7 @@ diagram_full
 # %% [markdown]
 # ## Parameters matching the PRMS `*_init*` naming convention
 #
-# (usually initial conditions consumed by `initialize()`; see the
+# (usually initial conditions consumed by `init_from_params()`; see the
 # reading notes)
 
 # %%
@@ -377,7 +377,7 @@ for grid, gg in spec["required"].items():
 # native source, `cbh.nc:rhavg`. The dummy Maps are rebuilt with
 # REAL weights. Constructing the `Model` then runs the full assembly
 # validation (every input resolved, map wiring and shapes, the
-# initialize hooks) -- the proof the contract is complete -- and a
+# init_from_params hooks) -- the proof the contract is complete -- and a
 # short run brings it home.
 #
 # This hand-rolled supply loop is exactly the job the PRMS

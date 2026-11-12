@@ -151,7 +151,7 @@ def prms_initial_state(params: xr.Dataset) -> dict[str, xr.DataArray]:
     PRMS consumes state from parameters; pws_phoenix does not -- this
     is the one place that convention lives. Only names present in
     `params` are translated (an absent one leaves the state to the
-    process's initialize() default).
+    process's init_from_params() default).
 
     - gwres_stor <- gwstor_init (a rename).
     - seg_inflow <- segment_flow_init, propagated one segment
@@ -495,7 +495,7 @@ def insert_flow_graph(
                 "parameters": fg.parameters,
             }
             # supplied channel state rides onto the graph: zeros on
-            # the new nodes' rows (what initialize_type writes there)
+            # the new nodes' rows (what init_from_params_type writes there)
             for name in fg.graph_class.get_restart_variables():
                 if name in entry:
                     padded = np.zeros(fg.n_nodes, dtype=np.float64)

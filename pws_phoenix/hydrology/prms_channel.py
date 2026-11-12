@@ -26,7 +26,7 @@ SEPARATED along framework seams (design decisions w/ JLM):
   happens first thing in the kernel. Cross-dis fluxes are VOLUMES
   (cubic feet) -- dis-relative units (inches) never cross a Map.
 - **Muskingum coefficients -> parameter_internal.** ``c0/c1/c2/ts/tsi``
-  (+ 0-based ``tosegment0``) are computed in ``initialize()`` from
+  (+ 0-based ``tosegment0``) are computed in ``init_from_params()`` from
   process params (``mann_n``, ``x_coef``) + dis variables, then frozen.
 
 dt is SECONDS (s_per_time = dt = 86400.0 for daily PRMS).
@@ -149,7 +149,7 @@ def muskingum_mann_coefficients(
     buffers first), replicating pywatershed
     PRMSChannel._initialize_channel_data numerics exactly.
 
-    Shared by PRMSChannel.initialize() and the FlowGraph channel node
+    Shared by PRMSChannel.init_from_params() and the FlowGraph channel node
     type -- ONE derivation, two consumers. Init-time temporaries only
     (velocity, Kcoef, masks), never per-step.
     """
@@ -299,7 +299,7 @@ class PRMSChannel(Process):
         description="Muskingum storage weighting factor [-]",
     )
 
-    # -- derived parameters (computed by initialize(), then frozen) --
+    # -- derived parameters (computed by init_from_params(), then frozen) --
     tosegment0 = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -444,7 +444,7 @@ class PRMSChannel(Process):
     # Initialization (derived parameters + initial values)
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         """Compute Muskingum coefficients and initial routing state,
         replicating pywatershed _initialize_channel_data numerics (and
         order) exactly. Temporaries here are INIT-time, not per-step."""

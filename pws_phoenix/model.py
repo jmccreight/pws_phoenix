@@ -120,12 +120,10 @@ class Model:
         self._initialize_inputs_and_proceses()
         del self._process_dict
 
-        self._set_time()
-
         # Warm start (construction-time option): restore the flagged
         # prognostic state written by write_restart() and resume AFTER
         # the file's state time. Cold start: _start_index = 0; the state
-        # is initialize()'s defaults overridden by any supplied state.
+        # is the init hooks' defaults overridden by any supplied state.
         self._start_index = 0
         restart_read = control.get("restart_read")
         if restart_read is not None:
@@ -239,7 +237,7 @@ class Model:
           dataset) is not resolved here: that is a data-preparation
           decision, and assembly accepts either. Note PRMS
           initial-condition parameters (`*_init*` by its own naming
-          convention, consumed by initialize()) are in this list --
+          convention, consumed by init_from_params()) are in this list --
           they are ordinary supplied parameters.
         - "derivable_parameters": {name: {"processes",
           "derivation"}} -- REQUIRED at assembly exactly like
@@ -247,7 +245,7 @@ class Model:
           factory/formula over other supplied quantities; by
           convention the string NAMES ITS INPUTS). PATENTLY DISTINCT
           from ``kind="parameter_internal"``: internal parameters are
-          computed by initialize() and NEVER supplied (reported under
+          computed by init_from_params() and NEVER supplied (reported under
           optional "internal_parameters"); derivable parameters ARE
           supplied -- you may just generate them instead of authoring
           them. (Under future compute-if-absent semantics this
@@ -256,11 +254,11 @@ class Model:
           state: every ``restart=True`` variable is a settable initial
           condition, supplied EITHER per variable under its own name in
           the process's process_dict entry (optional; otherwise
-          initialize() sets it), OR all at once via
+          init_from_params() sets it), OR all at once via
           ``control["restart_read"]`` (see ``write_restart``) -- never
           both. Optional supply, but part of the contract's surface.
         - "required_initial_state": {process: [variables]} -- the
-          subset of "initial_state" with NO initialize() default
+          subset of "initial_state" with NO init_from_params() default
           (``Process.required_initial_state``): supply it per variable, or
           warm-start; the Model raises otherwise.
 
@@ -282,7 +280,7 @@ class Model:
           process's variable or derived parameter, including
           prior-step back-edges; or a same-named supplied parameter).
         - "internal_parameters": {name: [processes]} -- computed by
-          initialize(); never supplied.
+          init_from_params(); never supplied.
         - "map_fed_inputs": {name: {"map", "source_grid",
           "source_var", "consumers"}} -- satisfied by a Map's target
           buffer.
@@ -447,6 +445,9 @@ class Model:
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
 
+        # the clock exists before the init hooks: init_state(time)
+        # receives it at index 0
+        self._set_time()
         self._run_initialize_hooks()
         self._apply_supplied_state()
         self._resolve_maps()
@@ -531,21 +532,29 @@ class Model:
             )
 
     def _run_initialize_hooks(self) -> None:
-        """Call each process's initialize() (author order), then freeze
-        derived parameters -- read-only once ALL hooks have run (a shared
-        derived name is written by its owner before the freeze). Budget
-        accumulators are zeroed here too (before any restart restore)."""
-        for kk in self.model_dict:
-            self.model_dict[kk].initialize()
-            self.model_dict[kk].initialize_budgets()
+        """The three init hooks (Process docstrings), each over ALL
+        processes in author order before the next: allocate() ->
+        init_from_params() -> freeze derived parameters (read-only once
+        ALL hooks have run: a shared derived name is written by its
+        owner before the freeze) -> init_state(time) with the clock at
+        index 0. Budget accumulators are zeroed with the state (before
+        any supplied state or restart restore)."""
+        for proc in self.model_dict.values():
+            proc.allocate()
+        for proc in self.model_dict.values():
+            proc.init_from_params()
         for kk, proc in self.model_dict.items():
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             for name in proc.get_parameters_internal():
                 grid_ds[name].values.flags.writeable = False
+        self.time.set_index(0)
+        for proc in self.model_dict.values():
+            proc.init_state(self.time)
+            proc.initialize_budgets()
 
     def _apply_supplied_state(self) -> None:
         """Write the supplied initial state (restart variables given in
-        process_dict under their own names) over initialize()'s
+        process_dict under their own names) over init_from_params()'s
         defaults. FULL-extent arrays; _restore_grid_var writes this
         rank's block (the restart restore path)."""
         for (grid, name), values in self._supplied_state.items():
@@ -567,7 +576,7 @@ class Model:
         proc_name: str, cls: Any, entry: Dict[str, Any]
     ) -> None:
         """A process's state group (Process.state_groups) is supplied
-        whole or not at all: its initialize() computes some members
+        whole or not at all: its init_from_params() computes some members
         from the defaults of others, and supplied state lands after
         that hook."""
         for group in cls.state_groups:
@@ -578,7 +587,7 @@ class Model:
                     f"process '{proc_name}' ({cls.__name__}): initial "
                     f"state {given} is supplied without {missing}. "
                     f"{list(group)} must be supplied together: "
-                    f"{cls.__name__}.initialize() computes some of them "
+                    f"{cls.__name__}.init_from_params() computes some of them "
                     "from the others."
                 )
 
@@ -586,7 +595,7 @@ class Model:
         self, proc_name: str, cls: Any, entry: Dict[str, Any]
     ) -> None:
         """A process's required state (Process.required_initial_state) has no
-        initialize() default: it is supplied, or comes from a restart."""
+        init_from_params() default: it is supplied, or comes from a restart."""
         if self._warm_start:
             return
         missing = [nn for nn in cls.required_initial_state if nn not in entry]
@@ -738,7 +747,7 @@ class Model:
 
         # -- state variables + derived parameters: allocated (fill +
         # optional initial), once. Derived parameters are computed by the
-        # process's initialize() hook and frozen after all hooks run.
+        # process's init_from_params() hook and frozen after all hooks run.
         # A process declares its spatial dim as the placeholder "space"; bind
         # it to this grid's real dim (the grid key; `real_dim` above).
         # Params/inputs already arrive on the real dim (inputs validated
@@ -762,8 +771,8 @@ class Model:
             )
             # supplied initial state: a restart variable given in the
             # process_dict entry under its OWN name (optional). Recorded
-            # here, written AFTER initialize() (_apply_supplied_state)
-            # so it overrides initialize()'s defaults, as a restart does.
+            # here, written AFTER init_from_params() (_apply_supplied_state)
+            # so it overrides init_from_params()'s defaults, as a restart does.
             if meta.restart and name in init_dict:
                 self._supplied_state[(grid, name)] = init_dict[name]
             grid_ds[name] = da
@@ -1433,7 +1442,7 @@ class ModelMPI(Model):
                 if name not in declared:
                     _declare(name, (mpi_grid,), np.nan, False)
                     declared.add(name)
-        # (a2) derived parameters -- computed by initialize() pre-loop.
+        # (a2) derived parameters -- computed by init_from_params() pre-loop.
         # Dims resolve like the serial path: "space" -> the distributed
         # grid dim; other declared dims (e.g. PRMSSnow's "nmonth") pass
         # through -- they exist on ds_mpi_stream via the static params
@@ -1581,7 +1590,7 @@ class ModelMPI(Model):
 
         # ---- Restart (warm start), part 2 of 2: full validation +
         #      the state restore, AFTER the init hooks so the saved
-        #      state overwrites initialize()'s cold state. EVERY rank
+        #      state overwrites init_from_params()'s cold state. EVERY rank
         #      reads the full-extent files and restores its own block
         #      (SPMD-uniform, no collectives). Recomputes the same
         #      start index located by part 1. ----

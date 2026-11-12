@@ -35,7 +35,7 @@ when it isn't.**
   noise against parity). Both rejected.
 
 - **Inheritance would buy only the declaration blocks.** Every method
-  is overridden anyway: ``initialize`` (dual-area, ag storages),
+  is overridden anyway: ``init_from_params`` (dual-area, ag storages),
   ``advance`` (ag prevs), the kernel (dual-area logic is threaded
   through the entire loop, not appended to it), ``calculate``. The
   real computational sharing is at the module njit-helper level
@@ -99,7 +99,7 @@ Port notes (upstream quirks preserved verbatim)
 - ``hru_area_perv``/``hru_frac_perv``/``ag_area``/``soil_moist_tot``
   are per-step VARIABLES (dynamic ag_frac): the upstream
   itime_step==0 area block runs at istep0 in calculate() (ag_frac is
-  an input, not fed at initialize); ``_update_areas`` (upstream
+  an input, not fed at init_from_params); ``_update_areas`` (upstream
   _update_ag_areas, np.isclose semantics hand-coded) runs each step
   BEFORE the kernel and redistributes storages when ag_frac changes.
 """
@@ -314,7 +314,7 @@ class PRMSSoilzoneAg(Process):
         units="fraction",
     )
 
-    # -- derived parameters (initialize(); STATIC, no ag_frac dep) --
+    # -- derived parameters (init_from_params(); STATIC, no ag_frac dep) --
     soil_rechr_max = _meta(
         "parameter_internal",
         "Recharge-zone maximum storage [in] (clamped)",
@@ -701,7 +701,7 @@ class PRMSSoilzoneAg(Process):
     }
     budgets = {"mass": _MASS_BUDGET}
 
-    # initialize() computes soil_lower = soil_moist - soil_rechr and
+    # init_from_params() computes soil_lower = soil_moist - soil_rechr and
     # clamps soil_rechr <= soil_moist from the DEFAULTS (see
     # Process.state_groups)
     state_groups = (("soil_moist", "soil_rechr", "soil_lower"),)
@@ -788,7 +788,7 @@ class PRMSSoilzoneAg(Process):
     # NOT depend on ag_frac; area block runs at istep0 in calculate)
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         refs = self._refs
         for name in self._ZERO_VARS:
             refs[name][:] = 0.0
@@ -936,7 +936,7 @@ class PRMSSoilzoneAg(Process):
         # upstream's is global-any. Identical whenever pref_flow_den
         # is uniformly zero/nonzero across ranks (fgr_ag_2yr: all
         # zero); a mixed domain would need a global reduction, but
-        # initialize() is LOCAL by contract -- revisit if such a
+        # init_from_params() is LOCAL by contract -- revisit if such a
         # domain arrives (the flag gates the topfr carve-out even
         # where den == 0, so local!=global WOULD change answers).
         self._pref_flow_flag = bool((pref_flow_den > 0.0).any())
@@ -1735,7 +1735,7 @@ class PRMSSoilzoneAg(Process):
 
     def _build_family_args(self, iter_aet_flag: bool) -> tuple:
         """The family kernel's ~80 arguments, assembled ONCE per flag
-        value at the end of initialize() (see the _family_args note
+        value at the end of init_from_params() (see the _family_args note
         there)."""
         refs = self._refs
         if iter_aet_flag:
@@ -1971,8 +1971,8 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         "iter_end_status",
     )
 
-    def initialize(self) -> None:
-        super().initialize()
+    def init_from_params(self) -> None:
+        super().init_from_params()
         refs = self._refs
         for name in self._OBS_ZERO_VARS:
             refs[name][:] = 0

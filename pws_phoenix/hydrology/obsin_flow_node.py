@@ -104,7 +104,7 @@ class ObsInFlowNode:
     finalize = _finalize
 
     @staticmethod
-    def initialize_type(dataset, n_substeps, io_in_cfs) -> None:
+    def init_from_params_type(dataset, n_substeps, io_in_cfs) -> None:
         # n_substeps unused (no substep-length physics); io_in_cfs
         # unused (obs + flows share the graph's units, whatever they
         # are)

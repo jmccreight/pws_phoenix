@@ -48,7 +48,7 @@ never used by its kernel); ``set_snow_zero`` (dead code);
 initialization block -- upstream's implementation of it is buggy
 (transposed snarea_curve_2d indexing + a where-tuple indexing error)
 and drb/nhm domains ship ``snowpack_init == 0`` everywhere, so
-``initialize()`` raises NotImplementedError if any value is nonzero
+``init_from_params()`` raises NotImplementedError if any value is nonzero
 rather than replicate the bug blind.
 
 Parameter provenance: ``hru_type`` is DIS_HRU (dis-first);
@@ -1931,7 +1931,7 @@ class PRMSSnow(Process):
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         refs = self._refs
 
         # zero-init all float variables; flags to their upstream inits

@@ -19,7 +19,7 @@ memory prime directive. Here node types dissolve into DATA:
   {code: name} map is on the class and stamped into the ``node_type``
   variable's attrs (self-describing datasets).
 - pywatershed's FlowNodeMakers dissolve: data-prep -> each type's
-  ``initialize_type`` (run from the composed class's initialize());
+  ``init_from_params_type`` (run from the composed class's init_from_params());
   instantiation -> nothing.
 
 **Registry dispatch (Stage 2 Round A).** Compute is ONE in-place njit
@@ -358,7 +358,7 @@ def make_flow_graph(
         node_types: tuple of node-type classes (e.g.
             PRMSChannelFlowNode, PassThroughFlowNode). Type codes =
             position in this tuple. Each must provide: ``type_name``,
-            ``fields``, ``initialize_type``/``advance_type`` (numpy),
+            ``fields``, ``init_from_params_type``/``advance_type`` (numpy),
             and the njit contract ``prepare``/``substep``/``finalize``.
             A type may optionally declare ``time_context`` (a tuple of
             time-scalar names it reads, e.g. ``("epiweek",)``); the
@@ -397,7 +397,7 @@ def make_flow_graph(
     required = (
         "type_name",
         "fields",
-        "initialize_type",
+        "init_from_params_type",
         "advance_type",
         "prepare",
         "substep",
@@ -409,8 +409,8 @@ def make_flow_graph(
             raise ValueError(
                 f"node type {getattr(tt, 'type_name', tt)!r} is missing "
                 f"required contract attribute(s) {missing} (needs: "
-                "type_name, fields, initialize_type/advance_type, and the "
-                "njit prepare/substep/finalize)."
+                "type_name, fields, init_from_params_type/advance_type, "
+                "and the njit prepare/substep/finalize)."
             )
 
     type_names = [tt.type_name for tt in node_types]
@@ -472,20 +472,35 @@ def make_flow_graph(
     finalize_fns = tuple(tt.finalize for tt in node_types)
     kernel = _build_graph_kernel(prepare_fns, substep_fns, finalize_fns)
 
-    def initialize(self) -> None:
-        # self-describing dataset: names by code ride on the variable.
-        # Stamped BEFORE the type hooks so an initialize_type can find
-        # its own code and scope data checks to its OWN rows (other
-        # types' rows hold nan pad).
-        self._obj["node_type"].attrs["node_type_names"] = list(type_names)
-        for tt_class in node_types:
-            tt_class.initialize_type(self._obj, n_substeps, io_in_cfs)
+    def allocate(self) -> None:
         # cache the graph-state namedtuple ONCE -- references, NOT
         # copies (per the memory prime directive); the serial-grid
         # dataset buffers are stable, and Input buffers update in place.
         self._graph_state = graph_state_type(
             **{nm: self._obj[nm].values for nm in field_names}
         )
+        # optional per-type hook: allocate_type(dataset)
+        for tt_class in node_types:
+            hook = getattr(tt_class, "allocate_type", None)
+            if hook is not None:
+                hook(self._obj)
+
+    def init_from_params(self) -> None:
+        # self-describing dataset: names by code ride on the variable.
+        # Stamped BEFORE the type hooks so an init_from_params_type can
+        # find its own code and scope data checks to its OWN rows
+        # (other types' rows hold nan pad).
+        self._obj["node_type"].attrs["node_type_names"] = list(type_names)
+        for tt_class in node_types:
+            tt_class.init_from_params_type(self._obj, n_substeps, io_in_cfs)
+
+    def init_state(self, time: Time) -> None:
+        # optional per-type hook: init_state_type(dataset, time) --
+        # cold-start defaults on the type's OWN rows
+        for tt_class in node_types:
+            hook = getattr(tt_class, "init_state_type", None)
+            if hook is not None:
+                hook(self._obj, time)
 
     def check_initial_state(self) -> list[str]:
         # each node type may check its OWN rows of the starting state
@@ -523,7 +538,9 @@ def make_flow_graph(
             for nm in getattr(tt, "required_initial_state", ())
         )
     )
-    class_attrs["initialize"] = initialize
+    class_attrs["allocate"] = allocate
+    class_attrs["init_from_params"] = init_from_params
+    class_attrs["init_state"] = init_state
     class_attrs["check_initial_state"] = check_initial_state
     class_attrs["advance"] = advance
     class_attrs["calculate"] = calculate

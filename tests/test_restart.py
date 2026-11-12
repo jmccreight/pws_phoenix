@@ -148,13 +148,13 @@ def test_supplied_state_with_restart_raises(toy_ds, tmp_path):
 
 
 class _DefaultsToZero(Process):
-    """A restart variable whose initialize() default is zero."""
+    """A restart variable whose init_from_params() default is zero."""
 
     level = DataArrayMeta(
         kind="variable", dims=("space",), dtype=np.float64, restart=True
     )
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         self._refs["level"][:] = 0.0
 
     def advance(self) -> None:
@@ -165,7 +165,7 @@ class _DefaultsToZero(Process):
 
 
 def test_supplied_state_overrides_initialize(toy_ds):
-    """Supplied state is written AFTER initialize(): it wins over the
+    """Supplied state is written AFTER init_from_params(): it wins over the
     default, as a restart does."""
     n_space = toy_ds.sizes["space"]
     supplied = xr.DataArray(np.arange(n_space, dtype=float), dims="space")
@@ -187,7 +187,7 @@ def test_supplied_state_overrides_initialize(toy_ds):
 
 
 class _TwoLevels(Process):
-    """initialize() computes `level_b` from `level_a`'s default, so
+    """init_from_params() computes `level_b` from `level_a`'s default, so
     the two are one state group."""
 
     level_a = DataArrayMeta(
@@ -198,7 +198,7 @@ class _TwoLevels(Process):
     )
     state_groups = (("level_a", "level_b"),)
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         self._refs["level_a"][:] = 1.0
         self._refs["level_b"][:] = 2.0 * self._refs["level_a"]
 

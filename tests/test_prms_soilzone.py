@@ -85,7 +85,7 @@ ANSWER_NAMES = (
     "swale_actet",
     "unused_potet",
 )
-# static after initialize(): validated once vs the answers' step 0
+# static after init_from_params(): validated once vs the answers' step 0
 STATIC_ANSWER_NAMES = ("pref_flow_thrsh", "pref_flow_max")
 # pywatershed's own soilzone autotest standard is 5e-6 (its fastmath
 # numba path vs its numpy path only agree to that); against the

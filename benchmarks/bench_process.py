@@ -4,7 +4,7 @@ One timing per process per lifecycle method, each exactly ONE call
 on the subprocess's shared model (``_common.get_model()``):
 
     time_init        type(proc)(proc._obj)       bind to the grid dataset
-    time_initialize  proc.initialize()           parameter_internal derivation
+    time_initialize  proc.init_from_params()           parameter_internal derivation
     time_advance     proc.advance()              the *_previous copies
     time_calculate   proc.calculate(DT, time)    one step of physics
 
@@ -55,7 +55,7 @@ class ProcessLifecycle:
         type(proc)(proc._obj)
 
     def time_initialize(self, name):
-        get_model().model_dict[name].initialize()
+        get_model().model_dict[name].init_from_params()
 
     def time_advance(self, name):
         get_model().model_dict[name].advance()
@@ -76,7 +76,7 @@ class ProcessVariants(ProcessLifecycle):
 
     def time_initialize(self, row):
         label, name = split_row(row)
-        get_model(label).model_dict[name].initialize()
+        get_model(label).model_dict[name].init_from_params()
 
     def time_advance(self, row):
         label, name = split_row(row)

@@ -1,5 +1,5 @@
 """Part-(a) framework tests: dis-owned parameters, topological_order,
-the per-process initialize() hook, and kind="parameter_internal".
+the per-process init_from_params() hook, and kind="parameter_internal".
 
 Self-contained (tiny in-memory toy; no generated pywatershed data).
 networkx (used lazily by topological_order) is a DECLARED dependency
@@ -18,7 +18,7 @@ N_XY = 4
 
 class DerivedToy(Process):
     """Minimal process exercising dis-sourced parameters and
-    parameter_internal + initialize()."""
+    parameter_internal + init_from_params()."""
 
     base = DataArrayMeta(
         kind="parameter",
@@ -36,13 +36,13 @@ class DerivedToy(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
-        description="computed by initialize(): 2 * base",
+        description="computed by init_from_params(): 2 * base",
     )
     counts = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.int64,
-        description="computed by initialize(): int64 exercise",
+        description="computed by init_from_params(): int64 exercise",
     )
     total = DataArrayMeta(
         kind="variable",
@@ -51,7 +51,7 @@ class DerivedToy(Process):
         description="doubled + forcing",
     )
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         self._obj["doubled"].values[:] = 2.0 * self._obj["base"].values
         self._obj["counts"].values[:] = np.arange(
             self._obj["base"].values.shape[0], dtype=np.int64
@@ -143,6 +143,75 @@ class TestDisParametersAndInitialize:
         }
         with pytest.raises(ValueError, match="no process's home grid"):
             Model(process_dict, {}, discretizations=discretizations)
+
+
+class HookOrderToy(DerivedToy):
+    """Records the init hooks as the Model calls them."""
+
+    def allocate(self) -> None:
+        self.calls = ["allocate"]
+        self.scratch = np.zeros(N_XY)
+
+    def init_from_params(self) -> None:
+        super().init_from_params()
+        self.calls.append("init_from_params")
+
+    def init_state(self, time) -> None:
+        self.calls.append("init_state")
+        self.frozen_at_init_state = not self._refs["doubled"].flags.writeable
+        self.index_at_init_state = time.current_index
+        self.date_at_init_state = time.current
+        self._refs["total"][:] = -1.0
+
+
+class StateHookWritesParameterToy(DerivedToy):
+    """init_state() must not write a parameter_internal."""
+
+    def init_state(self, time) -> None:
+        self._refs["doubled"][:] = 0.0
+
+
+class TestInitHooks:
+    def _process_dict(self, cls, forcing):
+        return {
+            "toy": {
+                "class": cls,
+                "discretization": "xy",
+                "forcing_toy": forcing,
+            },
+        }
+
+    def test_order_freeze_and_clock(self, dis_parameters, forcing):
+        """allocate -> init_from_params -> freeze -> init_state(time),
+        the clock at index 0 (the start date)."""
+        discretizations = {
+            "xy": Discretization(["xy"], parameters=dis_parameters)
+        }
+        with Model(
+            self._process_dict(HookOrderToy, forcing),
+            {},
+            discretizations=discretizations,
+        ) as mm:
+            proc = mm.model_dict["toy"]
+            assert proc.calls == ["allocate", "init_from_params", "init_state"]
+            assert proc.frozen_at_init_state
+            assert proc.index_at_init_state == 0
+            assert proc.date_at_init_state == forcing["time"].values[0]
+            # init_state's default is in place before the first step
+            np.testing.assert_array_equal(proc["total"].values, -1.0)
+
+    def test_init_state_cannot_write_parameter_internal(
+        self, dis_parameters, forcing
+    ):
+        discretizations = {
+            "xy": Discretization(["xy"], parameters=dis_parameters)
+        }
+        with pytest.raises(ValueError, match="read-only"):
+            Model(
+                self._process_dict(StateHookWritesParameterToy, forcing),
+                {},
+                discretizations=discretizations,
+            )
 
 
 class TestTopologicalOrder:

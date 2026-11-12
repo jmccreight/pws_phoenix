@@ -11,9 +11,9 @@ parameters):
   segshade_win otherwise, EXACTLY, every day/segment -- the season
   boundary and the per-segment indexing;
 - the vegetation shade index scratch (_seg_svi) is never written
-  (stays at its initialize() zeros; upstream returns svi = 0.0);
+  (stays at its init_from_params() zeros; upstream returns svi = 0.0);
 - the never-has-flow structure (NaN columns of seg_tave_water,
-  computed in the shared base initialize) is unchanged from the
+  computed in the shared base init_from_params) is unchanged from the
   dynamic run's, and constant in time.
 
 The temperature physics itself is validated on the dynamic leaves
@@ -147,7 +147,7 @@ class TestPRMSStreamTempConstantShade:
 
     def test_never_flow_structure_unchanged(self, model_run):
         """The NaN (never-has-flow) column set comes from the shared
-        base initialize -- must match the dynamic answers' constant
+        base init_from_params -- must match the dynamic answers' constant
         sentinel columns and be constant in time here too."""
         actual = model_run["output_ds"]["seg_tave_water"].values
         nan_cols = np.isnan(actual).all(axis=0)

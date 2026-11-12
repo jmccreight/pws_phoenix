@@ -35,12 +35,12 @@ Declarations/decisions:
   in-kernel; the "1-month" (annual) cbh-adjustment parameter variant
   upstream supports is NOT ported (nhm domains are monthly) -- the
   declared dims reject it loudly.
-- temp_units is a ('scalar',) parameter consumed in initialize() (the
+- temp_units is a ('scalar',) parameter consumed in init_from_params() (the
   transp_tmax F conversion -- upstream's "candidate for worst code
   lines").
 - hru_cossl and transp_tmax_f are parameter_internal (space,).
 - Southern-hemisphere domains raise NotImplementedError in
-  initialize() (upstream raises inside its is_summer logic).
+  init_from_params() (upstream raises inside its is_summer logic).
 
 Family structure (ADDITIVE; PORTS.md "How variants are done here"):
 upstream's PRMSAtmosphereTranspFrost REPLACES the tindex parameters
@@ -276,7 +276,7 @@ class PRMSAtmosphereBase(Process):
         derivation="compute_soltabs(hru_slope, hru_aspect, hru_lat)",
     )
 
-    # -- derived parameters (initialize(); frozen after) --
+    # -- derived parameters (init_from_params(); frozen after) --
     hru_cossl = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -423,7 +423,7 @@ class PRMSAtmosphereBase(Process):
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         refs = self._refs
         for name in (
             "tmaxf",
@@ -766,8 +766,8 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
         "private state)",
     )
 
-    def initialize(self) -> None:
-        super().initialize()
+    def init_from_params(self) -> None:
+        super().init_from_params()
         refs = self._refs
         refs["tmax_sum"][:] = 0.0
         refs["transp_check"][:] = 0

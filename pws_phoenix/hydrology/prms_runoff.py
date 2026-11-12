@@ -24,23 +24,23 @@ zero arrays fed to the shared kernel). Here the hierarchy points the
 right way: ``PRMSRunoffNoDprst`` is the minimal core (pervious/
 impervious runoff + infiltration partitioning, its own kernel over the
 shared njit helpers) and ``PRMSRunoff`` EXTENDS it: dprst parameters/
-derived/variables ADDED, ``initialize``/``advance``/kernel overridden.
+derived/variables ADDED, ``init_from_params``/``advance``/kernel overridden.
 The core never touches dprst.
 
 Initialization -> framework seams (the Stage-2 mechanisms):
 
-- **basin_init/dprst_init -> ``initialize()`` + ``parameter_internal``.**
+- **basin_init/dprst_init -> ``init_from_params()`` + ``parameter_internal``.**
   pywatershed computes static geometry (``hru_perv``/``hru_frac_perv``/
   ``hru_imperv``/``dprst_area_max``/``dprst_area_open_max``/
   ``dprst_area_clos_max``/``dprst_frac_clos``/``dprst_vol_open_max``/
   ``dprst_vol_clos_max``/``dprst_vol_thres_open``) at construction;
-  here they are ``parameter_internal``: written once in ``initialize()``,
+  here they are ``parameter_internal``: written once in ``init_from_params()``,
   then frozen. ``dprst_vol_thres_open`` is nominally a pywatershed
   "variable" but is never written by its kernel (its own autotest
   excludes it from comparison) -- derived here.
 - **dprst initial state** (``dprst_vol_open``/``dprst_vol_clos``/
   ``dprst_area_open``/``dprst_area_clos``/``dprst_stor_hru`` + olds/
-  fracs) is computed in ``initialize()`` (dprst_init verbatim, the
+  fracs) is computed in ``init_from_params()`` (dprst_init verbatim, the
   no-restart path).
 
 Deliberately NOT ported (conventions in pws_phoenix/CLAUDE.md):
@@ -50,7 +50,7 @@ Deliberately NOT ported (conventions in pws_phoenix/CLAUDE.md):
   ``imbalance_behavior``.
 - The ``_dprst_clos_flag == OFF`` parameter-zeroing hack in dprst_init
   (hit by nhm domains: ``dprst_frac_open == 1`` everywhere, drb
-  included) -- provably a no-op, see the comment in ``initialize()``.
+  included) -- provably a no-op, see the comment in ``init_from_params()``.
 - Hardwired-off upstream paths, kept hardwired: cascades, frozen
   ground, glaciers, water use.
 - ``intcp_changeover_in_net_rain`` (GSFLOW/PRMS-6 accounting): fixed
@@ -961,7 +961,7 @@ def dprst_comp_ag(
         )
     else:
         # never true: called only where dprst_area_max > 0, and
-        # initialize() rejects dprst_depth_avg == 0 there
+        # init_from_params() rejects dprst_depth_avg == 0 there
         dprst_vol_frac = 0.0  # units-test: unreachable
 
     return (
@@ -1073,7 +1073,7 @@ class PRMSRunoffNoDprst(Process):
         description="Maximum snow infiltration per day [inches/day]",
     )
 
-    # -- derived parameters (initialize(); basin_init) --
+    # -- derived parameters (init_from_params(); basin_init) --
     hru_perv = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -1317,7 +1317,7 @@ class PRMSRunoffNoDprst(Process):
     # Initialization (basin_init, no-dprst path)
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         """basin_init with the dprst branch OFF (upstream shared
         basin_init under _dprst_flag == False)."""
         refs = self._refs
@@ -1678,7 +1678,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         description="Open-depression flow threshold (frac of max volume) [-]",
     )
 
-    # -- derived parameters (initialize(); basin_init/dprst_init) --
+    # -- derived parameters (init_from_params(); basin_init/dprst_init) --
     dprst_area_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -1867,7 +1867,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
     }
     budgets = {"mass": _MASS_BUDGET}
 
-    # initialize() computes the dprst areas and dprst_stor_hru from
+    # init_from_params() computes the dprst areas and dprst_stor_hru from
     # the DEFAULT volumes; dprst_area_clos is never recomputed after
     # (see Process.state_groups)
     state_groups = (
@@ -1884,7 +1884,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
     # Initialization (basin_init + dprst_init, no-restart path)
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         """basin_init + dprst_init verbatim (init-time loops; perf
         irrelevant). Derived geometry -> parameter_internal (frozen
         after this); dprst initial state -> variables."""
@@ -2412,7 +2412,7 @@ class PRMSRunoffAg(PRMSRunoff):
     partitioning (pywatershed prms_runoff_ag.py; GSFLOW physics).
 
     ADDITIVE extension (upstream's interface is a strict superset of
-    PRMSRunoff's): ag declarations added; ``initialize``/kernel/
+    PRMSRunoff's): ag declarations added; ``init_from_params``/kernel/
     ``calculate`` overridden. ``ag_frac`` is a TIME-VARYING input
     (PRMS dynamic parameter), so ``hru_perv``/``hru_frac_perv`` are
     redeclared kind="variable" (declaration override; frozen in the
@@ -2594,12 +2594,12 @@ class PRMSRunoffAg(PRMSRunoff):
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
-        """PRMSRunoff.initialize (basin_init + dprst_init) plus the ag
+    def init_from_params(self) -> None:
+        """PRMSRunoff.init_from_params (basin_init + dprst_init) plus the ag
         additions. The ag-area carve-out of the pervious area happens
         at time zero in calculate() (upstream's itime_step==0 block):
         ag_frac is an input, not yet fed here."""
-        super().initialize()
+        super().init_from_params()
         refs = self._refs
         for name in (
             "ag_area",
