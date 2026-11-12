@@ -14,6 +14,7 @@
   - [Known mpixarray limits (Phase 1)](#known-mpixarray-limits-phase-1)
   - [IO is intentionally NOT apples-to-apples](#io-is-intentionally-not-apples-to-apples)
   - [Global state: `Time` + `Options` (the "Global" split)](#global-state-time--options-the-global-split)
+  - [Units mode (Nov 2026; stages 1 + 2 built, stage 3 piloted)](#units-mode-nov-2026-stages-1--2-built-stage-3-piloted)
   - [Phase 2 backlog (separable, layered on top)](#phase-2-backlog-separable-layered-on-top)
   - [Porting pywatershed processes (goal 4; started July 2026)](#porting-pywatershed-processes-goal-4-started-july-2026)
   - [FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)](#flowgraph-port-agreed-design-july-2026-stage-1-built--green)
@@ -106,8 +107,8 @@ populated + derived from the pws-prms-oracle by pywatershed's
 `tests/prms_oracle.toml` (macos-arm64 only so far) and checked at
 session start -- a regenerated oracle = a reviewed key bump, never a
 silent shift. Run tests from the repo root:
-`./tests/run_tests.sh` (serial + MPI, no skips allowed) or
-`pytest tests/ -q --ignore-glob='tests/*_mpi.py'` (serial only).
+`./tests/run_tests.sh` (serial + MPI, no skips allowed;
+`--serial-only` / `--parallel-only` for one half).
 
 # python assumptions/conventions
 
@@ -119,6 +120,13 @@ silent shift. Run tests from the repo root:
    required how-to-open header, and the pywatershed-numbered-notebook
    tone) whenever writing or editing anything under an `examples/`
    directory.
+5. Every float `DataArrayMeta` declares `units=` from the closed
+   vocabulary in `pws_phoenix/units.py` (int/bool fields may omit it);
+   `tests/test_units.py` enforces it. A new unit = a new key in that
+   table with its pint expression (`None` if pint cannot express it).
+   FlowGraph fields in the graph's io units declare the placeholders
+   `io flow units` / `io flow units x s` / `io storage units`,
+   resolved at composition.
 
 # Prime directive: memory
 
@@ -345,6 +353,140 @@ positional time-varying-parameter lookup therefore indexes with `field - 1`
 (convention (A); see `Upper.calculate` and `tests/test_time.py`). Still in
 pywatershed if needed: `jsol` (days since solstice, niche) and `epiweek` (needs
 the `epiweeks` dep).
+
+## Units mode (Nov 2026; stages 1 + 2 built, stage 3 piloted)
+
+Every float `DataArrayMeta` declares `units=` from the CLOSED vocabulary
+in `units.py` (`VOCABULARY`: pywatershed-natural key -> pint
+expression, `None` for the few pint cannot express, e.g. the
+exponent-dependent `m per cms^exp`). pint sits BEHIND the table and
+touches strings only -- arrays stay plain numpy (`_refs`, numba,
+zero-copy untouched); pint-xarray's `quantify()` is rejected for
+runtime. `fraction` = a proportion, `none` = a dimensionless flag
+stored as float (both pint `dimensionless`); temperature differences
+are `delta_degF`/`delta_degC`; rate coefficients keep their physical
+`1/day` though the daily kernels apply them per step. FlowGraph fields
+in the graph's io units declare the placeholders `io flow units` /
+`io flow units x s` / `io storage units`, resolved over the whole field
+union at composition (`IO_PLACEHOLDERS`). `tests/test_units.py`
+enforces: every expression parses, every declared string is a key,
+every float field has units, no placeholder survives composition --
+BOTH by a source scan of literal `DataArrayMeta(` calls AND over the
+resolved fields of every registered package class (Nov 11, 2026: the
+`_meta` helpers of prms_soilzone_ag.py and prms_stream_temp.py had
+hidden ~150 unit-less float fields from the scan; `units` is now a
+required argument of both helpers; `lat_temp_adj` is `delta_degC`,
+PRMS says degrees Celsius -- it is ADDED to a temperature).
+
+Two boundaries, deliberately separate:
+
+- **PRMS boundary** (`prms_translate/prms_units.py`): PRMS's metadata
+  words (pyPRMS's bundled XML -- not pywatershed, not the oracle) ->
+  vocabulary keys: a by-name table for PRMS strings that are wrong or
+  vague (`hru_in_to_cf: "cubic feet"`, `gwflow_coef: "fraction/day"`,
+  `width_alpha: "unknown"`), flag resolution for `temp_units` /
+  `precip_units` / `elev_units` from the file's own values (metric
+  precip raises NotImplementedError: the kernels are imperial), a
+  spelling table incl. pyPRMS's own CBH strings. `load_parameters`
+  (`translate_units`), `load_cbh`, dynamic parameters,
+  `derive_hru_in_to_cf` and `compute_soltabs` stamp keys;
+  `package_parameters` RAISES on a declared-vs-translated disagreement
+  (a table or declaration bug, never data -- nothing to patch).
+- **Model boundary** (`control["units"]`, build-time only, no per-step
+  cost): `None` (default; pint never imported) | `"check"` (every
+  supplied parameter/input's `attrs["units"]` must be a key naming the
+  declared quantity, `units.same`; Map owner vs consumer declarations
+  must agree) | `"convert"` (a RESIDENT array in compatible units is
+  converted in place at build via `units.affine`, attrs updated -- the
+  caller's arrays ARE the buffers; a streamed/lazy input that would
+  need converting RAISES: conversion is never a per-step edit,
+  pre-process the file). `control["units_patch"] = {name: key}`
+  overrides a supplied array's attrs (missing attr = error; the patch
+  is the escape hatch). Hooks: `_add_process_fields` (params before
+  the read-only flag; `Input.data`), `ModelMPI._build` (resident
+  params per rank; streamed inputs check-only, every rank raises
+  together), `_resolve_maps`. Budget units stay string-equality: exact
+  with a closed vocabulary. Tests: `test_units_check{,_mpi}.py`,
+  `test_prms_units.py` (the drb kit builds under "check", no patches).
+
+Stage 3 (kernels; pilot BUILT Nov 5, 2026, sweep pending):
+`tests/test_kernel_units.py` runs a kernel's undecorated body
+(`Cls._calculate.py_func`) on pint Quantity arrays built from the
+declarations (kernel argument names == field names), so every `+`,
+`-`, comparison and element assignment is dimension-checked, and
+compares the magnitudes BIT FOR BIT to the compiled run (pint
+silently converts a compatible-but-wrong-scale assignment, e.g. cubic
+feet into an acre-inches array -- the magnitude comparison is what
+catches that). Convention (JLM): `1/day` coefficients keep their
+declaration; the harness multiplies the `PER_DAY` set by `1 day`
+before the call (dropping it fails at `stor - flow`). Harness:
+`tests/kernel_units.py` (`patches=` swaps module attributes for the
+Quantity run). Done: the groundwater family (no literals), PRMSCanopy
+(Nov 9, 2026), PRMSChannel (Nov 9, 2026: `ts` is declared hours but
+the kernel divides an hourly-sample sum by it as a COUNT ->
+`ts / _ROUTING_STEP_HOURS`; integer fields pass plain even when they
+declare units -- `tsi`; non-field kernel args take units from
+`NON_FIELD_UNITS`, e.g. `s_per_time` seconds) + its init derivation
+`muskingum_mann_coefficients` (plain numpy via the harness's
+`func=`; the bare `* 60.0 * 60.0` left velocity in m/s, which pint
+alone cannot see -- kcoef in seconds converts silently into hours; the
+magnitude comparison catches it). A `UnitStrippedWarning` is an error
+in the Quantity run (`np.full` and plain-array assignment drop units
+silently). PRMSSoilzone{NoDprst,} (Nov 11, 2026; 4 helpers): the
+CORRECTED declaration -- `fastcoef_sq`/`slowcoef_sq` are `1/(inch
+day)`, not dimensionless as PRMS and pywatershed say
+(`1.0 + coef_sq * storage`; PRMS by-name entry); `ssr2gw_rate` is
+truly inch^(1-ssr2gw_exp)/day, its `1/day` exact only at exp = 1 (the
+fixture's value; a test pins the failure at 0.5); kernel arguments
+receiving a derived `_`-field (`sat_threshold` <- `_sat_threshold`)
+map through the harness's explicit `ARG_FIELDS` (also needed by the Ag
+and stream-temp kernels); compute_interflow's `c3 = sqrt(...)` is nan
+for `ssres_in < -coef_lin**2/(4 coef_sq)`, reachable only from a state
+initialize() never produces (slow_stor above pref_flow_thrsh). Init
+derivations of the other ports are not yet checked. PRMSRunoff{NoDprst,}
+(Nov 11, 2026; 5 helpers): no declaration errors; pywatershed's ONE
+`_NEARZERO` is compared against inches, acres and dimensionless ratios
+-> `_NEARZERO_INCHES`/`_NEARZERO_ACRES` beside it (same value); zeros
+in three units (`_ZERO_INCHES`/`_ZERO_ACRES`/`_ZERO_ACRE_INCHES`);
+the bool option `intcp_changeover_in_net_rain` runs both ways with
+coverage accumulated (`fired=`); a patched helper the kernel never
+calls fails coverage (NoDprst omits `dprst_comp`). A must-fail test
+that unexpectedly PASSES marks a path statement coverage missed
+(`_ZERO_ACRES` needed an empty-depression hru).
+PRMSSoilzoneAg{,ObsET} (Nov 11, 2026; 7 code objects: the family
+kernel under both bool options x both, `_update_areas`/`_pre`/`_post`
+and ObsET's three iteration kernels via `func=`, each run per
+`soil_iter` value with `fired=`): the shared soilzone helpers are
+imported BY NAME, so they and `_ZERO_INCHES` are patched in the Ag
+module while the helpers' own bodies read prms_soilzone's floats;
+`_update_areas`'s pervious-area isclose added a bare 1e-8 to acres ->
+`_ISCLOSE_ATOL_ACRES`; ObsET's missing-value sentinel is in inches
+(`_AET_MISSING_INCHES`) and pint's `==`/`!=` with a bare number is
+False/True, NEVER an error -- only the magnitude comparison catches a
+bare sentinel; no marker needed; no declaration errors. PRMSRunoffAg
+(Nov 11, 2026; the kernel under both bool options + `_post_areas` via
+`func=`; four ag helpers beside the base ones, `dprst_comp_ag`
+replacing `dprst_comp`): no declaration errors; the same per-unit
+zero/near-zero names as the base kernel; `dprst_comp_ag`'s explicit
+`else: ... = 0.0` branches for a zero maximum volume are reachable
+for open-only or closed-only depressions (two fixture hrus) but not
+for both (initialize() rejects `dprst_depth_avg == 0`) -> one marker,
+plus the two never-true evap clamps mirrored from `dprst_comp`. THE
+AG FAMILY IS DONE. pint accepts a bare zero in `+` and comparisons but NOT
+assigned into a dimensional array or after scaling (`0.0 * cov >
+potet`), so a kernel's zeros of a working unit are a named module
+float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code
+unchanged), as are thresholds (`_NEARZERO`); helper njit Dispatchers
+are patched to their `.py_func`; each patch has a must-fail test.
+pint checks only what executes, so the harness REQUIRES every line of
+the kernel and patched helpers to run (`sys.settrace` vs the code
+object's line table); a line no input can reach carries
+`# units-test: unreachable (<reason>)` in the kernel source, reviewed
+by eye. Statement coverage, not paths (canopy: 0 marked lines; 8
+untaken false-branch arcs, coverage.py `--cov-branch`).
+Sweep: one kernel per PR; also hoist `32.0`, 5/9; settle STARFIT
+`lake_release_sub`/`lake_spill_sub` (cms hourly but io units in daily
+mode; declared cms).
 
 ## Phase 2 backlog (separable, layered on top)
 

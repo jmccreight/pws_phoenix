@@ -77,12 +77,14 @@ class PRMSGroundwaterNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="HRU area [acres]",
     )
     hru_in_to_cf = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet/inch",
         description="Conversion of inches over the HRU to cubic feet",
         derivation="hru_area * 43560.0 / 12.0",
     )
@@ -92,12 +94,14 @@ class PRMSGroundwaterNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Groundwater routing coefficient [1/day]",
     )
     gwsink_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Groundwater sink coefficient [1/day]",
     )
 
@@ -125,12 +129,14 @@ class PRMSGroundwaterNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Groundwater reservoir storage [inches]",
     )
     gwres_stor_old = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Groundwater reservoir storage, previous timestep",
     )
     gwres_flow = DataArrayMeta(
@@ -158,6 +164,7 @@ class PRMSGroundwaterNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Groundwater discharge volume [cubic feet]",
     )
 

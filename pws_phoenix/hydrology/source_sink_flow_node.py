@@ -104,6 +104,7 @@ class SourceSinkFlowNode:
             kind="parameter",
             dims=("space",),
             dtype=np.float64,
+            units="io flow units",
             description="Minimum flow below which sinks are not "
             "applied (and outflow is not drawn below) [io flow units]",
         ),
@@ -111,6 +112,7 @@ class SourceSinkFlowNode:
             kind="input",
             dims=("space",),
             dtype=np.float64,
+            units="io flow units",
             description="Requested source (+) / sink (-) flow at "
             "nodes [io flow units] (node-perspective sign convention)",
         ),
@@ -118,12 +120,14 @@ class SourceSinkFlowNode:
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="io flow units",
             description="Applied source/sink substep accumulator [io flow units]",
         ),
         "source_sink_outflow_sum": DataArrayMeta(
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="io flow units",
             description="Outflow substep accumulator [io flow units] "
             "(the daily harvest is the mean; see module docstring)",
         ),

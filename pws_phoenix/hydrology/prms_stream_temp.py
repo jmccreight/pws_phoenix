@@ -969,9 +969,15 @@ def _meta(
     description,
     dtype=np.float64,
     dims=("space",),
+    *,
+    units,
     restart=False,
     derivation=None,
 ):
+    """A declaration. ``units`` is REQUIRED (None only for an int
+    field): tests/test_units.py's source scanner sees only literal
+    ``DataArrayMeta(`` calls, so this helper hid the family's unit-less
+    float fields from it until Nov 2026."""
     return DataArrayMeta(
         kind=kind,
         dims=dims,
@@ -979,6 +985,7 @@ def _meta(
         description=description,
         restart=restart,
         derivation=derivation,
+        units=units,
     )
 
 
@@ -1007,34 +1014,52 @@ class PRMSStreamTempBase(Process):
         derivation=(
             "Discretization(topo_order={'segment_order': 'tosegment'})"
         ),
+        units=None,
     )
     tosegment = _meta(
         "parameter",
         "Downstream segment index (1-based; 0 = outlet)",
         np.int64,
+        units=None,
     )
-    seg_length = _meta("parameter", "Segment length [m]")
-    seg_slope = _meta("parameter", "Segment slope [-]")
-    seg_lat = _meta("parameter", "Segment latitude [degrees N]")
-    seg_elev = _meta("parameter", "Segment elevation [m]")
+    seg_length = _meta("parameter", "Segment length [m]", units="m")
+    seg_slope = _meta("parameter", "Segment slope [-]", units="fraction")
+    seg_lat = _meta(
+        "parameter", "Segment latitude [degrees N]", units="degrees"
+    )
+    seg_elev = _meta("parameter", "Segment elevation [m]", units="m")
     lat_temp_adj = _meta(
         "parameter",
         "Monthly lateral temperature adjustment [degC]",
         dims=("nmonth", "space"),
+        units="delta_degC",
     )
 
     # -- process parameters --
-    gw_tau = _meta("parameter", "Groundwater temperature averaging [days]")
-    ss_tau = _meta("parameter", "Subsurface temperature averaging [days]")
-    albedo = _meta("parameter", "Water surface albedo [-]", dims=("scalar",))
+    gw_tau = _meta(
+        "parameter", "Groundwater temperature averaging [days]", units="days"
+    )
+    ss_tau = _meta(
+        "parameter", "Subsurface temperature averaging [days]", units="days"
+    )
+    albedo = _meta(
+        "parameter",
+        "Water surface albedo [-]",
+        dims=("scalar",),
+        units="fraction",
+    )
     melt_temp = _meta(
-        "parameter", "Temperature of snowmelt [degC]", dims=("scalar",)
+        "parameter",
+        "Temperature of snowmelt [degC]",
+        dims=("scalar",),
+        units="degC",
     )
     maxiter_sntemp = _meta(
         "parameter",
         "Maximum solver iterations",
         np.int64,
         dims=("scalar",),
+        units=None,
     )
     # ('nhru',)-dim: ONLY for the never-has-flow walk at initialize
     hru_segment = _meta(
@@ -1043,42 +1068,65 @@ class PRMSStreamTempBase(Process):
         "walk only in this class",
         np.int64,
         dims=("nhru",),
+        units=None,
     )
     hru_area = _meta(
         "parameter",
         "HRU area [acres] -- never-flow walk only in this class",
         dims=("nhru",),
+        units="acres",
     )
 
     # -- derived parameters (upstream edits/conversions of params) --
     _seg_slope = _meta(
-        "parameter_internal", "seg_slope clamped to >= 1e-7 (upstream edit)"
+        "parameter_internal",
+        "seg_slope clamped to >= 1e-7 (upstream edit)",
+        units="fraction",
     )
     seg_length_km = _meta(
-        "parameter_internal", "Segment length [km] (m / 1000)"
+        "parameter_internal", "Segment length [km] (m / 1000)", units="km"
     )
-    _seg_lat_rad = _meta("parameter_internal", "Segment latitude [radians]")
+    _seg_lat_rad = _meta(
+        "parameter_internal", "Segment latitude [radians]", units="radians"
+    )
 
     # -- inputs: routing (PRMSChannel) + hydraulic geometry --
-    seg_outflow = _meta("input", "Streamflow leaving each segment [cfs]")
-    seg_lateral_inflow = _meta("input", "Lateral inflow to each segment [cfs]")
-    seg_flow_width = _meta("input", "Flow width [m] (PRMSHydraulicGeometry*)")
+    seg_outflow = _meta(
+        "input", "Streamflow leaving each segment [cfs]", units="cfs"
+    )
+    seg_lateral_inflow = _meta(
+        "input", "Lateral inflow to each segment [cfs]", units="cfs"
+    )
+    seg_flow_width = _meta(
+        "input", "Flow width [m] (PRMSHydraulicGeometry*)", units="m"
+    )
 
     # -- inputs: HRU-derived aggregates (see module docstring) --
-    seg_tave_air = _meta("input", "Segment air temperature [degC]")
-    seg_humid = _meta("input", "Segment relative humidity [fraction]")
-    seg_ccov = _meta("input", "Segment cloud cover [fraction]")
-    seg_melt = _meta("input", "Segment snowmelt [inches]")
-    seg_rain = _meta("input", "Segment rainfall [inches]")
-    seg_potet = _meta("input", "Segment potential ET [inches]")
+    seg_tave_air = _meta(
+        "input", "Segment air temperature [degC]", units="degC"
+    )
+    seg_humid = _meta(
+        "input", "Segment relative humidity [fraction]", units="fraction"
+    )
+    seg_ccov = _meta(
+        "input", "Segment cloud cover [fraction]", units="fraction"
+    )
+    seg_melt = _meta("input", "Segment snowmelt [inches]", units="inches")
+    seg_rain = _meta("input", "Segment rainfall [inches]", units="inches")
+    seg_potet = _meta("input", "Segment potential ET [inches]", units="inches")
     seginc_swrad = _meta(
         "input",
         "Segment shortwave [cal/cm^2] (-99.9 = no contributing HRUs "
         "anywhere: the permanent-skip marker)",
+        units="cal/cm^2",
     )
-    seginc_sroff = _meta("input", "Segment surface runoff [cfs]")
-    seginc_ssflow = _meta("input", "Segment subsurface flow [cfs]")
-    seginc_gwflow = _meta("input", "Segment groundwater flow [cfs]")
+    seginc_sroff = _meta("input", "Segment surface runoff [cfs]", units="cfs")
+    seginc_ssflow = _meta(
+        "input", "Segment subsurface flow [cfs]", units="cfs"
+    )
+    seginc_gwflow = _meta(
+        "input", "Segment groundwater flow [cfs]", units="cfs"
+    )
 
     # -- variables --
     seg_tave_water = _meta(
@@ -1086,18 +1134,29 @@ class PRMSStreamTempBase(Process):
         "Water temperature [degC] (-99.9 invalid; -98.9 NOFLOW; NaN "
         "never-has-flow)",
         restart=True,
+        units="degC",
     )
     seg_tave_upstream = _meta(
-        "variable", "Flow-weighted upstream water temperature [degC]"
+        "variable",
+        "Flow-weighted upstream water temperature [degC]",
+        units="degC",
     )
     seg_tave_gw = _meta(
-        "variable", "Groundwater temperature [degC] (gw_tau-day average)"
+        "variable",
+        "Groundwater temperature [degC] (gw_tau-day average)",
+        units="degC",
     )
     seg_tave_ss = _meta(
-        "variable", "Subsurface temperature [degC] (ss_tau-day average)"
+        "variable",
+        "Subsurface temperature [degC] (ss_tau-day average)",
+        units="degC",
     )
-    seg_tave_lat = _meta("variable", "Lateral inflow temperature [degC]")
-    seg_shade = _meta("variable", "Shade fraction [-] (dynamic shday)")
+    seg_tave_lat = _meta(
+        "variable", "Lateral inflow temperature [degC]", units="degC"
+    )
+    seg_shade = _meta(
+        "variable", "Shade fraction [-] (dynamic shday)", units="fraction"
+    )
 
     # ------------------------------------------------------------------
     # Initialization
@@ -1341,19 +1400,37 @@ class PRMSStreamTemp(PRMSStreamTempBase):
     vegetation shade per step (_shday_from_statics)."""
 
     # -- dynamic shade parameters (PRMS stream_temp shday) --
-    azrh = _meta("parameter", "Stream azimuth angle [radians]")
-    alte = _meta("parameter", "East bank topographic altitude [radians]")
-    altw = _meta("parameter", "West bank topographic altitude [radians]")
-    vce = _meta("parameter", "East bank vegetation crown width [m]")
-    voe = _meta("parameter", "East bank vegetation offset [m]")
-    vhe = _meta("parameter", "East bank vegetation height [m]")
-    vdemx = _meta("parameter", "Max east bank vegetation density [-]")
-    vdemn = _meta("parameter", "Min east bank vegetation density [-]")
-    vcw = _meta("parameter", "West bank vegetation crown width [m]")
-    vow = _meta("parameter", "West bank vegetation offset [m]")
-    vhw = _meta("parameter", "West bank vegetation height [m]")
-    vdwmx = _meta("parameter", "Max west bank vegetation density [-]")
-    vdwmn = _meta("parameter", "Min west bank vegetation density [-]")
+    azrh = _meta(
+        "parameter", "Stream azimuth angle [radians]", units="radians"
+    )
+    alte = _meta(
+        "parameter",
+        "East bank topographic altitude [radians]",
+        units="radians",
+    )
+    altw = _meta(
+        "parameter",
+        "West bank topographic altitude [radians]",
+        units="radians",
+    )
+    vce = _meta("parameter", "East bank vegetation crown width [m]", units="m")
+    voe = _meta("parameter", "East bank vegetation offset [m]", units="m")
+    vhe = _meta("parameter", "East bank vegetation height [m]", units="m")
+    vdemx = _meta(
+        "parameter", "Max east bank vegetation density [-]", units="fraction"
+    )
+    vdemn = _meta(
+        "parameter", "Min east bank vegetation density [-]", units="fraction"
+    )
+    vcw = _meta("parameter", "West bank vegetation crown width [m]", units="m")
+    vow = _meta("parameter", "West bank vegetation offset [m]", units="m")
+    vhw = _meta("parameter", "West bank vegetation height [m]", units="m")
+    vdwmx = _meta(
+        "parameter", "Max west bank vegetation density [-]", units="fraction"
+    )
+    vdwmn = _meta(
+        "parameter", "Min west bank vegetation density [-]", units="fraction"
+    )
 
     def initialize(self) -> None:
         super().initialize()
@@ -1423,10 +1500,14 @@ class PRMSStreamTempConstantShade(PRMSStreamTempBase):
     initialize() zeros and is never written."""
 
     segshade_sum = _meta(
-        "parameter", "Total summer vegetation shade fraction [-]"
+        "parameter",
+        "Total summer vegetation shade fraction [-]",
+        units="fraction",
     )
     segshade_win = _meta(
-        "parameter", "Total winter vegetation shade fraction [-]"
+        "parameter",
+        "Total winter vegetation shade fraction [-]",
+        units="fraction",
     )
 
     def _compute_shade(
@@ -1451,12 +1532,14 @@ class PRMSStreamTempSegHumidity(PRMSStreamTemp):
     seg_humid = _meta(
         "variable",
         "Segment relative humidity [fraction] (= seg_humidity[month])",
+        units="fraction",
     )
 
     seg_humidity = _meta(
         "parameter",
         "Monthly segment relative humidity [fraction]",
         dims=("nmonth", "space"),
+        units="fraction",
     )
 
     def initialize(self) -> None:

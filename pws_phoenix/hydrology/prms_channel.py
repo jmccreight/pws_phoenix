@@ -105,6 +105,32 @@ from pws_phoenix.process import DataArrayMeta, Process
 # pywatershed constants.SegmentType.LAKE
 _SEGMENT_TYPE_LAKE = 2
 
+# The kernel's implicit units, named. ts is declared in hours (the
+# init adds 0.5 * ts to kcoef, a travel time in hours), but the kernel
+# divides inflow_ts -- a SUM of hourly cfs samples -- by it as a COUNT
+# of samples: the count is ts / _ROUTING_STEP_HOURS. The zeros are the
+# kernel's working units. numba freezes all three as constants (the
+# compiled code is unchanged: ts / 1.0 == ts exactly); the stage-3
+# units test (tests/test_kernel_units.py) patches them to pint
+# Quantities -- a bare 0.0 cannot be assigned into a cfs array under
+# pint.
+_ROUTING_STEP_HOURS = 1.0
+_ZERO_CFS = 0.0
+_ZERO_CUBIC_FEET = 0.0
+
+# The init derivation's implicit units, named (muskingum_mann_coefficients;
+# plain numpy, so the units test patches these directly): velocity m/s
+# -> m/hour, kcoef bounds and the dd floor in hours, and one hour for
+# the sub-timestep ladder (kk is compared as a count of hours; ts is
+# written in hours). Each multiply/divide by 1.0 is exact.
+_SECONDS_PER_MINUTE = 60.0
+_MINUTES_PER_HOUR = 60.0
+_KCOEF_MIN_HOURS = 0.01
+_KCOEF_MAX_HOURS = 24.0
+_ONE_HOUR = 1.0
+_DD_NEARZERO_HOURS = 1e-6
+_DD_FLOOR_HOURS = 0.0001
+
 
 def muskingum_mann_coefficients(
     ts: np.ndarray,
@@ -131,8 +157,8 @@ def muskingum_mann_coefficients(
 
     velocity = (
         ((1.0 / mann_n) * np.sqrt(seg_slope) * seg_depth ** (2.0 / 3.0))
-        * 60.0
-        * 60.0
+        * _SECONDS_PER_MINUTE
+        * _MINUTES_PER_HOUR
     )
     # pywatershed clamps too-flat seg_slope IN PLACE here -- AFTER
     # velocity, so the edit affects nothing downstream in channel
@@ -141,47 +167,51 @@ def muskingum_mann_coefficients(
 
     # Kcoef = 24 default; Manning travel time where velocity > 0;
     # lakes forced to 24; clamped to [0.01, 24]
-    kcoef = np.full(n_seg, 24.0, dtype=np.float64)
+    # (ones * 24.0, not np.full: np.full drops a Quantity's units)
+    kcoef = _KCOEF_MAX_HOURS * np.ones(n_seg, dtype=np.float64)
     wh_moving = velocity > 0.0
     kcoef[wh_moving] = seg_length[wh_moving] / velocity[wh_moving]
-    kcoef = np.where(segment_type == _SEGMENT_TYPE_LAKE, 24.0, kcoef)
-    kcoef = np.where(kcoef < 0.01, 0.01, kcoef)
-    kcoef = np.where(kcoef > 24.0, 24.0, kcoef)
+    kcoef = np.where(
+        segment_type == _SEGMENT_TYPE_LAKE, _KCOEF_MAX_HOURS, kcoef
+    )
+    kcoef = np.where(kcoef < _KCOEF_MIN_HOURS, _KCOEF_MIN_HOURS, kcoef)
+    kcoef = np.where(kcoef > _KCOEF_MAX_HOURS, _KCOEF_MAX_HOURS, kcoef)
 
-    ts[:] = 1.0
+    ts[:] = _ONE_HOUR
     tsi[:] = 1
-    # sub-timestep ladder (even divisors of 24 h) -- verbatim
+    # sub-timestep ladder (even divisors of 24 h) -- verbatim, kk a
+    # count of hours
     for iseg in range(n_seg):
-        kk = kcoef[iseg]
+        kk = kcoef[iseg] / _ONE_HOUR
         if kk < 1.0:
             tsi[iseg] = -1
         elif kk < 2.0:
-            ts[iseg] = 1.0
+            ts[iseg] = 1.0 * _ONE_HOUR
             tsi[iseg] = 1
         elif kk < 3.0:
-            ts[iseg] = 2.0
+            ts[iseg] = 2.0 * _ONE_HOUR
             tsi[iseg] = 2
         elif kk < 4.0:
-            ts[iseg] = 3.0
+            ts[iseg] = 3.0 * _ONE_HOUR
             tsi[iseg] = 3
         elif kk < 6.0:
-            ts[iseg] = 4.0
+            ts[iseg] = 4.0 * _ONE_HOUR
             tsi[iseg] = 4
         elif kk < 8.0:
-            ts[iseg] = 6.0
+            ts[iseg] = 6.0 * _ONE_HOUR
             tsi[iseg] = 6
         elif kk < 12.0:
-            ts[iseg] = 8.0
+            ts[iseg] = 8.0 * _ONE_HOUR
             tsi[iseg] = 8
         elif kk < 24.0:
-            ts[iseg] = 12.0
+            ts[iseg] = 12.0 * _ONE_HOUR
             tsi[iseg] = 12
         else:
-            ts[iseg] = 24.0
+            ts[iseg] = 24.0 * _ONE_HOUR
             tsi[iseg] = 24
 
     dd = kcoef - (kcoef * x_coef) + (0.5 * ts)
-    dd = np.where(np.abs(dd) < 1e-6, 0.0001, dd)
+    dd = np.where(np.abs(dd) < _DD_NEARZERO_HOURS, _DD_FLOOR_HOURS, dd)
     c0[:] = (-(kcoef * x_coef) + (0.5 * ts)) / dd
     c1[:] = ((kcoef * x_coef) + (0.5 * ts)) / dd
     c2[:] = (kcoef - (kcoef * x_coef) - (0.5 * ts)) / dd
@@ -213,18 +243,21 @@ class PRMSChannel(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="m",
         description="Segment length [m]",
     )
     seg_slope = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Segment slope [-]",
     )
     seg_depth = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="m",
         description="Segment bank-full depth [m]",
     )
     segment_type = DataArrayMeta(
@@ -255,12 +288,14 @@ class PRMSChannel(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="seconds/m^(1/3)",
         description="Manning's n roughness [-]",
     )
     x_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Muskingum storage weighting factor [-]",
     )
 
@@ -275,30 +310,35 @@ class PRMSChannel(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="hours",
         description="Routing sub-timestep [h] (float)",
     )
     tsi = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.int64,
+        units="hours",
         description="Routing sub-timestep [h] (int; -1 = within-hour)",
     )
     c0 = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Muskingum c0 coefficient",
     )
     c1 = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Muskingum c1 coefficient",
     )
     c2 = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Muskingum c2 coefficient",
     )
 
@@ -307,18 +347,21 @@ class PRMSChannel(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Surface runoff volume mapped to segments [cf]",
     )
     seg_ssres_flow_vol = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Interflow volume mapped to segments [cf]",
     )
     seg_gwres_flow_vol = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Groundwater discharge volume mapped to segments [cf]",
     )
 
@@ -327,12 +370,14 @@ class PRMSChannel(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Lateral inflow to each segment [cfs]",
     )
     seg_upstream_inflow = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Upstream inflow, daily mean [cfs]",
     )
     seg_inflow = DataArrayMeta(
@@ -340,18 +385,21 @@ class PRMSChannel(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Segment inflow, daily mean [cfs]",
     )
     seg_outflow = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Segment outflow, daily mean [cfs]",
     )
     inflow_ts_prev = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Previous sub-timestep inflow (routing state)",
     )
     outflow_ts = DataArrayMeta(
@@ -359,18 +407,21 @@ class PRMSChannel(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Sub-timestep outflow (routing state; instantaneous)",
     )
     seg_stor_change = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Channel storage change over the timestep [cf]",
     )
     channel_outflow_vol = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Outflow volume leaving the domain (outlets) [cf]",
     )
     # kernel work buffers, declared so the kernel allocates NOTHING
@@ -378,12 +429,14 @@ class PRMSChannel(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Sub-timestep inflow accumulator (kernel work buffer)",
     )
     seg_current_sum = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cfs",
         description="Upstream-inflow accumulator (kernel work buffer)",
     )
 
@@ -491,13 +544,13 @@ class PRMSChannel(Process):
         # muskingum_mann routing -- pywatershed _muskingum_mann_numpy,
         # rewritten in place (its per-day allocations become zeroed
         # buffers)
-        seg_inflow[:] = 0.0
-        seg_outflow[:] = 0.0
-        inflow_ts[:] = 0.0
-        seg_current_sum[:] = 0.0
+        seg_inflow[:] = _ZERO_CFS
+        seg_outflow[:] = _ZERO_CFS
+        inflow_ts[:] = _ZERO_CFS
+        seg_current_sum[:] = _ZERO_CFS
 
         for ihr in range(24):
-            seg_upstream_inflow[:] = 0.0
+            seg_upstream_inflow[:] = _ZERO_CFS
 
             for jseg in segment_order:
                 # current inflow: upstream avg + lateral
@@ -511,7 +564,7 @@ class PRMSChannel(Process):
                 remainder = (ihr + 1) % tsi[jseg]
                 if remainder == 0:
                     # segment routed on the current hour
-                    inflow_ts[jseg] /= ts[jseg]
+                    inflow_ts[jseg] /= ts[jseg] / _ROUTING_STEP_HOURS
                     if tsi[jseg] > 0:
                         # Muskingum routing equation
                         outflow_ts[jseg] = (
@@ -523,7 +576,7 @@ class PRMSChannel(Process):
                         # travel time <= 1 hour: outflow = inflow
                         outflow_ts[jseg] = inflow_ts[jseg]
                     inflow_ts_prev[jseg] = inflow_ts[jseg]
-                    inflow_ts[jseg] = 0.0
+                    inflow_ts[jseg] = _ZERO_CFS
 
                 # daily mean outflow accumulates hourly values
                 seg_outflow[jseg] += outflow_ts[jseg]
@@ -542,7 +595,7 @@ class PRMSChannel(Process):
             if tosegment0[jj] < 0:
                 channel_outflow_vol[jj] = seg_outflow[jj] * s_per_time
             else:
-                channel_outflow_vol[jj] = 0.0
+                channel_outflow_vol[jj] = _ZERO_CUBIC_FEET
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         # dt is SECONDS (s_per_time); 86400.0 for daily PRMS

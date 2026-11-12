@@ -169,6 +169,7 @@ class StarfitSourceSinkFlowNode:
             kind="parameter",
             dims=("space",),
             dtype=np.float64,
+            units="MCM",
             description="Minimum storage below which sinks are not "
             "applied (and storage is not drawn below) [MCM] -- "
             "ALWAYS internal MCM, even in a cfs graph (pywatershed-"
@@ -179,6 +180,7 @@ class StarfitSourceSinkFlowNode:
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="MCM",
             description="Lake storage after the source/sink "
             "diversion, fed to the release calculation [MCM]",
         ),
@@ -186,6 +188,7 @@ class StarfitSourceSinkFlowNode:
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="cms",
             description="Applied source/sink, current substep "
             "[m^3/s] (pywatershed _source_sink)",
         ),
@@ -193,6 +196,7 @@ class StarfitSourceSinkFlowNode:
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="io flow units",
             description="Applied source/sink, running daily mean "
             "[m^3/s] (pywatershed _sink_source)",
         ),
@@ -200,6 +204,7 @@ class StarfitSourceSinkFlowNode:
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="cms",
             description="Applied source/sink substep accumulator "
             "[m^3/s] (pywatershed _sink_source_sum)",
         ),

@@ -58,6 +58,13 @@ _NEARZERO = 1.0e-6  # nearzero
 # dnearzero = epsilon64: pywatershed HARDCODES 2.23e-16 (slightly
 # above np.finfo(float64).eps) -- verbatim, threshold branches differ
 _DNEARZERO = 2.23e-16
+# a zero in the kernel's working unit (inches): every zero assigned to
+# an inches scalar in the kernel. numba freezes it as a constant (the
+# compiled code is unchanged); the stage-3 units test
+# (tests/test_kernel_units.py) patches it, _NEARZERO and _DNEARZERO to
+# pint Quantities in inches -- a bare 0.0 cannot be assigned into an
+# inches array under pint.
+_ZERO_INCHES = 0.0
 _BARESOIL = 0  # CovType.BARESOIL
 _GRASSES = 1  # CovType.GRASSES
 _LAND = 1  # HruType.LAND
@@ -105,36 +112,42 @@ class PRMSCanopy(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Summer vegetation cover density [-]",
     )
     covden_win = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Winter vegetation cover density [-]",
     )
     srain_intcp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Summer rain interception storage capacity [inches]",
     )
     wrain_intcp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Winter rain interception storage capacity [inches]",
     )
     snow_intcp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snow interception storage capacity [inches]",
     )
     potet_sublim = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of PET sublimated from intercepted snow [-]",
     )
 
@@ -143,24 +156,28 @@ class PRMSCanopy(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack ice, previous timestep [inches]",
     )
     freeh2o_prev = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack free water, previous timestep [inches]",
     )
     transp_on = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Transpiration occurring (0/1 flag)",
     )
     hru_ppt = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation on the HRU [inches]",
     )
     hru_rain = DataArrayMeta(
@@ -181,6 +198,7 @@ class PRMSCanopy(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential evapotranspiration [inches]",
     )
 
@@ -189,6 +207,7 @@ class PRMSCanopy(Process):
         kind="mutable_input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Rain/snow mix flag (0/1) -- ZEROED in place where "
         "intercepted trace snow becomes rain (never read here)",
     )
@@ -198,6 +217,7 @@ class PRMSCanopy(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation through the canopy [inches]",
     )
     net_rain = DataArrayMeta(
@@ -226,6 +246,7 @@ class PRMSCanopy(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Canopy evaporation/sublimation [inches over cover]",
     )
     intcp_form = DataArrayMeta(
@@ -239,6 +260,7 @@ class PRMSCanopy(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Interception storage [inches over cover]",
     )
     intcp_transp_on = DataArrayMeta(
@@ -260,6 +282,7 @@ class PRMSCanopy(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Interception storage [inches over the HRU]",
     )
     hru_intcpstor_change = DataArrayMeta(
@@ -273,6 +296,7 @@ class PRMSCanopy(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Interception storage, previous timestep",
     )
 
@@ -385,16 +409,16 @@ class PRMSCanopy(Process):
                 intcp_form[ii] = _SNOW
 
             intcpstor = intcp_stor[ii]
-            intcpevap = 0.0
-            changeover = 0.0
-            extra_water = 0.0
+            intcpevap = _ZERO_INCHES
+            changeover = _ZERO_INCHES
+            extra_water = _ZERO_INCHES
 
             # lake or bare ground hrus (hru_type hardwired LAND -- the
             # LAKE half is dead, kept verbatim)
             if _HRU_TYPE == _LAKE or cov_type[ii] == _BARESOIL:
                 if cov_type[ii] == _BARESOIL and intcpstor > 0.0:
                     extra_water = intcp_stor[ii]
-                intcpstor = 0.0
+                intcpstor = _ZERO_INCHES
 
             # ***** go from summer to winter cover density
             if transp_on[ii] == _OFF and intcp_transp_on[ii] == _ACTIVE:
@@ -405,9 +429,9 @@ class PRMSCanopy(Process):
                     if cov > 0.0:
                         if changeover < 0.0:
                             intcpstor = intcpstor * covden_sum[ii] / cov
-                            changeover = 0.0
+                            changeover = _ZERO_INCHES
                     else:
-                        intcpstor = 0.0
+                        intcpstor = _ZERO_INCHES
 
             # **** go from winter to summer cover density
             elif transp_on[ii] == _ACTIVE and intcp_transp_on[ii] == _OFF:
@@ -418,9 +442,9 @@ class PRMSCanopy(Process):
                     if cov > 0.0:
                         if changeover < 0.0:
                             intcpstor = intcpstor * covden_win[ii] / cov
-                            changeover = 0.0
+                            changeover = _ZERO_INCHES
                     else:
-                        intcpstor = 0.0
+                        intcpstor = _ZERO_INCHES
 
             # ***** determine the amount of interception from rain
             if _HRU_TYPE != _LAKE and cov_type[ii] != _BARESOIL:
@@ -461,7 +485,7 @@ class PRMSCanopy(Process):
                         )
                         if netsnow < _NEARZERO:
                             netrain = netrain + netsnow
-                            netsnow = 0.0
+                            netsnow = _ZERO_INCHES
                             pptmix[ii] = 0
 
             # ***** evaporation or sublimation of interception
@@ -479,7 +503,7 @@ class PRMSCanopy(Process):
                             intcpevap = evsn
                         else:
                             intcpevap = intcpstor
-                            intcpstor = 0.0
+                            intcpstor = _ZERO_INCHES
                     else:
                         d = intcpstor - evrn
                         if d > 0.0:
@@ -487,14 +511,14 @@ class PRMSCanopy(Process):
                             intcpevap = evrn
                         else:
                             intcpevap = intcpstor
-                            intcpstor = 0.0
+                            intcpstor = _ZERO_INCHES
 
             if intcpevap * cov > potet[ii]:
                 last = intcpevap
                 if cov > 0.0:
                     intcpevap = potet[ii] / cov
                 else:
-                    intcpevap = 0.0
+                    intcpevap = _ZERO_INCHES
                 intcpstor = intcpstor + last - intcpevap
 
             # store calculated values in output variables

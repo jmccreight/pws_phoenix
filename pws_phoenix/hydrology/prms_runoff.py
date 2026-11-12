@@ -81,6 +81,26 @@ _NEARZERO = 1.0e-6  # nearzero
 # dnearzero = epsilon64: pywatershed HARDCODES 2.23e-16 (slightly
 # above np.finfo(float64).eps) -- verbatim, threshold branches differ
 _DNEARZERO = 2.23e-16
+# pywatershed's one nearzero (1e-6) is compared against three units in
+# the kernels: the dimensionless uses keep _NEARZERO; the inches and
+# acres uses get their own names (same value: compiled code unchanged)
+# so the stage-3 units test (tests/test_kernel_units.py) can patch each
+# to a pint Quantity in its unit, as it patches _DNEARZERO (compared
+# with pkwater_equiv) to inches.
+_NEARZERO_INCHES = 1.0e-6
+_NEARZERO_ACRES = 1.0e-6
+# zeros in the kernels' working units: every zero that is a VALUE with
+# units (assigned, returned, accumulated, or an argument of max) --
+# runoff/dprst volumes are acre-inches, depression areas acres;
+# dimensionless zeros and comparisons with 0.0 stay bare. Patched to
+# Quantities by the units test (a bare 0.0 cannot be assigned into a
+# dimensional array under pint).
+_ZERO_INCHES = 0.0
+_ZERO_ACRES = 0.0
+_ZERO_ACRE_INCHES = 0.0
+# perv_comp: above this smidx (inches) the contributing area is
+# carea_max (PRMS smidx module)
+_SMIDX_MAX_INCHES = 25.0
 _LAND = 1  # HruType.LAND.value
 # GSFLOW 4.2.0 / PRMS 6 accounting; pywatershed default False. A
 # RUNTIME argument of compute_infil / compute_infil_ag (as upstream):
@@ -109,7 +129,7 @@ def perv_comp(
 ):
     """Pervious area computations (smidx module)."""
     smidx = soil_moist_prev + 0.5 * ptc
-    if smidx > 25.0:
+    if smidx > _SMIDX_MAX_INCHES:
         ca_fraction = carea_max
     else:
         ca_fraction = smidx_coef * 10.0 ** (smidx_exp * smidx)
@@ -181,7 +201,7 @@ def compute_infil(
     if hru_type == _LAND or isglacier:
         hru_flag = 1
 
-    avail_water = 0.0
+    avail_water = _ZERO_INCHES
 
     # compute runoff from canopy changeover water
     if intcp_changeover > 0.0 and not intcp_changeover_in_net_rain:
@@ -223,7 +243,7 @@ def compute_infil(
     # last of snowpack. If rain/snow mix with no antecedent snowpack,
     # compute the snowmelt portion of runoff.
     cond4 = pkwater_equiv < _DNEARZERO
-    cond6 = net_snow < _NEARZERO
+    cond6 = net_snow < _NEARZERO_INCHES
 
     if snowmelt > 0.0:
         avail_water = avail_water + snowmelt
@@ -235,7 +255,7 @@ def compute_infil(
             if intcp_changeover_in_net_rain:
                 check_condition = not (net_ppt - net_snow > 0.0)
             else:
-                check_condition = net_rain < _NEARZERO
+                check_condition = net_rain < _NEARZERO_INCHES
             if (pkwater_equiv > 0.0) or check_condition:
                 # pervious area computations
                 infil, srp = check_capacity(
@@ -339,7 +359,7 @@ def dprst_comp(
     perv_frac,
 ):
     # cascades and dprst water use are hardwired OFF upstream
-    inflow = 0.0
+    inflow = _ZERO_INCHES
     if pptmix_nopack != 0:
         inflow = inflow + net_rain
 
@@ -354,10 +374,10 @@ def dprst_comp(
     elif pkwater_equiv < _DNEARZERO:
         # If no snowmelt and no snowpack but there was net snow, the
         # snowpack was small and lost to sublimation.
-        if net_snow < _NEARZERO and net_rain > 0.0:
+        if net_snow < _NEARZERO_INCHES and net_rain > 0.0:
             inflow = inflow + net_rain
 
-    dprst_in = 0.0
+    dprst_in = _ZERO_ACRE_INCHES
     if dprst_area_open_max > 0.0:
         dprst_in = inflow * dprst_area_open_max
         dprst_vol_open = dprst_vol_open + dprst_in
@@ -369,8 +389,8 @@ def dprst_comp(
     dprst_in = dprst_in / hru_area
 
     # add any pervious surface runoff fraction to depressions
-    dprst_srp = 0.0
-    dprst_sri = 0.0
+    dprst_srp = _ZERO_INCHES
+    dprst_sri = _ZERO_INCHES
     if srp > 0.0:
         tmp = srp * perv_frac * sro_to_dprst_perv * hru_area
         if dprst_area_open_max > 0.0:
@@ -383,7 +403,7 @@ def dprst_comp(
             dprst_vol_clos = dprst_vol_clos + dprst_srp_clos
         srp = srp - dprst_srp / perv_frac
         if srp < 0.0:
-            srp = 0.0
+            srp = _ZERO_INCHES
 
     if sri > 0.0:
         tmp = sri * imperv_frac * sro_to_dprst_imperv * hru_area
@@ -397,11 +417,11 @@ def dprst_comp(
             dprst_vol_clos = dprst_vol_clos + dprst_sri_clos
         sri = sri - dprst_sri / imperv_frac
         if sri < 0.0:
-            sri = 0.0
+            sri = _ZERO_INCHES
 
     dprst_insroff_hru = dprst_srp + dprst_sri
 
-    dprst_area_open = 0.0
+    dprst_area_open = _ZERO_ACRES
     if dprst_vol_open > 0.0:
         open_vol_r = dprst_vol_open / dprst_vol_open_max
         if open_vol_r < _NEARZERO:
@@ -417,7 +437,7 @@ def dprst_comp(
     # NOTE: this recomputed dprst_area_clos is LOCAL (used for evap
     # below); pywatershed never assigns it back to the array
     if dprst_area_clos_max > 0.0:
-        dprst_area_clos = 0.0
+        dprst_area_clos = _ZERO_ACRES
         if dprst_vol_clos > 0.0:
             clos_vol_r = dprst_vol_clos / dprst_vol_clos_max
             if clos_vol_r < _NEARZERO:
@@ -434,18 +454,20 @@ def dprst_comp(
     # dprst_evap_open & dprst_evap_clos = inches-acres on the HRU
     unsatisfied_et = avail_et
     dprst_avail_et = potet * (1.0 - snowcov_area) * dprst_et_coef
-    dprst_evap_hru = 0.0
+    dprst_evap_hru = _ZERO_INCHES
     if dprst_avail_et > 0.0:
-        dprst_evap_open = 0.0
-        dprst_evap_clos = 0.0
+        dprst_evap_open = _ZERO_ACRE_INCHES
+        dprst_evap_clos = _ZERO_ACRE_INCHES
         if dprst_area_open > 0.0:
             dprst_evap_open = min(
                 dprst_area_open * dprst_avail_et, dprst_vol_open
             )
             if dprst_evap_open / hru_area > unsatisfied_et:
                 dprst_evap_open = unsatisfied_et * hru_area
+            # never true: dprst_evap_open starts as min(..., dprst_vol_open)
+            # and the unsatisfied-ET limit only lowers it
             if dprst_evap_open > dprst_vol_open:
-                dprst_evap_open = dprst_vol_open
+                dprst_evap_open = dprst_vol_open  # units-test: unreachable
             unsatisfied_et = unsatisfied_et - dprst_evap_open / hru_area
             dprst_vol_open = dprst_vol_open - dprst_evap_open
 
@@ -455,43 +477,47 @@ def dprst_comp(
             )
             if dprst_evap_clos / hru_area > unsatisfied_et:
                 dprst_evap_clos = unsatisfied_et * hru_area
+            # never true: dprst_evap_clos starts as min(..., dprst_vol_clos)
+            # and the unsatisfied-ET limit only lowers it
             if dprst_evap_clos > dprst_vol_clos:
-                dprst_evap_clos = dprst_vol_clos
+                dprst_evap_clos = dprst_vol_clos  # units-test: unreachable
             dprst_vol_clos = dprst_vol_clos - dprst_evap_clos
 
         dprst_evap_hru = (dprst_evap_open + dprst_evap_clos) / hru_area
 
     # compute seepage
-    dprst_seep_hru = 0.0
+    dprst_seep_hru = _ZERO_INCHES
     if dprst_vol_open > 0.0:
         seep_open = dprst_vol_open * dprst_seep_rate_open
         dprst_vol_open = dprst_vol_open - seep_open
         if dprst_vol_open < 0.0:
             seep_open = seep_open + dprst_vol_open
-            dprst_vol_open = 0.0
+            dprst_vol_open = _ZERO_ACRE_INCHES
         dprst_seep_hru = seep_open / hru_area
 
     # compute open surface runoff
-    dprst_sroff_hru = 0.0
+    dprst_sroff_hru = _ZERO_INCHES
     if dprst_vol_open > 0.0:
-        dprst_sroff_hru = max(0.0, dprst_vol_open - dprst_vol_open_max)
+        dprst_sroff_hru = max(
+            _ZERO_ACRE_INCHES, dprst_vol_open - dprst_vol_open_max
+        )
         dprst_sroff_hru = dprst_sroff_hru + max(
-            0.0,
+            _ZERO_ACRE_INCHES,
             (dprst_vol_open - dprst_sroff_hru - dprst_vol_thres_open)
             * dprst_flow_coef,
         )
         dprst_vol_open = dprst_vol_open - dprst_sroff_hru
         dprst_sroff_hru = dprst_sroff_hru / hru_area
         if dprst_vol_open < 0.0:
-            dprst_vol_open = 0.0
+            dprst_vol_open = _ZERO_ACRE_INCHES
 
     if dprst_area_clos_max > 0.0:
-        if dprst_area_clos > _NEARZERO:
+        if dprst_area_clos > _NEARZERO_ACRES:
             seep_clos = dprst_vol_clos * dprst_seep_rate_clos
             dprst_vol_clos = dprst_vol_clos - seep_clos
             if dprst_vol_clos < 0.0:
                 seep_clos = seep_clos + dprst_vol_clos
-                dprst_vol_clos = 0.0
+                dprst_vol_clos = _ZERO_ACRE_INCHES
             dprst_seep_hru = dprst_seep_hru + seep_clos / hru_area
 
     avail_et = avail_et - dprst_evap_hru
@@ -553,7 +579,7 @@ def ag_comp(
     moisture; smidx module hardwired upstream, carea unimplemented).
     ag_soil_rechr_prev is in upstream's signature but unused."""
     smidx = ag_soil_moist_prev + 0.5 * ptc
-    if smidx > 25.0:
+    if smidx > _SMIDX_MAX_INCHES:
         ca_fraction = carea_max
     else:
         ca_fraction = smidx_coef * 10.0 ** (smidx_exp * smidx)
@@ -612,8 +638,8 @@ def compute_infil_ag(
     (upstream _compute_infil_ag; ag_soil_rechr_max is in its
     signature but unused; note its rain-on-snow check is HARDCODED
     net_rain < nearzero -- upstream's flag does not reach it)."""
-    infil_ag = 0.0
-    sroff_ag = 0.0
+    infil_ag = _ZERO_INCHES
+    sroff_ag = _ZERO_INCHES
 
     # Process intcp_changeover
     if intcp_changeover > 0.0 and not intcp_changeover_in_net_rain:
@@ -651,7 +677,7 @@ def compute_infil_ag(
     if snowmelt > 0.0:
         infil_ag = infil_ag + snowmelt
         if hru_type == _LAND:
-            if (pkwater_equiv > 0.0) or (net_rain < _NEARZERO):
+            if (pkwater_equiv > 0.0) or (net_rain < _NEARZERO_INCHES):
                 # Check capacity
                 infil_ag, sroff_ag = check_capacity_ag(
                     ag_soil_moist_prev,
@@ -676,7 +702,7 @@ def compute_infil_ag(
 
     elif pkwater_equiv < _DNEARZERO:
         # No snowpack
-        if net_snow < _NEARZERO and through_rain > 0.0:
+        if net_snow < _NEARZERO_INCHES and through_rain > 0.0:
             infil_ag = infil_ag + through_rain
             if hru_type == _LAND:
                 infil_ag, sroff_ag = ag_comp(
@@ -757,7 +783,7 @@ def dprst_comp_ag(
     """
     inflow = through_rain + snowmelt
 
-    dprst_in = 0.0
+    dprst_in = _ZERO_ACRE_INCHES
     if dprst_area_open_max > 0.0:
         dprst_in = inflow * dprst_area_open_max
         dprst_vol_open = dprst_vol_open + dprst_in
@@ -769,9 +795,9 @@ def dprst_comp_ag(
     dprst_in = dprst_in / hru_area
 
     # Add pervious surface runoff fraction to depressions
-    dprst_srp = 0.0
-    dprst_sri = 0.0
-    dprst_sra = 0.0
+    dprst_srp = _ZERO_INCHES
+    dprst_sri = _ZERO_INCHES
+    dprst_sra = _ZERO_INCHES
 
     if srp > 0.0:
         tmp = srp * perv_frac * sro_to_dprst_perv * hru_area
@@ -785,7 +811,7 @@ def dprst_comp_ag(
             dprst_vol_clos = dprst_vol_clos + dprst_srp_clos
         srp = srp - dprst_srp / perv_frac
         if srp < 0.0:
-            srp = 0.0
+            srp = _ZERO_INCHES
 
     if sri > 0.0:
         tmp = sri * imperv_frac * sro_to_dprst_imperv * hru_area
@@ -799,7 +825,7 @@ def dprst_comp_ag(
             dprst_vol_clos = dprst_vol_clos + dprst_sri_clos
         sri = sri - dprst_sri / imperv_frac
         if sri < 0.0:
-            sri = 0.0
+            sri = _ZERO_INCHES
 
     # Add pervious and impervious contributions first
     dprst_insroff_hru = dprst_srp + dprst_sri
@@ -817,10 +843,10 @@ def dprst_comp_ag(
             dprst_vol_clos = dprst_vol_clos + dprst_sra_clos
         sroff_ag = sroff_ag - dprst_sra / ag_frac
         if sroff_ag < 0.0:
-            sroff_ag = 0.0
+            sroff_ag = _ZERO_INCHES
         dprst_insroff_hru = dprst_insroff_hru + dprst_sra
 
-    dprst_area_open = 0.0
+    dprst_area_open = _ZERO_ACRES
     if dprst_vol_open > 0.0:
         open_vol_r = dprst_vol_open / dprst_vol_open_max
         if open_vol_r < _NEARZERO:
@@ -834,7 +860,7 @@ def dprst_comp_ag(
             dprst_area_open = dprst_area_open_max
 
     if dprst_area_clos_max > 0.0:
-        dprst_area_clos = 0.0
+        dprst_area_clos = _ZERO_ACRES
         if dprst_vol_clos > 0.0:
             clos_vol_r = dprst_vol_clos / dprst_vol_clos_max
             if clos_vol_r < _NEARZERO:
@@ -850,10 +876,10 @@ def dprst_comp_ag(
     # Evaporate water from depressions
     unsatisfied_et = avail_et
     dprst_avail_et = potet * (1.0 - snowcov_area) * dprst_et_coef
-    dprst_evap_hru = 0.0
+    dprst_evap_hru = _ZERO_INCHES
     if dprst_avail_et > 0.0:
-        dprst_evap_open = 0.0
-        dprst_evap_clos = 0.0
+        dprst_evap_open = _ZERO_ACRE_INCHES
+        dprst_evap_clos = _ZERO_ACRE_INCHES
         if dprst_area_open > 0.0:
             dprst_evap_open = min(
                 dprst_area_open * dprst_avail_et, dprst_vol_open
@@ -863,8 +889,10 @@ def dprst_comp_ag(
             )
             if dprst_evap_open / hru_area > unsatisfied_et:
                 dprst_evap_open = unsatisfied_et * hru_area
+            # never true: dprst_evap_open starts as min(..., dprst_vol_open)
+            # and the unsatisfied-ET limit only lowers it
             if dprst_evap_open > dprst_vol_open:
-                dprst_evap_open = dprst_vol_open
+                dprst_evap_open = dprst_vol_open  # units-test: unreachable
             unsatisfied_et = unsatisfied_et - dprst_evap_open / hru_area
             dprst_vol_open = dprst_vol_open - dprst_evap_open
 
@@ -874,20 +902,22 @@ def dprst_comp_ag(
             )
             if dprst_evap_clos / hru_area > unsatisfied_et:
                 dprst_evap_clos = unsatisfied_et * hru_area
+            # never true: dprst_evap_clos starts as min(..., dprst_vol_clos)
+            # and the unsatisfied-ET limit only lowers it
             if dprst_evap_clos > dprst_vol_clos:
-                dprst_evap_clos = dprst_vol_clos
+                dprst_evap_clos = dprst_vol_clos  # units-test: unreachable
             dprst_vol_clos = dprst_vol_clos - dprst_evap_clos
 
         dprst_evap_hru = (dprst_evap_open + dprst_evap_clos) / hru_area
 
     # Compute seepage
-    dprst_seep_hru = 0.0
+    dprst_seep_hru = _ZERO_INCHES
     if dprst_vol_open > 0.0:
         seep_open = dprst_vol_open * dprst_seep_rate_open
         dprst_vol_open = dprst_vol_open - seep_open
         if dprst_vol_open < 0.0:
             seep_open = seep_open + dprst_vol_open
-            dprst_vol_open = 0.0
+            dprst_vol_open = _ZERO_ACRE_INCHES
         dprst_seep_hru = seep_open / hru_area
 
     if dprst_area_clos_max > 0.0:
@@ -896,15 +926,17 @@ def dprst_comp_ag(
             dprst_vol_clos = dprst_vol_clos - seep_clos
             if dprst_vol_clos < 0.0:
                 seep_clos = seep_clos + dprst_vol_clos
-                dprst_vol_clos = 0.0
+                dprst_vol_clos = _ZERO_ACRE_INCHES
             dprst_seep_hru = dprst_seep_hru + seep_clos / hru_area
 
     # Compute open surface runoff
-    dprst_sroff_hru = 0.0
+    dprst_sroff_hru = _ZERO_INCHES
     if dprst_vol_open > 0.0:
-        dprst_sroff_hru = max(0.0, dprst_vol_open - dprst_vol_open_max)
+        dprst_sroff_hru = max(
+            _ZERO_ACRE_INCHES, dprst_vol_open - dprst_vol_open_max
+        )
         dprst_sroff_hru = dprst_sroff_hru + max(
-            0.0,
+            _ZERO_ACRE_INCHES,
             (dprst_vol_open - dprst_sroff_hru - dprst_vol_thres_open)
             * dprst_flow_coef,
         )
@@ -928,7 +960,9 @@ def dprst_comp_ag(
             dprst_vol_open_max + dprst_vol_clos_max
         )
     else:
-        dprst_vol_frac = 0.0
+        # never true: called only where dprst_area_max > 0, and
+        # initialize() rejects dprst_depth_avg == 0 there
+        dprst_vol_frac = 0.0  # units-test: unreachable
 
     return (
         dprst_in,
@@ -976,12 +1010,14 @@ class PRMSRunoffNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="HRU area [acres]",
     )
     hru_in_to_cf = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet/inch",
         description="Conversion of inches over the HRU to cubic feet",
         derivation="hru_area * 43560.0 / 12.0",
     )
@@ -991,42 +1027,49 @@ class PRMSRunoffNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that is impervious [-]",
     )
     imperv_stor_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum impervious area retention storage [inches]",
     )
     carea_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Maximum possible area contributing to surface runoff [-]",
     )
     smidx_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Coefficient in contributing-area computation [-]",
     )
     smidx_exp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/inch",
         description="Exponent in contributing-area computation [1/inch]",
     )
     soil_moist_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum capillary-reservoir water capacity [inches]",
     )
     snowinfil_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches/day",
         description="Maximum snow infiltration per day [inches/day]",
     )
 
@@ -1035,18 +1078,21 @@ class PRMSRunoffNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Pervious HRU area [acres]",
     )
     hru_frac_perv = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Pervious fraction of HRU area [-]",
     )
     hru_imperv = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Impervious HRU area [acres]",
     )
 
@@ -1055,36 +1101,42 @@ class PRMSRunoffNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous lower-reservoir soil storage [inches]",
     )
     soil_rechr_prev = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous recharge-reservoir soil storage [inches]",
     )
     net_rain = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Rain through the canopy [inches]",
     )
     net_ppt = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Precipitation through the canopy [inches]",
     )
     net_snow = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snow through the canopy [inches]",
     )
     potet = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential evapotranspiration [inches]",
     )
     snowmelt = DataArrayMeta(
@@ -1098,24 +1150,28 @@ class PRMSRunoffNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Evaporation and sublimation from the snowpack [inches]",
     )
     pkwater_equiv = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Snowpack water equivalent [inches]",
     )
     pptmix_nopack = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Mixed rain/snow event with no snowpack (0/1 flag)",
     )
     snowcov_area = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Snow-covered area fraction [-]",
     )
     through_rain = DataArrayMeta(
@@ -1129,6 +1185,7 @@ class PRMSRunoffNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="HRU area-weighted canopy evaporation [inches]",
     )
     intcp_changeover = DataArrayMeta(
@@ -1144,12 +1201,14 @@ class PRMSRunoffNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Contributing area fraction of the pervious area [-]",
     )
     infil = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Infiltration to the capillary/preferential zones "
         "[inches over pervious area]",
     )
@@ -1164,12 +1223,14 @@ class PRMSRunoffNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Surface runoff to the stream network [inches]",
     )
     sroff_vol = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Surface runoff volume [cubic feet]",
     )
     hru_sroffp = DataArrayMeta(
@@ -1191,12 +1252,14 @@ class PRMSRunoffNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious area retention storage [inches over imperv]",
     )
     imperv_evap = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious area evaporation [inches over imperv]",
     )
     hru_impervevap = DataArrayMeta(
@@ -1211,12 +1274,14 @@ class PRMSRunoffNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious retention storage [inches over the HRU]",
     )
     hru_impervstor_old = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious retention storage, previous timestep",
     )
     hru_impervstor_change = DataArrayMeta(
@@ -1366,22 +1431,22 @@ class PRMSRunoffNoDprst(Process):
             # an array pre-loop; scalar per element, same op order
             soil_moist_prev = soil_lower_prev[ii] + soil_rechr_prev[ii]
 
-            runoff = 0.0
+            runoff = _ZERO_ACRE_INCHES
             hruarea = hru_area[ii]
             perv_area = hru_perv[ii]
             perv_frac = hru_frac_perv[ii]
-            srp = 0.0
-            sri = 0.0
-            hru_sroffp[ii] = 0.0
+            srp = _ZERO_INCHES
+            sri = _ZERO_INCHES
+            hru_sroffp[ii] = _ZERO_INCHES
             contrib_fraction[ii] = 0.0
-            infil[ii] = 0.0
+            infil[ii] = _ZERO_INCHES
             hruarea_imperv = hru_imperv[ii]
             imperv_frac = 0.0
             if hruarea_imperv > 0.0:
                 imperv_frac = hru_percent_imperv[ii]
-                hru_sroffi[ii] = 0.0
-                imperv_evap[ii] = 0.0
-                hru_impervevap[ii] = 0.0
+                hru_sroffi[ii] = _ZERO_INCHES
+                imperv_evap[ii] = _ZERO_INCHES
+                hru_impervevap[ii] = _ZERO_INCHES
 
             avail_et = potet[ii] - snow_evap[ii] - hru_intcpevap[ii]
 
@@ -1418,7 +1483,7 @@ class PRMSRunoffNoDprst(Process):
             )
 
             # runoff for pervious and impervious areas
-            srunoff = 0.0
+            srunoff = _ZERO_INCHES
             if hru_type[ii] == _LAND:
                 runoff = runoff + srp * perv_area + sri * hruarea_imperv
                 srunoff = runoff / hruarea
@@ -1440,12 +1505,12 @@ class PRMSRunoffNoDprst(Process):
                     if avail_et < 0.0:
                         hru_impervevap[ii] = hru_impervevap[ii] + avail_et
                         if hru_impervevap[ii] < 0.0:
-                            hru_impervevap[ii] = 0.0
+                            hru_impervevap[ii] = _ZERO_INCHES
                         imperv_evap[ii] = imperv_evap[ii] / imperv_frac
                         imperv_stor[ii] = (
                             imperv_stor[ii] - avail_et / imperv_frac
                         )
-                        avail_et = 0.0
+                        avail_et = _ZERO_INCHES
 
                     hru_impervstor[ii] = imperv_stor[ii] * imperv_frac
 
@@ -1525,78 +1590,91 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Average depth of surface depressions [inches]",
     )
     dprst_et_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of unsatisfied PET to apply to dprst [-]",
     )
     dprst_flow_coef = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Coefficient in linear flow routing from open dprst [1/d]",
     )
     dprst_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that has surface depressions [-]",
     )
     dprst_frac_init = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Initial fraction of maximum dprst storage volume [-]",
     )
     dprst_frac_open = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of open (spilling) surface depressions [-]",
     )
     dprst_seep_rate_clos = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Closed-depression seepage rate [fraction/day]",
     )
     dprst_seep_rate_open = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Open-depression seepage rate [fraction/day]",
     )
     sro_to_dprst_imperv = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of impervious runoff routed to dprst [-]",
     )
     sro_to_dprst_perv = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of pervious runoff routed to dprst [-]",
     )
     va_open_exp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Open-depression volume-area exponent [-]",
     )
     va_clos_exp = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Closed-depression volume-area exponent [-]",
     )
     op_flow_thres = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Open-depression flow threshold (frac of max volume) [-]",
     )
 
@@ -1605,42 +1683,49 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Maximum surface-depression area [acres]",
     )
     dprst_area_open_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Maximum open surface-depression area [acres]",
     )
     dprst_area_clos_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Maximum closed surface-depression area [acres]",
     )
     dprst_frac_clos = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of closed surface depressions [-]",
     )
     dprst_vol_open_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description="Maximum open surface-depression volume [acre-inches]",
     )
     dprst_vol_clos_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description="Maximum closed surface-depression volume [acre-inches]",
     )
     dprst_vol_thres_open = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description=(
             "Open-depression volume above which flow occurs [acre-inches] "
             "(pywatershed 'variable', never written by its kernel)"
@@ -1653,6 +1738,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description="Open surface-depression storage volume [acre-inches]",
     )
     dprst_vol_clos = DataArrayMeta(
@@ -1660,24 +1746,28 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="acre-inches",
         description="Closed surface-depression storage volume [acre-inches]",
     )
     dprst_vol_open_frac = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Open depression volume fraction of maximum [-]",
     )
     dprst_vol_clos_frac = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Closed depression volume fraction of maximum [-]",
     )
     dprst_vol_frac = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Depression volume fraction of maximum (open+closed) [-]",
     )
     dprst_area_open = DataArrayMeta(
@@ -1685,6 +1775,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Open surface-depression area [acres]",
     )
     dprst_area_clos = DataArrayMeta(
@@ -1692,6 +1783,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description=(
             "Closed surface-depression area [acres] (static after init: "
             "pywatershed never writes it back -- see module docstring)"
@@ -1722,6 +1814,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Runoff captured by depressions [inches over the HRU]",
     )
     dprst_stor_hru = DataArrayMeta(
@@ -1729,12 +1822,14 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Depression storage [inches over the HRU]",
     )
     dprst_stor_hru_old = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Depression storage, previous timestep",
     )
     dprst_stor_hru_change = DataArrayMeta(
@@ -1748,6 +1843,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="New water to depressions [inches over the HRU]",
     )
 
@@ -2068,22 +2164,22 @@ class PRMSRunoff(PRMSRunoffNoDprst):
             # an array pre-loop; scalar per element, same op order
             soil_moist_prev = soil_lower_prev[ii] + soil_rechr_prev[ii]
 
-            runoff = 0.0
+            runoff = _ZERO_ACRE_INCHES
             hruarea = hru_area[ii]
             perv_area = hru_perv[ii]
             perv_frac = hru_frac_perv[ii]
-            srp = 0.0
-            sri = 0.0
-            hru_sroffp[ii] = 0.0
+            srp = _ZERO_INCHES
+            sri = _ZERO_INCHES
+            hru_sroffp[ii] = _ZERO_INCHES
             contrib_fraction[ii] = 0.0
-            infil[ii] = 0.0
+            infil[ii] = _ZERO_INCHES
             hruarea_imperv = hru_imperv[ii]
             imperv_frac = 0.0
             if hruarea_imperv > 0.0:
                 imperv_frac = hru_percent_imperv[ii]
-                hru_sroffi[ii] = 0.0
-                imperv_evap[ii] = 0.0
-                hru_impervevap[ii] = 0.0
+                hru_sroffi[ii] = _ZERO_INCHES
+                imperv_evap[ii] = _ZERO_INCHES
+                hru_impervevap[ii] = _ZERO_INCHES
 
             avail_et = potet[ii] - snow_evap[ii] - hru_intcpevap[ii]
             availh2o = intcp_changeover[ii] + net_rain[ii]
@@ -2121,7 +2217,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
             )
 
             # dprst (frozen ground hardwired OFF upstream)
-            dprst_in[ii] = 0.0
+            dprst_in[ii] = _ZERO_INCHES
             dprst_chk = False
             if dprst_area_max[ii] > 0.0:
                 dprst_chk = True
@@ -2182,7 +2278,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
                 runoff = runoff + dprst_sroff_hru[ii] * hruarea
 
             # runoff for pervious, impervious, and depression areas
-            srunoff = 0.0
+            srunoff = _ZERO_INCHES
             if hru_type[ii] == _LAND:
                 runoff = runoff + srp * perv_area + sri * hruarea_imperv
                 srunoff = runoff / hruarea
@@ -2204,12 +2300,12 @@ class PRMSRunoff(PRMSRunoffNoDprst):
                     if avail_et < 0.0:
                         hru_impervevap[ii] = hru_impervevap[ii] + avail_et
                         if hru_impervevap[ii] < 0.0:
-                            hru_impervevap[ii] = 0.0
+                            hru_impervevap[ii] = _ZERO_INCHES
                         imperv_evap[ii] = imperv_evap[ii] / imperv_frac
                         imperv_stor[ii] = (
                             imperv_stor[ii] - avail_et / imperv_frac
                         )
-                        avail_et = 0.0
+                        avail_et = _ZERO_INCHES
 
                     hru_impervstor[ii] = imperv_stor[ii] * imperv_frac
 
@@ -2350,6 +2446,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Pervious HRU area [acres] (per-step: ag area and "
         "dynamic ag_frac carve it out)",
         restart=True,
@@ -2358,6 +2455,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Pervious fraction of HRU area [-] (per-step under "
         "dynamic ag_frac)",
         restart=True,
@@ -2368,12 +2466,14 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum ag capillary-reservoir water capacity [inches]",
     )
     ag_soil_rechr_max_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Ag recharge-zone maximum as fraction of "
         "ag_soil_moist_max [-]",
     )
@@ -2383,6 +2483,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Ag recharge-zone maximum storage [inches] "
         "(in upstream kernel signatures but unused)",
     )
@@ -2392,6 +2493,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous TOTAL ag soil storage [inches] "
         "(soilzone-ag back-edge)",
     )
@@ -2399,6 +2501,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Previous ag recharge-zone storage [inches] "
         "(soilzone-ag back-edge)",
     )
@@ -2406,6 +2509,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that is agricultural [-] "
         "(TIME-VARYING: PRMS dynamic parameter)",
     )
@@ -2415,6 +2519,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="Agricultural HRU area [acres] (per-step under "
         "dynamic ag_frac)",
         restart=True,
@@ -2423,6 +2528,7 @@ class PRMSRunoffAg(PRMSRunoff):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Ag infiltration [inches over ag area]",
     )
     infil_ag_hru = DataArrayMeta(
@@ -2599,25 +2705,25 @@ class PRMSRunoffAg(PRMSRunoff):
         for ii in numba.prange(nhru):
             soil_moist_prev = soil_lower_prev[ii] + soil_rechr_prev[ii]
 
-            runoff = 0.0
+            runoff = _ZERO_ACRE_INCHES
             hruarea = hru_area[ii]
             perv_area = hru_perv[ii]
             perv_frac = hru_frac_perv[ii]
-            srp = 0.0
-            sri = 0.0
-            sroff_ag = 0.0
-            hru_sroffp[ii] = 0.0
-            hru_sroff_ag[ii] = 0.0
+            srp = _ZERO_INCHES
+            sri = _ZERO_INCHES
+            sroff_ag = _ZERO_INCHES
+            hru_sroffp[ii] = _ZERO_INCHES
+            hru_sroff_ag[ii] = _ZERO_INCHES
             contrib_fraction[ii] = 0.0
-            infil[ii] = 0.0
-            infil_ag[ii] = 0.0
+            infil[ii] = _ZERO_INCHES
+            infil_ag[ii] = _ZERO_INCHES
             hruarea_imperv = hru_imperv[ii]
             imperv_frac = 0.0
             if hruarea_imperv > 0.0:
                 imperv_frac = hru_percent_imperv[ii]
-                hru_sroffi[ii] = 0.0
-                imperv_evap[ii] = 0.0
-                hru_impervevap[ii] = 0.0
+                hru_sroffi[ii] = _ZERO_INCHES
+                imperv_evap[ii] = _ZERO_INCHES
+                hru_impervevap[ii] = _ZERO_INCHES
 
             avail_et = potet[ii] - snow_evap[ii] - hru_intcpevap[ii]
 
@@ -2681,7 +2787,7 @@ class PRMSRunoffAg(PRMSRunoff):
 
             # dprst incl. agricultural runoff routing (frozen ground
             # hardwired OFF upstream)
-            dprst_in[ii] = 0.0
+            dprst_in[ii] = _ZERO_INCHES
             dprst_chk = False
             if dprst_area_max[ii] > 0.0:
                 dprst_chk = True
@@ -2742,7 +2848,7 @@ class PRMSRunoffAg(PRMSRunoff):
                 runoff = runoff + dprst_sroff_hru[ii] * hruarea
 
             # runoff for pervious, impervious, and agricultural areas
-            srunoff = 0.0
+            srunoff = _ZERO_INCHES
             if hru_type[ii] == _LAND:
                 runoff = runoff + srp * perv_area + sri * hruarea_imperv
                 if ag_area[ii] > 0.0:
@@ -2767,12 +2873,12 @@ class PRMSRunoffAg(PRMSRunoff):
                     if avail_et < 0.0:
                         hru_impervevap[ii] = hru_impervevap[ii] + avail_et
                         if hru_impervevap[ii] < 0.0:
-                            hru_impervevap[ii] = 0.0
+                            hru_impervevap[ii] = _ZERO_INCHES
                         imperv_evap[ii] = imperv_evap[ii] / imperv_frac
                         imperv_stor[ii] = (
                             imperv_stor[ii] - avail_et / imperv_frac
                         )
-                        avail_et = 0.0
+                        avail_et = _ZERO_INCHES
 
                     hru_impervstor[ii] = imperv_stor[ii] * imperv_frac
 

@@ -89,7 +89,16 @@ from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
 # pywatershed constants (constants.py)
-_NEARZERO = 1.0e-6  # nearzero
+_NEARZERO = 1.0e-6  # nearzero (inches: compared with avail_potet)
+# a zero in the kernels' working unit (inches): every zero that is an
+# inches VALUE in the kernels and helpers (assigned, returned, or an
+# argument of max/np.maximum, which hand back the bare 0.0 when the
+# other argument is <= 0); comparisons with 0.0 stay bare. numba
+# freezes it as a constant (the compiled code is unchanged); the
+# stage-3 units test (tests/test_kernel_units.py) patches it and
+# _NEARZERO to pint Quantities in inches -- a bare 0.0 cannot be
+# assigned into an inches array under pint.
+_ZERO_INCHES = 0.0
 # HruType
 _INACTIVE = 0
 _LAND = 1
@@ -146,12 +155,12 @@ def compute_soilmoist(
             excess = excess - soil_to_gw
 
         if excess > (infil * perv_frac):
-            infil = 0.0
+            infil = _ZERO_INCHES
         else:
             infil = infil - (excess / perv_frac)
 
         # PRMSIV eqn 1-131 (finish)
-        soil_to_ssr = np.maximum(0.0, excess)
+        soil_to_ssr = np.maximum(_ZERO_INCHES, excess)
 
     return (
         infil,
@@ -176,10 +185,14 @@ def compute_interflow(coef_lin, coef_sq, ssres_in, storage, inter_flow):
     elif coef_sq > 0.0:
         c3 = np.sqrt(coef_lin**2.0 + 4.0 * coef_sq * ssres_in)
         sos = storage - ((c3 - coef_lin) / (2.0 * coef_sq))
+        # c3 == 0 needs ssres_in == -coef_lin**2 / (4 coef_sq) exactly
+        # (negative). The raise is not run by the units test (it would
+        # end the kernel run) and has nothing to check: no arithmetic;
+        # the comparison above runs on every call and is checked.
         if c3 == 0.0:
-            raise RuntimeError(
-                "ERROR, in compute_interflow sos=0, "
-                "please contact code developers"
+            raise RuntimeError(  # units-test: unreachable (raises)
+                "ERROR, in compute_interflow "  # units-test: unreachable
+                "sos=0, please contact code developers"
             )
 
         c1 = coef_sq * sos / c3
@@ -191,10 +204,10 @@ def compute_interflow(coef_lin, coef_sq, ssres_in, storage, inter_flow):
             inter_flow = ssres_in
 
     else:
-        inter_flow = 0.0
+        inter_flow = _ZERO_INCHES
 
     if inter_flow < 0.0:
-        inter_flow = 0.0
+        inter_flow = _ZERO_INCHES
     elif inter_flow > storage:
         inter_flow = storage
 
@@ -205,7 +218,7 @@ def compute_interflow(coef_lin, coef_sq, ssres_in, storage, inter_flow):
 @numba.njit(cache=NUMBA_CACHE)
 def compute_gwflow(ssr2gw_rate, ssr2gw_exp, slow_stor):
     # Compute flow to groundwater
-    ssr_to_gw = max(0.0, ssr2gw_rate * slow_stor**ssr2gw_exp)
+    ssr_to_gw = max(_ZERO_INCHES, ssr2gw_rate * slow_stor**ssr2gw_exp)
     ssr_to_gw = min(ssr_to_gw, slow_stor)
     slow_stor = slow_stor - ssr_to_gw
     return ssr_to_gw, slow_stor
@@ -229,7 +242,7 @@ def compute_szactet(
     #   1 - default, 2 - evaporation only, 3 - transpiration + evap
     if avail_potet < _NEARZERO:
         et_type = _ET_DEFAULT
-        avail_potet = 0.0
+        avail_potet = _ZERO_INCHES
     elif transp_on == 0.0:
         if snow_free < 0.01:
             et_type = _ET_DEFAULT
@@ -274,20 +287,20 @@ def compute_szactet(
 
         if potet_rechr > soil_rechr:
             potet_rechr = soil_rechr
-            soil_rechr = 0.0
+            soil_rechr = _ZERO_INCHES
         else:
             soil_rechr = soil_rechr - potet_rechr
 
         if (et_type == _EVAP_ONLY) or (potet_rechr >= potet_lower):
             if potet_rechr > soil_moist:
                 potet_rechr = soil_moist
-                soil_moist = 0.0
+                soil_moist = _ZERO_INCHES
             else:
                 soil_moist = soil_moist - potet_rechr
             et = potet_rechr
         elif potet_lower > soil_moist:
             et = soil_moist
-            soil_moist = 0.0
+            soil_moist = _ZERO_INCHES
         else:
             soil_moist = soil_moist - potet_lower
             et = potet_lower
@@ -295,7 +308,7 @@ def compute_szactet(
         if soil_rechr > soil_moist:
             soil_rechr = soil_moist
     else:
-        et = 0.0
+        et = _ZERO_INCHES
 
     return (
         soil_moist,
@@ -336,12 +349,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="acres",
         description="HRU area [acres]",
     )
     hru_in_to_cf = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet/inch",
         description="Conversion of inches over the HRU to cubic feet",
         derivation="hru_area * 43560.0 / 12.0",
     )
@@ -358,78 +373,99 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Linear preferential-flow routing coefficient [1/day]",
     )
+    # 1/(inch day), not dimensionless as PRMS and pywatershed say:
+    # compute_interflow does `c1 = coef_sq * storage` and `1.0 + c1`
     fastcoef_sq = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
-        description="Non-linear preferential-flow routing coefficient [-]",
+        units="1/(inch day)",
+        description=(
+            "Non-linear preferential-flow routing coefficient [1/(inch day)]"
+        ),
     )
     hru_percent_imperv = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that is impervious [-]",
     )
     pref_flow_den = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Preferential-flow pore density [-]",
     )
     pref_flow_infil_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of infiltration to preferential flow [-]",
     )
     sat_threshold = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Soil saturation threshold above field capacity [inches]",
     )
     slowcoef_lin = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Linear gravity-flow routing coefficient [1/day]",
     )
+    # 1/(inch day), not dimensionless as PRMS and pywatershed say:
+    # compute_interflow does `c1 = coef_sq * storage` and `1.0 + c1`
     slowcoef_sq = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
-        description="Non-linear gravity-flow routing coefficient [-]",
+        units="1/(inch day)",
+        description=(
+            "Non-linear gravity-flow routing coefficient [1/(inch day)]"
+        ),
     )
     soil2gw_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches/day",
         description="Maximum capillary excess routed to GWR [inches/day]",
     )
     soil_moist_init_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Initial fraction of capillary storage [-]",
     )
     soil_moist_max = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum capillary-reservoir water capacity [inches]",
     )
     soil_rechr_init_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Initial fraction of recharge-zone storage [-]",
     )
     soil_rechr_max_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Recharge-zone maximum as fraction of soil_moist_max [-]",
     )
     soil_type = DataArrayMeta(
@@ -442,18 +478,24 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Gravity-drainage exponent to GWR [-]",
     )
+    # truly inch^(1 - ssr2gw_exp)/day (compute_gwflow: rate *
+    # slow_stor**exp, then min with slow_stor); 1/day is exact for
+    # ssr2gw_exp == 1, the case the units test checks
     ssr2gw_rate = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="1/day",
         description="Gravity-drainage rate coefficient to GWR [fraction/day]",
     )
     ssstor_init_frac = DataArrayMeta(
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Initial fraction of gravity+pref storage [-]",
     )
 
@@ -462,6 +504,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Pervious fraction of HRU area [-] (variant hook: "
         "_set_hru_frac_perv)",
     )
@@ -469,18 +512,21 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge-zone maximum storage [inches] (clamped)",
     )
     soil_lower_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower-zone maximum storage [inches]",
     )
     _sat_threshold = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="sat_threshold zeroed for INACTIVE|LAKE HRUs "
         "(upstream edited-copy parameter)",
     )
@@ -488,6 +534,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="pref_flow_den zeroed for non-LAND HRUs "
         "(upstream edited-copy parameter)",
     )
@@ -495,6 +542,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Gravity storage above which flow goes preferential "
         "[inches] (upstream 'variable', never written by its kernel)",
     )
@@ -502,6 +550,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="parameter_internal",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Maximum preferential-flow storage [inches] "
         "(upstream 'variable', never written by its kernel)",
     )
@@ -523,12 +572,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Impervious area evaporation [inches over the HRU]",
     )
     hru_intcpevap = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="HRU area-weighted canopy evaporation [inches]",
     )
     infil_hru = DataArrayMeta(
@@ -542,24 +593,28 @@ class PRMSSoilzoneNoDprst(Process):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential evapotranspiration [inches]",
     )
     transp_on = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="none",
         description="Transpiration occurring (0/1 flag)",
     )
     snow_evap = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Evaporation and sublimation from the snowpack [inches]",
     )
     snowcov_area = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Snow-covered area fraction [-]",
     )
 
@@ -568,6 +623,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="mutable_input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Surface runoff [inches] -- dunnian flow is ADDED "
         "in place (upstream behavior, its own WARNING comment)",
     )
@@ -575,6 +631,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="mutable_input",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Surface runoff volume [cf] -- recomputed from the "
         "dunnian-updated sroff",
     )
@@ -584,12 +641,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Capillary infiltration [inches over the HRU]",
     )
     cap_waterin = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Capillary reservoir water in [inches]",
     )
     dunnian_flow = DataArrayMeta(
@@ -603,12 +662,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Actual evapotranspiration [inches over the HRU]",
     )
     perv_actet = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Pervious actual ET [inches over pervious area]",
     )
     perv_actet_hru = DataArrayMeta(
@@ -622,12 +683,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential ET from the lower zone [inches]",
     )
     potet_rechr = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Potential ET from the recharge zone [inches]",
     )
     pref_flow = DataArrayMeta(
@@ -641,12 +704,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Preferential reservoir inflow [inches]",
     )
     pref_flow_infil = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Infiltration to the preferential reservoir [inches]",
     )
     pref_flow_stor = DataArrayMeta(
@@ -654,6 +719,7 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Preferential-flow reservoir storage [inches]",
     )
     pref_flow_stor_change = DataArrayMeta(
@@ -667,12 +733,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Preferential storage, previous timestep",
     )
     recharge = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge to groundwater [inches]",
     )
     slow_flow = DataArrayMeta(
@@ -687,6 +755,7 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Gravity reservoir storage [inches]",
     )
     slow_stor_change = DataArrayMeta(
@@ -700,6 +769,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Gravity storage, previous timestep",
     )
     soil_lower = DataArrayMeta(
@@ -707,12 +777,14 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower capillary-zone storage [inches]",
     )
     soil_lower_change = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower-zone storage change [inches]",
     )
     soil_lower_change_hru = DataArrayMeta(
@@ -726,12 +798,14 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Lower-zone storage, previous timestep (PRMSRunoff input)",
     )
     soil_lower_ratio = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Lower-zone storage fraction of maximum [-]",
     )
     soil_moist = DataArrayMeta(
@@ -739,12 +813,14 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Capillary reservoir storage [inches]",
     )
     soil_moist_tot = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Total soil-zone storage [inches over the HRU]",
     )
     soil_rechr = DataArrayMeta(
@@ -752,12 +828,14 @@ class PRMSSoilzoneNoDprst(Process):
         restart=True,
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge-zone storage [inches]",
     )
     soil_rechr_change = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge-zone storage change [inches]",
     )
     soil_rechr_change_hru = DataArrayMeta(
@@ -771,6 +849,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Recharge-zone storage, previous timestep "
         "(PRMSRunoff input)",
     )
@@ -786,6 +865,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Capillary excess to the gravity reservoir [inches]",
     )
     ssr_to_gw = DataArrayMeta(
@@ -800,24 +880,28 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Interflow to the stream network [inches]",
     )
     ssres_flow_vol = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="cubic feet",
         description="Interflow volume [cubic feet]",
     )
     ssres_in = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Inflow to gravity+preferential reservoirs [inches]",
     )
     ssres_stor = DataArrayMeta(
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Gravity + preferential storage [inches]",
     )
     swale_actet = DataArrayMeta(
@@ -831,6 +915,7 @@ class PRMSSoilzoneNoDprst(Process):
         kind="variable",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Unsatisfied potential ET [inches]",
     )
 
@@ -1155,37 +1240,37 @@ class PRMSSoilzoneNoDprst(Process):
         # dprst_evap_hru in the hru_actet seed, no dprst_seep_hru in
         # recharge); everything else identical, same njit helpers
         nhru = soil_moist.shape[0]
-        gwin = 0.0  # GSFLOW upslope inflow, hardwired zero upstream
+        gwin = _ZERO_INCHES  # GSFLOW upslope inflow, hardwired zero upstream
 
         for hh in numba.prange(nhru):
             # upstream pre-loop array lines, per element: diagnostic
             # resets, snow_free, and the hru_actet seed
-            soil_to_gw[hh] = 0.0
-            soil_to_ssr[hh] = 0.0
-            ssr_to_gw[hh] = 0.0
-            slow_flow[hh] = 0.0
-            ssres_flow[hh] = 0.0
-            potet_rechr[hh] = 0.0
-            potet_lower[hh] = 0.0
+            soil_to_gw[hh] = _ZERO_INCHES
+            soil_to_ssr[hh] = _ZERO_INCHES
+            ssr_to_gw[hh] = _ZERO_INCHES
+            slow_flow[hh] = _ZERO_INCHES
+            ssres_flow[hh] = _ZERO_INCHES
+            potet_rechr[hh] = _ZERO_INCHES
+            potet_lower[hh] = _ZERO_INCHES
             snow_free = 1.0 - snowcov_area[hh]
             hru_actet[hh] = (
                 hru_impervevap[hh] + hru_intcpevap[hh] + snow_evap[hh]
             )
 
-            dunnianflw = 0.0
-            dunnianflw_pfr = 0.0
-            dunnianflw_gvr = 0.0
-            prefflow = 0.0
+            dunnianflw = _ZERO_INCHES
+            dunnianflw_pfr = _ZERO_INCHES
+            dunnianflw_gvr = _ZERO_INCHES
+            prefflow = _ZERO_INCHES
 
-            avail_potet = np.maximum(0.0, potet[hh] - hru_actet[hh])
+            avail_potet = np.maximum(_ZERO_INCHES, potet[hh] - hru_actet[hh])
 
             # capillary maxin is on the pervious area
             capwater_maxin = infil_hru[hh] / hru_frac_perv[hh]
 
             # Compute preferential flow and storage, and any dunnian
             if pref_flow_infil_frac[hh] != 0.0:
-                pref_flow_maxin = 0.0
-                pref_flow_infil[hh] = 0.0
+                pref_flow_maxin = _ZERO_INCHES
+                pref_flow_infil[hh] = _ZERO_INCHES
 
                 if capwater_maxin > 0.0:
                     # PRMSIV Step 1 (eqn 1-121): partition infil
@@ -1199,7 +1284,7 @@ class PRMSSoilzoneNoDprst(Process):
                     # excess to Dunnian
                     pref_flow_stor[hh] = pref_flow_stor[hh] + pref_flow_maxin
                     dunnianflw_pfr = np.maximum(
-                        0.0, pref_flow_stor[hh] - pref_flow_max[hh]
+                        _ZERO_INCHES, pref_flow_stor[hh] - pref_flow_max[hh]
                     )
                     if dunnianflw_pfr > 0.0:
                         pref_flow_stor[hh] = pref_flow_max[hh]
@@ -1233,16 +1318,16 @@ class PRMSSoilzoneNoDprst(Process):
                 )
                 cap_waterin[hh] = cap_waterin[hh] * hru_frac_perv[hh]
 
-            topfr = 0.0
+            topfr = _ZERO_INCHES
             # soil_to_ssr also known as gvr_maxin
             availh2o = slow_stor[hh] + soil_to_ssr[hh]
 
             if hru_type[hh] == _LAND:
                 # PRMSIV Step 7 (eqn 1-133): gvr excess to preferential
-                topfr = max(0.0, availh2o - pref_flow_thrsh[hh])
+                topfr = max(_ZERO_INCHES, availh2o - pref_flow_thrsh[hh])
                 # PRMSIV eqn 1-134
                 ssresin = soil_to_ssr[hh] - topfr
-                slow_stor[hh] = max(0.0, availh2o - topfr)
+                slow_stor[hh] = max(_ZERO_INCHES, availh2o - topfr)
 
                 # PRMSIV Step 9: slow contribution to interflow
                 if slow_stor[hh] > 0.0:
@@ -1274,10 +1359,12 @@ class PRMSSoilzoneNoDprst(Process):
             if pref_flow_den[hh] > 0.0:
                 # PRMSIV eqn 1-135
                 availh2o = pref_flow_stor[hh] + topfr
-                dunnianflw_gvr = max(0.0, availh2o - pref_flow_max[hh])
+                dunnianflw_gvr = max(
+                    _ZERO_INCHES, availh2o - pref_flow_max[hh]
+                )
                 if dunnianflw_gvr > 0.0:
                     # PRMSIV eqn 1-136
-                    topfr = max(0.0, topfr - dunnianflw_gvr)
+                    topfr = max(_ZERO_INCHES, topfr - dunnianflw_gvr)
 
                 pref_flow_in[hh] = pref_flow_infil[hh] + topfr
                 pref_flow_stor[hh] = pref_flow_stor[hh] + topfr
@@ -1295,7 +1382,7 @@ class PRMSSoilzoneNoDprst(Process):
             elif hru_type[hh] == _LAND:
                 dunnianflw_gvr = topfr
 
-            perv_actet[hh] = 0.0
+            perv_actet[hh] = _ZERO_INCHES
 
             # Compute actual evapotranspiration
             if soil_moist[hh] > 0.0:
@@ -1342,7 +1429,7 @@ class PRMSSoilzoneNoDprst(Process):
             else:
                 # For swales
                 availh2o = slow_stor[hh] - sat_threshold[hh]
-                swale_actet[hh] = 0.0
+                swale_actet[hh] = _ZERO_INCHES
                 if availh2o > 0.0:
                     # ponding: storage > sat_threshold
                     unsatisfied_et = potet[hh] - hru_actet[hh]
@@ -1473,6 +1560,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
         kind="parameter",
         dims=("space",),
         dtype=np.float64,
+        units="fraction",
         description="Fraction of HRU area that has surface depressions [-]",
     )
 
@@ -1481,12 +1569,14 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Depression evaporation [inches over the HRU]",
     )
     dprst_seep_hru = DataArrayMeta(
         kind="input",
         dims=("space",),
         dtype=np.float64,
+        units="inches",
         description="Depression seepage to groundwater [inches over the HRU]",
     )
 
@@ -1604,18 +1694,18 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
         soil2gw_flag: np.ndarray,
     ) -> None:
         nhru = soil_moist.shape[0]
-        gwin = 0.0  # GSFLOW upslope inflow, hardwired zero upstream
+        gwin = _ZERO_INCHES  # GSFLOW upslope inflow, hardwired zero upstream
 
         for hh in numba.prange(nhru):
             # upstream pre-loop array lines, per element: diagnostic
             # resets, snow_free, and the hru_actet seed (dprst ACTIVE)
-            soil_to_gw[hh] = 0.0
-            soil_to_ssr[hh] = 0.0
-            ssr_to_gw[hh] = 0.0
-            slow_flow[hh] = 0.0
-            ssres_flow[hh] = 0.0
-            potet_rechr[hh] = 0.0
-            potet_lower[hh] = 0.0
+            soil_to_gw[hh] = _ZERO_INCHES
+            soil_to_ssr[hh] = _ZERO_INCHES
+            ssr_to_gw[hh] = _ZERO_INCHES
+            slow_flow[hh] = _ZERO_INCHES
+            ssres_flow[hh] = _ZERO_INCHES
+            potet_rechr[hh] = _ZERO_INCHES
+            potet_lower[hh] = _ZERO_INCHES
             snow_free = 1.0 - snowcov_area[hh]
             hru_actet[hh] = (
                 hru_impervevap[hh]
@@ -1624,20 +1714,20 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
                 + dprst_evap_hru[hh]
             )
 
-            dunnianflw = 0.0
-            dunnianflw_pfr = 0.0
-            dunnianflw_gvr = 0.0
-            prefflow = 0.0
+            dunnianflw = _ZERO_INCHES
+            dunnianflw_pfr = _ZERO_INCHES
+            dunnianflw_gvr = _ZERO_INCHES
+            prefflow = _ZERO_INCHES
 
-            avail_potet = np.maximum(0.0, potet[hh] - hru_actet[hh])
+            avail_potet = np.maximum(_ZERO_INCHES, potet[hh] - hru_actet[hh])
 
             # capillary maxin is on the pervious area
             capwater_maxin = infil_hru[hh] / hru_frac_perv[hh]
 
             # Compute preferential flow and storage, and any dunnian
             if pref_flow_infil_frac[hh] != 0.0:
-                pref_flow_maxin = 0.0
-                pref_flow_infil[hh] = 0.0
+                pref_flow_maxin = _ZERO_INCHES
+                pref_flow_infil[hh] = _ZERO_INCHES
 
                 if capwater_maxin > 0.0:
                     # PRMSIV Step 1 (eqn 1-121): partition infil
@@ -1651,7 +1741,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
                     # excess to Dunnian
                     pref_flow_stor[hh] = pref_flow_stor[hh] + pref_flow_maxin
                     dunnianflw_pfr = np.maximum(
-                        0.0, pref_flow_stor[hh] - pref_flow_max[hh]
+                        _ZERO_INCHES, pref_flow_stor[hh] - pref_flow_max[hh]
                     )
                     if dunnianflw_pfr > 0.0:
                         pref_flow_stor[hh] = pref_flow_max[hh]
@@ -1685,16 +1775,16 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
                 )
                 cap_waterin[hh] = cap_waterin[hh] * hru_frac_perv[hh]
 
-            topfr = 0.0
+            topfr = _ZERO_INCHES
             # soil_to_ssr also known as gvr_maxin
             availh2o = slow_stor[hh] + soil_to_ssr[hh]
 
             if hru_type[hh] == _LAND:
                 # PRMSIV Step 7 (eqn 1-133): gvr excess to preferential
-                topfr = max(0.0, availh2o - pref_flow_thrsh[hh])
+                topfr = max(_ZERO_INCHES, availh2o - pref_flow_thrsh[hh])
                 # PRMSIV eqn 1-134
                 ssresin = soil_to_ssr[hh] - topfr
-                slow_stor[hh] = max(0.0, availh2o - topfr)
+                slow_stor[hh] = max(_ZERO_INCHES, availh2o - topfr)
 
                 # PRMSIV Step 9: slow contribution to interflow
                 if slow_stor[hh] > 0.0:
@@ -1726,10 +1816,12 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
             if pref_flow_den[hh] > 0.0:
                 # PRMSIV eqn 1-135
                 availh2o = pref_flow_stor[hh] + topfr
-                dunnianflw_gvr = max(0.0, availh2o - pref_flow_max[hh])
+                dunnianflw_gvr = max(
+                    _ZERO_INCHES, availh2o - pref_flow_max[hh]
+                )
                 if dunnianflw_gvr > 0.0:
                     # PRMSIV eqn 1-136
-                    topfr = max(0.0, topfr - dunnianflw_gvr)
+                    topfr = max(_ZERO_INCHES, topfr - dunnianflw_gvr)
 
                 pref_flow_in[hh] = pref_flow_infil[hh] + topfr
                 pref_flow_stor[hh] = pref_flow_stor[hh] + topfr
@@ -1747,7 +1839,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
             elif hru_type[hh] == _LAND:
                 dunnianflw_gvr = topfr
 
-            perv_actet[hh] = 0.0
+            perv_actet[hh] = _ZERO_INCHES
 
             # Compute actual evapotranspiration
             if soil_moist[hh] > 0.0:
@@ -1794,7 +1886,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
             else:
                 # For swales
                 availh2o = slow_stor[hh] - sat_threshold[hh]
-                swale_actet[hh] = 0.0
+                swale_actet[hh] = _ZERO_INCHES
                 if availh2o > 0.0:
                     # ponding: storage > sat_threshold
                     unsatisfied_et = potet[hh] - hru_actet[hh]

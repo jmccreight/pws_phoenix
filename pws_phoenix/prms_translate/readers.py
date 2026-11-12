@@ -66,12 +66,32 @@ import pyPRMS.constants
 import xarray as xr
 from pyPRMS import ControlFile, MetaData, ParameterFile
 
+from pws_phoenix.prms_translate import prms_units
+
 # the NHM files in use are PRMS 5.2.1.1
 PRMS_VERSION = "5.2.1.1"
 
 # GSFLOW agricultural parameters absent from pyPRMS's master metadata
 # (ask #3 above): name -> (datatype, dimension, description);
 # dims/dtypes verified against the fgr_ag_2yr parameter file blocks
+# units of the injected ag parameters, in pws_phoenix vocabulary keys
+# (the GSFLOW metadata is not in pyPRMS; these feed translate_units
+# through PRMS_UNITS_BY_STRING unchanged)
+_AG_PARAMETER_UNITS = {
+    "ag_cov_type": "none",
+    "ag_covden_sum": "fraction",
+    "ag_covden_win": "fraction",
+    "ag_frac": "fraction",
+    "ag_soil2gw_max": "inches/day",
+    "ag_soil_moist_init_frac": "fraction",
+    "ag_soil_moist_max": "inches",
+    "ag_soil_rechr_init_frac": "fraction",
+    "ag_soil_rechr_max_frac": "fraction",
+    "ag_soil_type": "none",
+    "ag_soilwater_deficit_min": "fraction",
+    "max_soilzone_ag_iter": "none",
+    "soilzone_aet_converge": "inches",
+}
 _AG_PARAMETER_METADATA = {
     "ag_cov_type": (
         "int32",
@@ -246,7 +266,7 @@ def prms_metadata(version: str = PRMS_VERSION) -> dict:
             {
                 "datatype": dtype,
                 "description": desc,
-                "units": "none",
+                "units": _AG_PARAMETER_UNITS[name],
                 "dimensions": [dim],
                 "modules": ["soilzone_ag"],
             },
@@ -391,7 +411,15 @@ def _parse_one(path: pl.Path, dims: dict[str, int]) -> xr.Dataset:
             vals = vals.T
         if vals.dtype == np.int32:
             vals = vals.astype(np.int64)
-        data_vars[name] = (par_dims, vals)
+        # PRMS's own words for the units (translated to the pws_phoenix
+        # vocabulary in load_parameters, once all files are merged and
+        # the unit FLAGS are known)
+        attrs = {
+            kk: str(par.meta[kk])
+            for kk in ("units", "description")
+            if kk in par.meta
+        }
+        data_vars[name] = (par_dims, vals, attrs)
     return xr.Dataset(data_vars)
 
 
@@ -426,4 +454,25 @@ def load_parameters(
         extra = _parse_one(extra_path, sizes)
         for name in extra.data_vars:
             ds[name] = extra[name]
+    translate_units(ds)
     return ds
+
+
+def translate_units(params: xr.Dataset) -> None:
+    """Rewrite each parameter's ``attrs["units"]`` (PRMS's words, from
+    pyPRMS metadata) to its pws_phoenix vocabulary key, in place
+    (``prms_units.resolve``; the file's own ``temp_units`` /
+    ``precip_units`` / ``elev_units`` values resolve the PRMS flag
+    placeholders). An unmapped string is left as is -- only DECLARED
+    parameters are judged, in ``parameters.package_parameters``."""
+    flags = {
+        name: int(params[name].values.flat[0])
+        for name in prms_units.FLAG_PARAMETERS
+        if name in params
+    }
+    for name in params.data_vars:
+        key = prms_units.resolve(
+            str(name), params[name].attrs.get("units"), flags
+        )
+        if key is not None:
+            params[name].attrs["units"] = key

@@ -85,6 +85,7 @@ class ObsInFlowNode:
             kind="input",
             dims=("space",),
             dtype=np.float64,
+            units="io flow units",
             description="Observed/specified flow at nodes [io flow units]; "
             "negative -> pass inflows through",
         ),
@@ -92,6 +93,7 @@ class ObsInFlowNode:
             kind="variable",
             dims=("space",),
             dtype=np.float64,
+            units="io flow units",
             description="Obsin sink/source substep accumulator [io flow units]",
         ),
     }

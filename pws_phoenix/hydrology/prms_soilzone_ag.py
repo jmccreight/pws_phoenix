@@ -114,12 +114,25 @@ from pws_phoenix.hydrology.prms_soilzone import (
     _INACTIVE,
     _LAKE,
     _SWALE,
+    _ZERO_INCHES,
     compute_gwflow,
     compute_interflow,
     compute_soilmoist,
     compute_szactet,
 )
 from pws_phoenix.process import DataArrayMeta, Process
+
+# _update_areas's np.isclose on the pervious AREA: its absolute
+# tolerance is in acres (the fraction isclose beside it stays bare).
+# Named so the units test (tests/test_kernel_units.py) can patch it to
+# a Quantity; numba freezes it, compiled code unchanged.
+_ISCLOSE_ATOL_ACRES = 1.0e-8
+
+# ObsET's _prep_aet: the observed-AET missing-value sentinel is in
+# inches (compared with the inch input), and its volume outputs are
+# acre-inches; named for the same reason as above
+_AET_MISSING_INCHES = -1.0
+_ZERO_ACRE_INCHES = 0.0
 
 # the state the obs-ET iteration rewinds between passes (Fortran It0
 # variables), in the order the It0 buffers are held
@@ -138,10 +151,15 @@ def _meta(
     kind,
     description,
     dtype=np.float64,
+    *,
+    units,
     restart=False,
     derivation=None,
-    units=None,
 ):
+    """A ("space",) declaration. ``units`` is REQUIRED (None only for
+    an int field): tests/test_units.py's source scanner sees only
+    literal ``DataArrayMeta(`` calls, so a default here once hid ~100
+    unit-less float fields from it (Nov 2026)."""
     return DataArrayMeta(
         kind=kind,
         dims=("space",),
@@ -175,131 +193,222 @@ class PRMSSoilzoneAg(Process):
         "parameter",
         "HRU type (INACTIVE=0, LAND=1, LAKE=2, SWALE=3)",
         np.int64,
+        units=None,
     )
-    hru_area = _meta("parameter", "HRU area [acres]")
+    hru_area = _meta("parameter", "HRU area [acres]", units="acres")
     hru_in_to_cf = _meta(
         "parameter",
         "Conversion of inches over the HRU to cubic feet",
         derivation="hru_area * 43560.0 / 12.0",
+        units="cubic feet/inch",
     )
 
     # -- process parameters --
-    cov_type = _meta("parameter", "Cover type (0=bare ... )", np.int64)
+    cov_type = _meta(
+        "parameter", "Cover type (0=bare ... )", np.int64, units=None
+    )
     dprst_frac = _meta(
-        "parameter", "Fraction of HRU area with surface depressions [-]"
+        "parameter",
+        "Fraction of HRU area with surface depressions [-]",
+        units="fraction",
     )
     fastcoef_lin = _meta(
-        "parameter", "Linear preferential-flow routing coefficient [1/day]"
+        "parameter",
+        "Linear preferential-flow routing coefficient [1/day]",
+        units="1/day",
     )
     fastcoef_sq = _meta(
-        "parameter", "Non-linear preferential-flow routing coefficient [-]"
+        "parameter",
+        "Non-linear preferential-flow routing coefficient [-]",
+        units="1/(inch day)",
     )
     hru_percent_imperv = _meta(
-        "parameter", "Fraction of HRU area that is impervious [-]"
+        "parameter",
+        "Fraction of HRU area that is impervious [-]",
+        units="fraction",
     )
-    pref_flow_den = _meta("parameter", "Preferential-flow pore density [-]")
+    pref_flow_den = _meta(
+        "parameter", "Preferential-flow pore density [-]", units="fraction"
+    )
     pref_flow_infil_frac = _meta(
-        "parameter", "Fraction of infiltration to preferential flow [-]"
+        "parameter",
+        "Fraction of infiltration to preferential flow [-]",
+        units="fraction",
     )
     sat_threshold = _meta(
-        "parameter", "Soil saturation threshold above field capacity [in]"
+        "parameter",
+        "Soil saturation threshold above field capacity [in]",
+        units="inches",
     )
     slowcoef_lin = _meta(
-        "parameter", "Linear gravity-flow routing coefficient [1/day]"
+        "parameter",
+        "Linear gravity-flow routing coefficient [1/day]",
+        units="1/day",
     )
     slowcoef_sq = _meta(
-        "parameter", "Non-linear gravity-flow routing coefficient [-]"
+        "parameter",
+        "Non-linear gravity-flow routing coefficient [-]",
+        units="1/(inch day)",
     )
     soil_moist_max = _meta(
-        "parameter", "Maximum capillary-reservoir water capacity [inches]"
+        "parameter",
+        "Maximum capillary-reservoir water capacity [inches]",
+        units="inches",
     )
     soil_moist_init_frac = _meta(
-        "parameter", "Initial fraction of capillary storage [-]"
+        "parameter",
+        "Initial fraction of capillary storage [-]",
+        units="fraction",
     )
     soil_rechr_init_frac = _meta(
-        "parameter", "Initial fraction of recharge-zone storage [-]"
+        "parameter",
+        "Initial fraction of recharge-zone storage [-]",
+        units="fraction",
     )
     soil_rechr_max_frac = _meta(
-        "parameter", "Recharge-zone maximum as fraction of soil_moist_max [-]"
+        "parameter",
+        "Recharge-zone maximum as fraction of soil_moist_max [-]",
+        units="fraction",
     )
-    soil_type = _meta("parameter", "Soil type (SAND=1 ... )", np.int64)
+    soil_type = _meta(
+        "parameter", "Soil type (SAND=1 ... )", np.int64, units=None
+    )
     soil2gw_max = _meta(
-        "parameter", "Maximum capillary excess routed to GWR [inches/day]"
+        "parameter",
+        "Maximum capillary excess routed to GWR [inches/day]",
+        units="inches/day",
     )
-    ssr2gw_exp = _meta("parameter", "Gravity-drainage exponent to GWR [-]")
+    ssr2gw_exp = _meta(
+        "parameter", "Gravity-drainage exponent to GWR [-]", units="fraction"
+    )
     ssr2gw_rate = _meta(
-        "parameter", "Gravity-drainage rate coefficient [fraction/day]"
+        "parameter",
+        "Gravity-drainage rate coefficient [fraction/day]",
+        units="1/day",
     )
     ssstor_init_frac = _meta(
-        "parameter", "Initial fraction of gravity+pref storage [-]"
+        "parameter",
+        "Initial fraction of gravity+pref storage [-]",
+        units="fraction",
     )
-    ag_soil_type = _meta("parameter", "Ag soil type", np.int64)
-    ag_cov_type = _meta("parameter", "Ag cover type", np.int64)
+    ag_soil_type = _meta("parameter", "Ag soil type", np.int64, units=None)
+    ag_cov_type = _meta("parameter", "Ag cover type", np.int64, units=None)
     ag_soil_moist_max = _meta(
-        "parameter", "Maximum ag capillary-reservoir capacity [inches]"
+        "parameter",
+        "Maximum ag capillary-reservoir capacity [inches]",
+        units="inches",
     )
     ag_soil_moist_init_frac = _meta(
-        "parameter", "Initial fraction of ag capillary storage [-]"
+        "parameter",
+        "Initial fraction of ag capillary storage [-]",
+        units="fraction",
     )
     ag_soil_rechr_max_frac = _meta(
-        "parameter", "Ag recharge-zone max as fraction of ag_soil_moist_max"
+        "parameter",
+        "Ag recharge-zone max as fraction of ag_soil_moist_max",
+        units="fraction",
     )
     ag_soil_rechr_init_frac = _meta(
-        "parameter", "Initial fraction of ag recharge-zone storage [-]"
+        "parameter",
+        "Initial fraction of ag recharge-zone storage [-]",
+        units="fraction",
     )
 
     # -- derived parameters (initialize(); STATIC, no ag_frac dep) --
     soil_rechr_max = _meta(
-        "parameter_internal", "Recharge-zone maximum storage [in] (clamped)"
+        "parameter_internal",
+        "Recharge-zone maximum storage [in] (clamped)",
+        units="inches",
     )
     ag_soil_rechr_max = _meta(
-        "parameter_internal", "Ag recharge-zone maximum storage [in] (clamped)"
+        "parameter_internal",
+        "Ag recharge-zone maximum storage [in] (clamped)",
+        units="inches",
     )
     _sat_threshold = _meta(
-        "parameter_internal", "sat_threshold zeroed for INACTIVE|LAKE"
+        "parameter_internal",
+        "sat_threshold zeroed for INACTIVE|LAKE",
+        units="inches",
     )
     _pref_flow_den = _meta(
-        "parameter_internal", "pref_flow_den zeroed for non-LAND"
+        "parameter_internal",
+        "pref_flow_den zeroed for non-LAND",
+        units="fraction",
     )
     pref_flow_thrsh = _meta(
-        "parameter_internal", "Gravity storage above which flow goes pref [in]"
+        "parameter_internal",
+        "Gravity storage above which flow goes pref [in]",
+        units="inches",
     )
     pref_flow_max = _meta(
-        "parameter_internal", "Maximum preferential-flow storage [inches]"
+        "parameter_internal",
+        "Maximum preferential-flow storage [inches]",
+        units="inches",
     )
     soil_lower_max = _meta(
-        "parameter_internal", "Lower-zone maximum storage [inches]"
+        "parameter_internal",
+        "Lower-zone maximum storage [inches]",
+        units="inches",
     )
     ag_soil_lower_stor_max = _meta(
         "parameter_internal",
         "Ag lower-zone maximum [in] (PRE-clamp ag_soil_rechr_max, upstream "
         "order)",
+        units="inches",
     )
     hru_area_imperv = _meta(
-        "parameter_internal", "Impervious HRU area [acres]"
+        "parameter_internal", "Impervious HRU area [acres]", units="acres"
     )
 
     # -- inputs --
-    dprst_evap_hru = _meta("input", "Depression evaporation [in over HRU]")
-    dprst_seep_hru = _meta("input", "Depression seepage to GW [in over HRU]")
-    hru_impervevap = _meta("input", "Impervious evaporation [in over HRU]")
-    hru_intcpevap = _meta("input", "Canopy evaporation [in over HRU]")
-    infil = _meta("input", "Pervious infiltration [inches over PERVIOUS area]")
-    infil_ag = _meta("input", "Ag infiltration [inches over AG area]")
-    potet = _meta("input", "Potential evapotranspiration [inches]")
-    transp_on = _meta("input", "Transpiration occurring (0/1 flag)")
-    snow_evap = _meta("input", "Snow evaporation/sublimation [inches]")
-    snowcov_area = _meta("input", "Snow-covered area fraction [-]")
+    dprst_evap_hru = _meta(
+        "input", "Depression evaporation [in over HRU]", units="inches"
+    )
+    dprst_seep_hru = _meta(
+        "input", "Depression seepage to GW [in over HRU]", units="inches"
+    )
+    hru_impervevap = _meta(
+        "input", "Impervious evaporation [in over HRU]", units="inches"
+    )
+    hru_intcpevap = _meta(
+        "input", "Canopy evaporation [in over HRU]", units="inches"
+    )
+    infil = _meta(
+        "input",
+        "Pervious infiltration [inches over PERVIOUS area]",
+        units="inches",
+    )
+    infil_ag = _meta(
+        "input", "Ag infiltration [inches over AG area]", units="inches"
+    )
+    potet = _meta(
+        "input", "Potential evapotranspiration [inches]", units="inches"
+    )
+    transp_on = _meta(
+        "input", "Transpiration occurring (0/1 flag)", units="none"
+    )
+    snow_evap = _meta(
+        "input", "Snow evaporation/sublimation [inches]", units="inches"
+    )
+    snowcov_area = _meta(
+        "input", "Snow-covered area fraction [-]", units="fraction"
+    )
     ag_frac = _meta(
-        "input", "Agricultural fraction of HRU area [-] (TIME-VARYING)"
+        "input",
+        "Agricultural fraction of HRU area [-] (TIME-VARYING)",
+        units="fraction",
     )
 
     # -- MUTABLE inputs (runoff's variables, edited in place here) --
     sroff = _meta(
-        "mutable_input", "Surface runoff [in] -- dunnian ADDED in place"
+        "mutable_input",
+        "Surface runoff [in] -- dunnian ADDED in place",
+        units="inches",
     )
     sroff_vol = _meta(
-        "mutable_input", "Surface runoff volume [cf] -- recomputed"
+        "mutable_input",
+        "Surface runoff volume [cf] -- recomputed",
+        units="cubic feet",
     )
 
     # -- variables: areas (per-step under dynamic ag_frac) --
@@ -308,140 +417,259 @@ class PRMSSoilzoneAg(Process):
     # time zero -- so a restart must restore them (restart=True is a
     # prognostic-state marker here, not a storage)
     hru_area_perv = _meta(
-        "variable", "Pervious HRU area [acres] (per-step)", restart=True
+        "variable",
+        "Pervious HRU area [acres] (per-step)",
+        restart=True,
+        units="acres",
     )
     hru_frac_perv = _meta(
-        "variable", "Pervious fraction of HRU area [-] (per-step)"
+        "variable",
+        "Pervious fraction of HRU area [-] (per-step)",
+        units="fraction",
     )
     ag_area = _meta(
         "variable",
         "Agricultural HRU area [acres] (per-step)",
         restart=True,
+        units="acres",
     )
 
     # -- variables: pervious / shared --
-    cap_infil_tot = _meta("variable", "Capillary infiltration [in over HRU]")
-    cap_waterin = _meta("variable", "Capillary reservoir water in [inches]")
+    cap_infil_tot = _meta(
+        "variable", "Capillary infiltration [in over HRU]", units="inches"
+    )
+    cap_waterin = _meta(
+        "variable", "Capillary reservoir water in [inches]", units="inches"
+    )
     dunnian_flow = _term("Dunnian surface runoff [inches]")
-    hru_actet = _meta("variable", "Actual ET [inches over the HRU]")
-    perv_actet = _meta("variable", "Pervious actual ET [in over perv area]")
+    hru_actet = _meta(
+        "variable", "Actual ET [inches over the HRU]", units="inches"
+    )
+    perv_actet = _meta(
+        "variable", "Pervious actual ET [in over perv area]", units="inches"
+    )
     perv_actet_hru = _term("Pervious actual ET [in over HRU]")
-    potet_lower = _meta("variable", "Potential ET from lower zone [inches]")
-    potet_rechr = _meta("variable", "Potential ET from recharge zone [in]")
+    potet_lower = _meta(
+        "variable", "Potential ET from lower zone [inches]", units="inches"
+    )
+    potet_rechr = _meta(
+        "variable", "Potential ET from recharge zone [in]", units="inches"
+    )
     pref_flow = _term("Preferential interflow [inches]")
-    pref_flow_in = _meta("variable", "Preferential reservoir inflow [in]")
-    pref_flow_infil = _meta("variable", "Infiltration to pref reservoir [in]")
+    pref_flow_in = _meta(
+        "variable", "Preferential reservoir inflow [in]", units="inches"
+    )
+    pref_flow_infil = _meta(
+        "variable", "Infiltration to pref reservoir [in]", units="inches"
+    )
     pref_flow_stor = _meta(
-        "variable", "Preferential reservoir storage [in]", restart=True
+        "variable",
+        "Preferential reservoir storage [in]",
+        restart=True,
+        units="inches",
     )
     pref_flow_stor_change = _term("Pref storage change [inches]")
-    pref_flow_stor_prev = _meta("variable", "Pref storage, previous step")
-    recharge = _meta("variable", "Recharge to groundwater [inches]")
+    pref_flow_stor_prev = _meta(
+        "variable", "Pref storage, previous step", units="inches"
+    )
+    recharge = _meta(
+        "variable", "Recharge to groundwater [inches]", units="inches"
+    )
     slow_flow = _term("Slow (gravity) interflow [inches]")
     slow_stor = _meta(
-        "variable", "Gravity reservoir storage [inches]", restart=True
+        "variable",
+        "Gravity reservoir storage [inches]",
+        restart=True,
+        units="inches",
     )
     slow_stor_change = _term("Gravity storage change [inches]")
-    slow_stor_prev = _meta("variable", "Gravity storage, previous step")
-    soil_lower = _meta(
-        "variable", "Lower capillary-zone storage [inches]", restart=True
+    slow_stor_prev = _meta(
+        "variable", "Gravity storage, previous step", units="inches"
     )
-    soil_lower_change = _meta("variable", "Lower-zone storage change [in]")
+    soil_lower = _meta(
+        "variable",
+        "Lower capillary-zone storage [inches]",
+        restart=True,
+        units="inches",
+    )
+    soil_lower_change = _meta(
+        "variable", "Lower-zone storage change [in]", units="inches"
+    )
     soil_lower_change_hru = _term("Lower-zone storage change [in over HRU]")
     soil_lower_prev = _meta(
-        "variable", "Lower-zone storage, previous step (PRMSRunoffAg input)"
+        "variable",
+        "Lower-zone storage, previous step (PRMSRunoffAg input)",
+        units="inches",
     )
-    soil_lower_ratio = _meta("variable", "Lower-zone fraction of maximum [-]")
+    soil_lower_ratio = _meta(
+        "variable", "Lower-zone fraction of maximum [-]", units="fraction"
+    )
     soil_moist = _meta(
-        "variable", "Capillary reservoir storage [inches]", restart=True
+        "variable",
+        "Capillary reservoir storage [inches]",
+        restart=True,
+        units="inches",
     )
     soil_moist_tot = _meta(
-        "variable", "Total soil-zone storage [in over HRU] (per-step areas)"
+        "variable",
+        "Total soil-zone storage [in over HRU] (per-step areas)",
+        units="inches",
     )
     soil_rechr = _meta(
-        "variable", "Recharge-zone storage [inches]", restart=True
+        "variable",
+        "Recharge-zone storage [inches]",
+        restart=True,
+        units="inches",
     )
-    soil_rechr_change = _meta("variable", "Recharge-zone change [inches]")
+    soil_rechr_change = _meta(
+        "variable", "Recharge-zone change [inches]", units="inches"
+    )
     soil_rechr_change_hru = _term("Recharge-zone change [in over HRU]")
     soil_rechr_prev = _meta(
-        "variable", "Recharge-zone storage, previous step (RunoffAg input)"
+        "variable",
+        "Recharge-zone storage, previous step (RunoffAg input)",
+        units="inches",
     )
-    soil_saturated = _meta("variable", "Pervious soil saturated flag (0/1)")
-    soil_to_gw = _meta("variable", "Capillary excess to GWR [inches]")
-    soil_to_ssr = _meta("variable", "Capillary excess to gravity [inches]")
+    soil_saturated = _meta(
+        "variable", "Pervious soil saturated flag (0/1)", units="none"
+    )
+    soil_to_gw = _meta(
+        "variable", "Capillary excess to GWR [inches]", units="inches"
+    )
+    soil_to_ssr = _meta(
+        "variable", "Capillary excess to gravity [inches]", units="inches"
+    )
     perv_soil_to_gw = _term("Pervious part of soil_to_gw [in]")
-    perv_soil_to_gvr = _meta("variable", "Pervious part of soil_to_ssr [in]")
+    perv_soil_to_gvr = _meta(
+        "variable", "Pervious part of soil_to_ssr [in]", units="inches"
+    )
     ssr_to_gw = _term("Gravity drainage to GWR [inches]")
-    ssres_flow = _meta("variable", "Interflow to stream network [inches]")
-    ssres_flow_vol = _meta("variable", "Interflow volume [cubic feet]")
-    ssres_in = _meta("variable", "Inflow to gravity+pref reservoirs [in]")
-    ssres_stor = _meta("variable", "Gravity + preferential storage [inches]")
+    ssres_flow = _meta(
+        "variable", "Interflow to stream network [inches]", units="inches"
+    )
+    ssres_flow_vol = _meta(
+        "variable", "Interflow volume [cubic feet]", units="cubic feet"
+    )
+    ssres_in = _meta(
+        "variable", "Inflow to gravity+pref reservoirs [in]", units="inches"
+    )
+    ssres_stor = _meta(
+        "variable", "Gravity + preferential storage [inches]", units="inches"
+    )
     swale_actet = _term("Swale ponded-water actual ET [inches]")
-    unused_potet = _meta("variable", "Unsatisfied potential ET [inches]")
+    unused_potet = _meta(
+        "variable", "Unsatisfied potential ET [inches]", units="inches"
+    )
     perv_infil_hru = _term("Pervious infiltration [inches over HRU]")
 
     # -- variables: agricultural --
-    ag_cap_infil_tot = _meta("variable", "Ag infiltration [in over HRU]")
+    ag_cap_infil_tot = _meta(
+        "variable", "Ag infiltration [in over HRU]", units="inches"
+    )
     ag_soil_moist = _meta(
-        "variable", "Ag capillary storage [inches]", restart=True
+        "variable",
+        "Ag capillary storage [inches]",
+        restart=True,
+        units="inches",
     )
     ag_soil_moist_prev = _meta(
-        "variable", "Ag capillary storage, previous step (RunoffAg input)"
+        "variable",
+        "Ag capillary storage, previous step (RunoffAg input)",
+        units="inches",
     )
-    ag_soil_moist_change = _meta("variable", "Ag capillary change [inches]")
+    ag_soil_moist_change = _meta(
+        "variable", "Ag capillary change [inches]", units="inches"
+    )
     ag_soil_moist_change_hru = _meta(
-        "variable", "Ag capillary change [in over HRU]"
+        "variable", "Ag capillary change [in over HRU]", units="inches"
     )
     ag_soil_rechr = _meta(
-        "variable", "Ag recharge-zone storage [inches]", restart=True
+        "variable",
+        "Ag recharge-zone storage [inches]",
+        restart=True,
+        units="inches",
     )
     ag_soil_rechr_prev = _meta(
-        "variable", "Ag recharge-zone storage, previous step (RunoffAg input)"
+        "variable",
+        "Ag recharge-zone storage, previous step (RunoffAg input)",
+        units="inches",
     )
-    ag_soil_rechr_change = _meta("variable", "Ag recharge-zone change [in]")
+    ag_soil_rechr_change = _meta(
+        "variable", "Ag recharge-zone change [in]", units="inches"
+    )
     ag_soil_rechr_change_hru = _term("Ag recharge-zone change [in over HRU]")
     ag_soil_lower = _meta(
-        "variable", "Ag lower-zone storage [inches]", restart=True
+        "variable",
+        "Ag lower-zone storage [inches]",
+        restart=True,
+        units="inches",
     )
-    ag_soil_lower_change = _meta("variable", "Ag lower-zone change [inches]")
+    ag_soil_lower_change = _meta(
+        "variable", "Ag lower-zone change [inches]", units="inches"
+    )
     ag_soil_lower_change_hru = _term("Ag lower-zone change [in over HRU]")
     ag_actet = _meta(
-        "variable", "Ag actual ET [in] (canopy interception added back)"
+        "variable",
+        "Ag actual ET [in] (canopy interception added back)",
+        units="inches",
     )
     hru_ag_actet = _term("Ag actual ET [inches over the HRU]")
-    ag_potet_rechr = _meta("variable", "Ag potential ET, recharge zone [in]")
-    ag_potet_lower = _meta("variable", "Ag potential ET, lower zone [in]")
-    ag_soil_to_gw = _term("Ag part of soil_to_gw [inches]")
-    ag_soil_to_gvr = _meta("variable", "Ag part of soil_to_ssr [inches]")
-    ag_hortonian = _meta(
-        "variable", "Ag hortonian runoff [in] (zeroed; never written upstream)"
+    ag_potet_rechr = _meta(
+        "variable", "Ag potential ET, recharge zone [in]", units="inches"
     )
-    ag_soil_saturated = _meta("variable", "Ag soil saturated flag (0/1)")
+    ag_potet_lower = _meta(
+        "variable", "Ag potential ET, lower zone [in]", units="inches"
+    )
+    ag_soil_to_gw = _term("Ag part of soil_to_gw [inches]")
+    ag_soil_to_gvr = _meta(
+        "variable", "Ag part of soil_to_ssr [inches]", units="inches"
+    )
+    ag_hortonian = _meta(
+        "variable",
+        "Ag hortonian runoff [in] (zeroed; never written upstream)",
+        units="inches",
+    )
+    ag_soil_saturated = _meta(
+        "variable", "Ag soil saturated flag (0/1)", units="none"
+    )
     unused_ag_et = _meta(
-        "variable", "Unsatisfied ag ET target [in] (= per-HRU unsatisfied)"
+        "variable",
+        "Unsatisfied ag ET target [in] (= per-HRU unsatisfied)",
+        units="inches",
     )
     ag_irrigation_add = _meta(
         "variable",
         "Irrigation water added to ag area [in] (ZERO in this core; SET by "
         "the ObsET iteration)",
+        units="inches",
     )
     ag_infil_hru = _term("Ag infiltration [inches over HRU]")
 
     # -- variables: dynamic-ag_frac redistribution tracking --
     ag_soil_moist_redistribution = _meta(
-        "variable", "Ag capillary redistribution on ag_frac change [in]"
+        "variable",
+        "Ag capillary redistribution on ag_frac change [in]",
+        units="inches",
     )
     ag_soil_rechr_redistribution = _meta(
-        "variable", "Ag recharge redistribution on ag_frac change [in]"
+        "variable",
+        "Ag recharge redistribution on ag_frac change [in]",
+        units="inches",
     )
     soil_rechr_redistribution = _meta(
-        "variable", "Pervious recharge redistribution on ag_frac change [in]"
+        "variable",
+        "Pervious recharge redistribution on ag_frac change [in]",
+        units="inches",
     )
     soil_lower_redistribution = _meta(
-        "variable", "Pervious lower redistribution on ag_frac change [in]"
+        "variable",
+        "Pervious lower redistribution on ag_frac change [in]",
+        units="inches",
     )
     slow_stor_redistribution = _meta(
-        "variable", "Gravity redistribution on ag_frac change [in]"
+        "variable",
+        "Gravity redistribution on ag_frac change [in]",
+        units="inches",
     )
 
     # -- budgets --
@@ -885,21 +1113,22 @@ class PRMSSoilzoneAg(Process):
                         slow_stor[hh] = (
                             slow_stor[hh] + ag_soil_moist[hh] * old_ag_frac
                         )
-                        ag_soil_moist[hh] = 0.0
-                        ag_soil_rechr[hh] = 0.0
+                        ag_soil_moist[hh] = _ZERO_INCHES
+                        ag_soil_rechr[hh] = _ZERO_INCHES
 
             # pervious scaling when pervious area changed
             # (isclose b = new_perv)
             perv_changed = not (
-                abs(old_perv - new_perv) <= 1.0e-8 + 1.0e-5 * abs(new_perv)
+                abs(old_perv - new_perv)
+                <= _ISCLOSE_ATOL_ACRES + 1.0e-5 * abs(new_perv)
             )
             if perv_changed and (new_perv > 0.0):
                 scale_perv = old_perv / new_perv
                 soil_moist[hh] = soil_moist[hh] * scale_perv
                 soil_rechr[hh] = soil_rechr[hh] * scale_perv
-            if (old_perv > 0.0) and (abs(new_perv) <= 1.0e-8):
-                soil_moist[hh] = 0.0
-                soil_rechr[hh] = 0.0
+            if (old_perv > 0.0) and (abs(new_perv) <= _ISCLOSE_ATOL_ACRES):
+                soil_moist[hh] = _ZERO_INCHES
+                soil_rechr[hh] = _ZERO_INCHES
 
             ag_area[hh] = new_ag_area
             hru_area_perv[hh] = new_perv
@@ -1045,32 +1274,32 @@ class PRMSSoilzoneAg(Process):
         # _adjust_irrigation) and the storage-change lines (_post)
         nhru = hru_type.shape[0]
 
-        soil_to_gw[:] = 0.0
-        soil_to_ssr[:] = 0.0
-        perv_soil_to_gw[:] = 0.0
-        perv_soil_to_gvr[:] = 0.0
-        ag_soil_to_gw[:] = 0.0
-        ag_soil_to_gvr[:] = 0.0
-        ssr_to_gw[:] = 0.0
-        slow_flow[:] = 0.0
-        ssres_flow[:] = 0.0
-        potet_rechr[:] = 0.0
-        potet_lower[:] = 0.0
-        ag_potet_rechr[:] = 0.0
-        ag_potet_lower[:] = 0.0
-        ag_actet[:] = 0.0
-        hru_ag_actet[:] = 0.0
+        soil_to_gw[:] = _ZERO_INCHES
+        soil_to_ssr[:] = _ZERO_INCHES
+        perv_soil_to_gw[:] = _ZERO_INCHES
+        perv_soil_to_gvr[:] = _ZERO_INCHES
+        ag_soil_to_gw[:] = _ZERO_INCHES
+        ag_soil_to_gvr[:] = _ZERO_INCHES
+        ssr_to_gw[:] = _ZERO_INCHES
+        slow_flow[:] = _ZERO_INCHES
+        ssres_flow[:] = _ZERO_INCHES
+        potet_rechr[:] = _ZERO_INCHES
+        potet_lower[:] = _ZERO_INCHES
+        ag_potet_rechr[:] = _ZERO_INCHES
+        ag_potet_lower[:] = _ZERO_INCHES
+        ag_actet[:] = _ZERO_INCHES
+        hru_ag_actet[:] = _ZERO_INCHES
         ag_soil_saturated[:] = 0.0
-        ag_hortonian[:] = 0.0
-        unused_ag_et[:] = 0.0
-        ag_cap_infil_tot[:] = 0.0
-        ag_soil_lower[:] = 0.0
-        swale_actet[:] = 0.0
+        ag_hortonian[:] = _ZERO_INCHES
+        unused_ag_et[:] = _ZERO_INCHES
+        ag_cap_infil_tot[:] = _ZERO_INCHES
+        ag_soil_lower[:] = _ZERO_INCHES
+        swale_actet[:] = _ZERO_INCHES
         soil_saturated[:] = 0.0
-        dunnian_flow[:] = 0.0
-        pref_flow_infil[:] = 0.0
-        pref_flow_in[:] = 0.0
-        pref_flow[:] = 0.0
+        dunnian_flow[:] = _ZERO_INCHES
+        pref_flow_infil[:] = _ZERO_INCHES
+        pref_flow_in[:] = _ZERO_INCHES
+        pref_flow[:] = _ZERO_INCHES
 
         for hh in numba.prange(nhru):
             if hru_type[hh] == _INACTIVE:
@@ -1096,22 +1325,22 @@ class PRMSSoilzoneAg(Process):
 
             avail_potet = potet[hh] - hruactet
             if avail_potet < 0.0:
-                avail_potet = 0.0
+                avail_potet = _ZERO_INCHES
                 hruactet = potet[hh]
 
-            dunnianflw = 0.0
-            dunnianflw_pfr = 0.0
+            dunnianflw = _ZERO_INCHES
+            dunnianflw_pfr = _ZERO_INCHES
 
             capwater_maxin = infil[hh]
             ag_water_maxin = infil_ag[hh]
             if iter_aet_flag:
                 ag_water_maxin = ag_water_maxin + ag_irrigation_add[hh]
 
-            prefflow = 0.0
+            prefflow = _ZERO_INCHES
             if pref_flow_flag:
                 if pref_flow_infil_frac[hh] > 0.0:
-                    ag_pref_flow_maxin = 0.0
-                    cap_pref_flow_maxin = 0.0
+                    ag_pref_flow_maxin = _ZERO_INCHES
+                    cap_pref_flow_maxin = _ZERO_INCHES
 
                     if ag_water_maxin > 0.0:
                         ag_pref_flow_maxin = (
@@ -1130,7 +1359,7 @@ class PRMSSoilzoneAg(Process):
                     pref_flow_maxin = cap_pref_flow_maxin + ag_pref_flow_maxin
                     pref_flow_stor[hh] = pref_flow_stor[hh] + pref_flow_maxin
                     dunnianflw_pfr = max(
-                        0.0, pref_flow_stor[hh] - pref_flow_max[hh]
+                        _ZERO_INCHES, pref_flow_stor[hh] - pref_flow_max[hh]
                     )
                     if dunnianflw_pfr > 0.0:
                         pref_flow_stor[hh] = pref_flow_max[hh]
@@ -1144,7 +1373,7 @@ class PRMSSoilzoneAg(Process):
             # soil moisture, pervious then agricultural (the AG call
             # uses soil2gw_max NOT ag_soil2gw_max: upstream-preserved
             # Fortran bug)
-            perv_soil_to_gvr[hh] = 0.0
+            perv_soil_to_gvr[hh] = _ZERO_INCHES
             if perv_on_flag:
                 if capwater_maxin + soil_moist[hh] > 0.0:
                     (
@@ -1193,10 +1422,10 @@ class PRMSSoilzoneAg(Process):
 
             # slow interflow and gravity drainage
             availh2o = slow_stor[hh] + soil_to_ssr[hh]
-            topfr = 0.0
+            topfr = _ZERO_INCHES
             if hru_type[hh] != _SWALE:
                 if pref_flow_flag:
-                    topfr = max(0.0, availh2o - pref_flow_thrsh[hh])
+                    topfr = max(_ZERO_INCHES, availh2o - pref_flow_thrsh[hh])
                 ssresin = soil_to_ssr[hh] - topfr
                 slow_stor[hh] = availh2o - topfr
                 if slow_stor[hh] > 0.0:
@@ -1218,15 +1447,17 @@ class PRMSSoilzoneAg(Process):
                 )
 
             # dunnian from PFR (upstream's exact branch structure)
-            dunnianflw_gvr = 0.0
+            dunnianflw_gvr = _ZERO_INCHES
             if pref_flow_flag:
                 if pref_flow_max[hh] > 0.0:
                     availh2o = pref_flow_stor[hh] + topfr
-                    dunnianflw_gvr = max(0.0, availh2o - pref_flow_max[hh])
+                    dunnianflw_gvr = max(
+                        _ZERO_INCHES, availh2o - pref_flow_max[hh]
+                    )
                     if dunnianflw_gvr > 0.0:
                         topfr = topfr - dunnianflw_gvr
                         if topfr < 0.0:
-                            topfr = 0.0
+                            topfr = _ZERO_INCHES
                     pref_flow_in[hh] = pref_flow_infil[hh] + topfr
                     pref_flow_stor[hh] = pref_flow_stor[hh] + topfr
                     if pref_flow_stor[hh] > 0.0:
@@ -1245,10 +1476,10 @@ class PRMSSoilzoneAg(Process):
                     dunnianflw_gvr = topfr
 
             # actual evapotranspiration: ag first, then pervious
-            pervactet = 0.0
-            agactet = 0.0
-            ag_hruactet = 0.0
-            unsatisfied_ag_et = 0.0
+            pervactet = _ZERO_INCHES
+            agactet = _ZERO_INCHES
+            ag_hruactet = _ZERO_INCHES
+            unsatisfied_ag_et = _ZERO_INCHES
 
             if ag_on_flag:
                 if iter_aet_flag:
@@ -1258,7 +1489,7 @@ class PRMSSoilzoneAg(Process):
 
                 ag_avail_targetAET = ag_AETtarget - hru_intcpevap[hh]
                 if ag_avail_targetAET < 0.0:
-                    ag_avail_targetAET = 0.0
+                    ag_avail_targetAET = _ZERO_INCHES
 
                 if ag_avail_targetAET > 0.0:
                     ag_et_type_gt_1 = (
@@ -1298,7 +1529,7 @@ class PRMSSoilzoneAg(Process):
 
             avail_potet = potet[hh] - hruactet - ag_hruactet
             if avail_potet < 0.0:
-                avail_potet = 0.0
+                avail_potet = _ZERO_INCHES
 
             if soil_moist[hh] > 0.0 and avail_potet > 0.0:
                 et_type_gt_1 = (
@@ -1354,7 +1585,7 @@ class PRMSSoilzoneAg(Process):
                     ssres_stor[hh] = ssres_stor[hh] + pref_flow_stor[hh]
             else:
                 availh2o = slow_stor[hh] - sat_threshold[hh]
-                swale_actet[hh] = 0.0
+                swale_actet[hh] = _ZERO_INCHES
                 if availh2o > 0.0:
                     unsatisfied_et = potet[hh] - hru_actet[hh]
                     if unsatisfied_et > 0.0:
@@ -1670,41 +1901,51 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         kind="parameter",
         dims=("scalar",),
         dtype=np.float64,
+        units="inches",
         description="Convergence tolerance on unsatisfied ag AET [inches]",
     )
     ag_soilwater_deficit_min = _meta(
-        "parameter", "Minimum ag soil-water deficit to allow irrigation [-]"
+        "parameter",
+        "Minimum ag soil-water deficit to allow irrigation [-]",
+        units="fraction",
     )
 
     # -- inputs (ADDED) --
     aet_observed = _meta(
-        "input", "Observed actual ET [inches] (-1.0 = missing)"
+        "input", "Observed actual ET [inches] (-1.0 = missing)", units="inches"
     )
 
     # -- variables (ADDED; obs-ET machinery + diagnostics) --
     AET_external = _meta(
-        "variable", "Validated observed-AET target [inches] (upstream name)"
+        "variable",
+        "Validated observed-AET target [inches] (upstream name)",
+        units="inches",
     )
     ag_soilwater_deficit = _meta(
-        "variable", "Ag soil-water deficit fraction [-] (iteration diag)"
+        "variable",
+        "Ag soil-water deficit fraction [-] (iteration diag)",
+        units="fraction",
     )
     ag_irrigation_add_vol = _meta(
-        "variable", "Irrigation volume added [acre-inches]"
+        "variable",
+        "Irrigation volume added [acre-inches]",
+        units="acre-inches",
     )
     ag_aet_external_vol = _meta(
-        "variable", "Ag actual-ET volume [acre-inches]"
+        "variable", "Ag actual-ET volume [acre-inches]", units="acre-inches"
     )
     ag_irrigation_hru_source = _term(
         "Irrigation water added [inches over the HRU]"
     )
     iter_count = _meta(
-        "variable", "Iterations performed this timestep", np.int64
+        "variable", "Iterations performed this timestep", np.int64, units=None
     )
     iter_end_status = _meta(
         "variable",
         "Convergence code (-1 no-ag, 0 converged, 1 deficit-limited, "
         "2 max-iters, 3 no-transp, -9 never)",
         np.int64,
+        units=None,
     )
 
     # -- budgets (REDECLARED: the iteration's irrigation water enters
@@ -1770,16 +2011,16 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         (the loop's transp_on.any())."""
         n_transp = 0
         for hh in range(AET_external.shape[0]):
-            ag_irrigation_add[hh] = 0.0
-            ag_irrigation_add_vol[hh] = 0.0
-            ag_aet_external_vol[hh] = 0.0
+            ag_irrigation_add[hh] = _ZERO_INCHES
+            ag_irrigation_add_vol[hh] = _ZERO_ACRE_INCHES
+            ag_aet_external_vol[hh] = _ZERO_ACRE_INCHES
             AET_external[hh] = aet_observed[hh]
             if (
                 (AET_external[hh] < 0.0)
-                and (AET_external[hh] != -1.0)
+                and (AET_external[hh] != _AET_MISSING_INCHES)
                 and (ag_frac[hh] > 0.0)
             ):
-                AET_external[hh] = 0.0
+                AET_external[hh] = _ZERO_INCHES
             if transp_on[hh] != 0.0:
                 n_transp += 1
         return n_transp

@@ -52,6 +52,10 @@ dependencies:
   - python-graphviz
   - xarray=2026.7.*  # the zarr-3 era pair (zarr pin below)
   - pandas>=1.4.0
+  # units vocabulary (pws_phoenix/units.py): declared `units` strings are
+  # checked against pint in tests/test_units.py; at runtime pint is
+  # imported only when control["units"] turns the checks on (stage 2)
+  - pint
   - pip
   - mypy
   - pre-commit
