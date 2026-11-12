@@ -316,7 +316,7 @@ class Process(ABC):
     # Restart variables with NO default: initialize() leaves them
     # unset, so they must be supplied as initial state or come from a
     # restart. The Model raises at assembly when one is missing.
-    required_state: tuple[str, ...] = ()
+    required_initial_state: tuple[str, ...] = ()
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)

@@ -28,8 +28,14 @@ channel parameters is extended to ``nnodes`` with nan (floats) or 0
 (ints); a new node's own parameters fill its row, every other declared
 parameter of its type stays nan. A node type's ``initialize_type``
 owns the "nan where it matters" check (STARFIT raises on nan
-``initial_storage`` / ``Obs_MEANFLOW_CUMECS`` -- that data-prep stays
-the caller's, as decided for the STARFIT port).
+``Obs_MEANFLOW_CUMECS`` -- that data-prep stays the caller's, as
+decided for the STARFIT port).
+
+Initial state: a new node's ``initial_state`` (restart variables of
+its type, by name -- e.g. STARFIT's required ``lake_storage_sub``)
+becomes one ``(nnodes,)`` array per name in
+``FlowGraphKit.initial_state``, nan off the supplying nodes' rows,
+ready to put in the graph's process_dict entry.
 
 The ``nnodes`` dimension carries a COORDINATE: ``nhm_seg`` for the
 channel rows, the caller's ``node_id`` for new nodes (pywatershed's
@@ -72,6 +78,10 @@ class NewNode:
             an ``nhm_seg`` or another new node's id.
         parameters: this node's row of its type's ``kind="parameter"``
             fields, by name. Unknown names raise.
+        initial_state: this node's row of its type's ``restart=True``
+            variables, by name (starting values only -- e.g.
+            ``{"lake_storage_sub": ...}`` [MCM] for the STARFIT
+            family, which has no default). Unknown names raise.
     """
 
     # duck-typed node-type classes (the make_flow_graph contract)
@@ -79,13 +89,15 @@ class NewNode:
     flows_to: int | NewNode
     node_id: int
     parameters: dict[str, float] = field(default_factory=dict)
+    initial_state: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class FlowGraphKit:
     """What ``splice_flow_graph`` returns: the composed class, the
-    ``nnodes`` grid, the union parameters, and the bookkeeping to pad
-    hru->segment Map weights and locate rows."""
+    ``nnodes`` grid, the union parameters, the new nodes' initial
+    state, and the bookkeeping to pad hru->segment Map weights and
+    locate rows."""
 
     graph_class: type[FlowGraphBase]
     discretization: Discretization
@@ -94,6 +106,10 @@ class FlowGraphKit:
     n_nodes: int
     # graph row of each NewNode, in collated order
     new_node_rows: list[int]
+    # the new nodes' supplied initial state: name -> (nnodes,) array,
+    # nan off the supplying nodes' rows (put these in the graph's
+    # process_dict entry)
+    initial_state: dict[str, xr.DataArray] = field(default_factory=dict)
 
     def pad_weights(self, weights: np.ndarray) -> np.ndarray:
         """``(n_seg, n_hru)`` hru->segment weights -> ``(n_nodes,
@@ -309,6 +325,27 @@ def splice_flow_graph(
         for name, value in node.parameters.items():
             params[name][1][n_seg + ii] = value
 
+    # -- the new nodes' initial state: one (nnodes,) array per name,
+    # nan off the supplying nodes' rows --
+    state: dict[str, np.ndarray] = {}
+    for ii, node in enumerate(new_nodes):
+        own_state = {
+            name
+            for name, meta in node.node_type.fields.items()
+            if meta.restart
+        }
+        unknown = set(node.initial_state) - own_state
+        if unknown:
+            raise ValueError(
+                f"node {node.node_id} ({node.node_type.type_name}): "
+                f"unknown initial state {sorted(unknown)}; restart "
+                f"variables: {sorted(own_state)}"
+            )
+        for name, value in node.initial_state.items():
+            if name not in state:
+                state[name] = np.full(n_nodes, np.nan, dtype=np.float64)
+            state[name][n_seg + ii] = value
+
     return FlowGraphKit(
         graph_class=graph_class,
         discretization=discretization,
@@ -316,4 +353,8 @@ def splice_flow_graph(
         n_seg=n_seg,
         n_nodes=n_nodes,
         new_node_rows=[n_seg + ii for ii in range(n_new)],
+        initial_state={
+            name: xr.DataArray(values, dims="nnodes")
+            for name, values in state.items()
+        },
     )

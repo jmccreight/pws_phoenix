@@ -259,28 +259,30 @@ plot_series(
 # new node receives no lateral inflow of its own). Every other process
 # in the kit is untouched.
 #
-# A new node needs its type, where it flows to, an id, and its
-# parameters. The reservoir's parameters are the STARFIT row we looked
-# at, with two values pywatershed fills in for you at run time but
-# that we supply up front here (parameters are frozen once the model
-# is assembled):
+# A new node needs its type, where it flows to, an id, its
+# parameters, and its initial state. The reservoir's parameters are
+# the STARFIT row we looked at, with one value pywatershed fills in
+# for you at run time but that we supply up front here (parameters
+# are frozen once the model is assembled): `Obs_MEANFLOW_CUMECS`, the
+# long-term mean inflow, defaults to the `inflow_mean` in the file
+# when missing.
 #
-# - `Obs_MEANFLOW_CUMECS`, the long-term mean inflow, defaults to the
-#   `inflow_mean` in the file when missing;
-# - `initial_storage` defaults to the midpoint of the normal operating
-#   range on the day before the simulation starts
-#   (`nor_midpoint_initial_storage`).
-#
-# The channel network routes in cubic feet per second, so storages are
-# supplied in millions of cubic feet (`cms_to_cfs` converts; it equals
-# the cubic-meters-to-cubic-feet factor).
+# The reservoir's starting storage is state, not a parameter, and a
+# STARFIT node has no default for it: we supply it as the node's
+# `initial_state`, under the name of the state variable,
+# `lake_storage_sub`. pywatershed takes it from the file's
+# `initial_storage` and, when that is missing, uses the midpoint of
+# the normal operating range on the day before the simulation starts
+# (`nor_midpoint_initial_storage`); we do the same. This state is in
+# millions of cubic meters, here too, where the channel network
+# routes in cubic feet per second. (The storage the graph writes out,
+# `node_storages`, is in the network's units: millions of cubic feet.)
 
 # %%
 from pws_phoenix.flow_graph_build import NewNode
 from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import (
     StarfitFlowNode,
-    cms_to_cfs,
     nor_midpoint_initial_storage,
 )
 from pws_phoenix.prms_translate import insert_flow_graph
@@ -300,25 +302,32 @@ PARAMETER_NAMES = [
 
 def starfit_node_parameters(sf_ds, cap_mult=1.0):
     """The reservoir's STARFIT parameters as a NewNode parameter dict,
-    capacity scaled by cap_mult, the two run-time defaults filled."""
+    capacity scaled by cap_mult, the run-time default filled."""
     row = {nn: float(sf_ds[nn]) for nn in PARAMETER_NAMES if nn in sf_ds}
     row["GRanD_CAP_MCM"] *= cap_mult
     if np.isnan(row.get("Obs_MEANFLOW_CUMECS", np.nan)):
         row["Obs_MEANFLOW_CUMECS"] = float(sf_ds["inflow_mean"])
-    if np.isnan(row.get("initial_storage", np.nan)):
-        row["initial_storage"] = (
-            nor_midpoint_initial_storage(row, INIT_DATE) * cms_to_cfs
-        )
     missing = set(PARAMETER_NAMES) - set(row)
     assert not missing, f"no values for {sorted(missing)}"
     return row
 
 
+def starfit_node_initial_state(sf_ds, parameters):
+    """The reservoir's starting storage as a NewNode initial_state
+    dict [millions of cubic meters]: the file's value, or the midpoint
+    of the normal operating range when the file has none."""
+    storage = float(sf_ds["initial_storage"])
+    if np.isnan(storage):
+        storage = nor_midpoint_initial_storage(parameters, INIT_DATE)
+    return {"lake_storage_sub": storage}
+
+
 big_sandy_params = starfit_node_parameters(big_sandy)
+big_sandy_state = starfit_node_initial_state(big_sandy, big_sandy_params)
 print(
-    f"initial storage: {big_sandy_params['initial_storage']:.1f} million "
-    f"cubic feet on {INIT_DATE:%Y-%m-%d} "
-    f"(capacity {big_sandy['GRanD_CAP_MCM'].item() * cms_to_cfs:.1f})"
+    f"initial storage: {big_sandy_state['lake_storage_sub']:.1f} million "
+    f"cubic meters on {INIT_DATE:%Y-%m-%d} "
+    f"(capacity {big_sandy['GRanD_CAP_MCM'].item():.1f})"
 )
 
 # %% [markdown]
@@ -352,6 +361,7 @@ kit_starfit = insert_flow_graph(
             flows_to=NHM_SEG_BELOW_RESERVOIR,
             node_id=RESERVOIR_ID,
             parameters=big_sandy_params,
+            initial_state=big_sandy_state,
         )
     ],
 )
@@ -417,8 +427,9 @@ plot_series(
 #
 # `splice_flow_graph` is the lower-level piece `insert_flow_graph`
 # used above: given the segment network and the channel parameters it
-# returns the composed graph class, its grid, its parameters, and a
-# helper to extend the HRU-to-segment weights.
+# returns the composed graph class, its grid, its parameters, the new
+# nodes' initial state, and a helper to extend the HRU-to-segment
+# weights.
 
 # %%
 from pws_phoenix.flow_graph_build import splice_flow_graph
@@ -428,6 +439,7 @@ CAP_MULT = 1.5
 PASS_THROUGH_ID = 9999
 NHM_SEG_BELOW_PASS_THROUGH = 44435
 
+big_sandy_params_post = starfit_node_parameters(big_sandy, cap_mult=CAP_MULT)
 graph = splice_flow_graph(
     seg_dis,
     kit_nhm.process_dict["prms_channel"]["parameters"],
@@ -436,7 +448,10 @@ graph = splice_flow_graph(
             StarfitFlowNode,
             flows_to=NHM_SEG_BELOW_RESERVOIR,
             node_id=RESERVOIR_ID,
-            parameters=starfit_node_parameters(big_sandy, cap_mult=CAP_MULT),
+            parameters=big_sandy_params_post,
+            initial_state=starfit_node_initial_state(
+                big_sandy, big_sandy_params_post
+            ),
         ),
         NewNode(
             PassThroughFlowNode,
@@ -469,9 +484,9 @@ for name, mm in kit_nhm.maps.items():
 print("graph inputs:", sorted(node_inputs))
 
 # %% [markdown]
-# A one-process model: the graph, its grid, its parameters, and the
-# inputs. We also ask for the reservoir's release and spill, which
-# together make its outflow.
+# A one-process model: the graph, its grid, its parameters, the new
+# nodes' initial state, and the inputs. We also ask for the
+# reservoir's release and spill, which together make its outflow.
 
 # %%
 from pws_phoenix.model import Model
@@ -486,6 +501,7 @@ else:
                 "class": graph.graph_class,
                 "discretization": "nnodes",
                 "parameters": graph.parameters,
+                **graph.initial_state,
                 **node_inputs,
             }
         },

@@ -437,7 +437,8 @@ def insert_flow_graph(
     Maps are padded with zero rows for the new nodes and re-targeted to
     the graph's ``node_*_vol`` inputs; the ``nsegment`` grid goes away.
     Initial state supplied in the channel entry (``seg_inflow``) is
-    carried onto the graph's channel rows, zero on the new nodes.
+    carried onto the graph's channel rows, zero on the new nodes; the
+    new nodes' own initial state (``NewNode.initial_state``) is added.
     ``control["output_var_names"]`` is re-filtered to the graph's
     variables (``seg_inflow``/``seg_outflow`` survive -- the channel
     node declares them as its rows' state, now on ``nnodes``; anything
@@ -494,6 +495,13 @@ def insert_flow_graph(
                     padded = np.zeros(fg.n_nodes, dtype=np.float64)
                     padded[: fg.n_seg] = entry[name].values
                     graph_entry[name] = xr.DataArray(padded, dims="nnodes")
+            # the new nodes' initial state (NewNode.initial_state); on
+            # a name the channel also supplied, a new node's value
+            # wins on its own row
+            for name, values in fg.initial_state.items():
+                if name in graph_entry:
+                    values = values.fillna(graph_entry[name])
+                graph_entry[name] = values
             process_dict["flow_graph"] = graph_entry
         else:
             process_dict[slot] = entry

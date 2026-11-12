@@ -9,10 +9,10 @@ The pin is SELF-CONSISTENT -- no pywatershed answers are involved: the
 same kit with and without the graph, every segment not downstream of
 the reservoir splice must agree at pywatershed's own scalar-node
 standard (1e-10), the bracketing pass-throughs are transparent, and
-outflow == release + spill at the reservoir. Big Sandy's nan
-initial_storage is filled with half capacity here (the NOR-midpoint
-rule is caller data-prep; the structural checks hold for any valid
-value).
+outflow == release + spill at the reservoir. Big Sandy's starting
+storage (required initial state; the file's initial_storage is nan)
+is half capacity here (the NOR-midpoint rule is caller data-prep; the
+structural checks hold for any valid value).
 """
 
 import numpy as np
@@ -21,10 +21,7 @@ import xarray as xr
 from conftest import PWS_TEST_DATA
 from pws_phoenix.flow_graph_build import NewNode
 from pws_phoenix.hydrology.pass_through_flow_node import PassThroughFlowNode
-from pws_phoenix.hydrology.starfit_flow_node import (
-    StarfitFlowNode,
-    cms_to_cfs,
-)
+from pws_phoenix.hydrology.starfit_flow_node import StarfitFlowNode
 from pws_phoenix.prms_translate.assemble import (
     assemble_from_control,
     insert_flow_graph,
@@ -77,12 +74,17 @@ def big_sandy_nodes() -> tuple[list[NewNode], NewNode]:
     params = {
         name: float(row[name])
         for name, meta in StarfitFlowNode.fields.items()
-        if meta.kind == "parameter" and name != "initial_storage"
+        if meta.kind == "parameter"
     }
-    # cfs graph: storages in Mcf (cm_to_cf == cms_to_cfs)
-    params["initial_storage"] = 0.5 * params["GRanD_CAP_MCM"] * cms_to_cfs
     pt3 = NewNode(PassThroughFlowNode, NHM_SEG_RESERVOIR_ABOVE, 9003)
-    starfit = NewNode(StarfitFlowNode, pt3, RESERVOIR_ID, params)
+    starfit = NewNode(
+        StarfitFlowNode,
+        pt3,
+        RESERVOIR_ID,
+        params,
+        # MCM, also in this cfs graph
+        initial_state={"lake_storage_sub": 0.5 * params["GRanD_CAP_MCM"]},
+    )
     pt1 = NewNode(PassThroughFlowNode, NHM_SEG_PASS_THROUGH_ABOVE, 9001)
     pt2 = NewNode(PassThroughFlowNode, starfit, 9002)
     return [starfit, pt1, pt2, pt3], starfit
@@ -249,12 +251,17 @@ def test_supplied_channel_state_carried_to_graph():
     n_seg = kit.discretizations["nsegment"].parameters.sizes["nsegment"]
     supplied = np.arange(1.0, n_seg + 1.0)
     channel["seg_inflow"] = xr.DataArray(supplied, dims="nsegment")
-    nodes, _ = big_sandy_nodes()
+    nodes, starfit = big_sandy_nodes()
     graph_entry = insert_flow_graph(kit, nodes).process_dict["flow_graph"]
     carried = graph_entry["seg_inflow"]
     assert carried.dims == ("nnodes",)
     np.testing.assert_array_equal(carried.values[:n_seg], supplied)
     np.testing.assert_array_equal(carried.values[n_seg:], np.zeros(len(nodes)))
+    # the new nodes' own initial state rides along: nan off the
+    # reservoir's row
+    storage = graph_entry["lake_storage_sub"].values
+    assert np.isfinite(storage[n_seg + nodes.index(starfit)])
+    assert np.isnan(np.delete(storage, n_seg + nodes.index(starfit))).all()
 
 
 @ucb_skipif

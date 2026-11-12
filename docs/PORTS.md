@@ -539,7 +539,15 @@ flow-driven variables see the knife-edge cascade).
   initialize() reads to compute defaults. nan is a legitimate state
   value (stream temp's never-has-flow marker, FlowGraph union rows,
   STARFIT `lake_storage`), so supplied or default state is NOT
-  checked for nan.
+  checked for nan by the framework. A process may instead declare
+  `required_initial_state` (restart variables with no default: the
+  Model raises when one is neither supplied nor restarted) and
+  report problems from `check_initial_state()`, which runs once the
+  starting state is in place. The STARFIT family does both:
+  `lake_storage_sub` [MCM, in a cfs graph too] is required --
+  pywatershed's `initial_storage` parameter is not declared -- and
+  nan on a reservoir's own row is reported. Splicing:
+  `NewNode(..., initial_state={"lake_storage_sub": ...})`.
 
   **prms_translate/ BUILT (Aug 2026) -- the legacy endpoint reached.**
   The translation layer lives at `prms_translate/` under the RULE

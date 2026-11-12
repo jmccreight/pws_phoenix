@@ -352,9 +352,9 @@ def make_flow_graph(
             time-scalar names it reads, e.g. ``("epiweek",)``); the
             graph computes only the union and serves them per step in
             the ``tctx`` namedtuple passed to ``substep``. Also
-            optional: ``required_state`` (a tuple of its restart
+            optional: ``required_initial_state`` (a tuple of its restart
             variables that have no default -- the composed class's
-            ``Process.required_state`` is the union) and
+            ``Process.required_initial_state`` is the union) and
             ``check_initial_state_type(dataset) -> list[str]``
             (problems in its OWN rows of the starting state, run from
             the composed class's ``check_initial_state``).
@@ -501,9 +501,11 @@ def make_flow_graph(
     class_attrs["budgets"] = {"mass": _MASS_BUDGET}
     # union of the node types' required state (optional per type),
     # first appearance order
-    class_attrs["required_state"] = tuple(
+    class_attrs["required_initial_state"] = tuple(
         dict.fromkeys(
-            nm for tt in node_types for nm in getattr(tt, "required_state", ())
+            nm
+            for tt in node_types
+            for nm in getattr(tt, "required_initial_state", ())
         )
     )
     class_attrs["initialize"] = initialize

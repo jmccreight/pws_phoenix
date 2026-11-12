@@ -253,7 +253,7 @@ class _NoDefault(Process):
     level = DataArrayMeta(
         kind="variable", dims=("space",), dtype=np.float64, restart=True
     )
-    required_state = ("level",)
+    required_initial_state = ("level",)
 
     def check_initial_state(self) -> list[str]:
         n_bad = int((self._refs["level"] < 0.0).sum())
@@ -279,7 +279,7 @@ def _no_default_process_dict(toy_ds, control=None, **state):
     }
 
 
-def test_required_state_missing_raises(toy_ds):
+def test_required_initial_state_missing_raises(toy_ds):
     """Required state not supplied raises at assembly; supplied, it is
     accepted and is what the model starts from."""
     with pytest.raises(ValueError, match=r"\['level'\] has no default"):
@@ -293,7 +293,7 @@ def test_required_state_missing_raises(toy_ds):
         )
 
 
-def test_required_state_from_restart(toy_ds, tmp_path):
+def test_required_initial_state_from_restart(toy_ds, tmp_path):
     """A restart satisfies required state: nothing is supplied on the
     warm start."""
     n_space = toy_ds.sizes["space"]
@@ -339,7 +339,7 @@ def test_state_groups_are_restart_variables():
         restart = set(cls.get_restart_variables())
         for group in cls.state_groups:
             assert set(group) <= restart, f"{name}: {group}"
-        assert set(cls.required_state) <= restart, f"{name}: required"
+        assert set(cls.required_initial_state) <= restart, f"{name}: required"
 
 
 def test_flags_are_variables_only():

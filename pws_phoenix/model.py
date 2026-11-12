@@ -260,7 +260,7 @@ class Model:
           both. Optional supply, but part of the contract's surface.
         - "required_initial_state": {process: [variables]} -- the
           subset of "initial_state" with NO initialize() default
-          (``Process.required_state``): supply it per variable, or
+          (``Process.required_initial_state``): supply it per variable, or
           warm-start; the Model raises otherwise.
 
         spec["maps"] (present when maps are given) -- REQUIRED supply
@@ -325,7 +325,7 @@ class Model:
             internal: Dict[str, List[str]] = {}
             var_owner: Dict[str, str] = {}
             initial_state: Dict[str, List[str]] = {}
-            required_state: Dict[str, List[str]] = {}
+            required_initial_state: Dict[str, List[str]] = {}
             for kk in proc_names:
                 pcls = process_dict[kk]["class"]
                 for name, meta in _dict_of_kind(pcls, "parameter").items():
@@ -344,8 +344,10 @@ class Model:
                 restartable = list(pcls.get_restart_variables())
                 if restartable:
                     initial_state[kk] = restartable
-                if pcls.required_state:
-                    required_state[kk] = list(pcls.required_state)
+                if pcls.required_initial_state:
+                    required_initial_state[kk] = list(
+                        pcls.required_initial_state
+                    )
             # a name declared derivable by ANY process is derivable
             # (another process may declare it plain -- the derivation
             # knowledge counts once)
@@ -412,7 +414,7 @@ class Model:
                 "parameters": parameters,
                 "derivable_parameters": derivable,
                 "initial_state": initial_state,
-                "required_initial_state": required_state,
+                "required_initial_state": required_initial_state,
             }
             if include_optional:
                 spec["optional"][grid] = {
@@ -547,14 +549,14 @@ class Model:
                     "from the others."
                 )
 
-    def _raise_if_required_state_missing(
+    def _raise_if_required_initial_state_missing(
         self, proc_name: str, cls: Any, entry: Dict[str, Any]
     ) -> None:
-        """A process's required state (Process.required_state) has no
+        """A process's required state (Process.required_initial_state) has no
         initialize() default: it is supplied, or comes from a restart."""
         if self._warm_start:
             return
-        missing = [nn for nn in cls.required_state if nn not in entry]
+        missing = [nn for nn in cls.required_initial_state if nn not in entry]
         if missing:
             raise ValueError(
                 f"process '{proc_name}' ({cls.__name__}): initial state "
@@ -620,7 +622,9 @@ class Model:
             if kkk not in ("class", "discretization")
         }
         self._raise_if_partial_state_group(proc_name, cls, init_dict)
-        self._raise_if_required_state_missing(proc_name, cls, init_dict)
+        self._raise_if_required_initial_state_missing(
+            proc_name, cls, init_dict
+        )
 
         # -- parameters: sourced DIS-FIRST (grid-owned variables live on
         # the Discretization's own dataset -- dis_hru/dis_seg style), then
@@ -1410,7 +1414,7 @@ class ModelMPI(Model):
             entry = self._process_dict[kk]
             # deterministic from process_dict: every rank raises together
             self._raise_if_partial_state_group(kk, cls, entry)
-            self._raise_if_required_state_missing(kk, cls, entry)
+            self._raise_if_required_initial_state_missing(kk, cls, entry)
             for name in cls.get_restart_variables():
                 if name in entry:
                     self._supplied_state[(mpi_grid, name)] = entry[name]

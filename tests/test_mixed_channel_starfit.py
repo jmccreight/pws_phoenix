@@ -36,9 +36,9 @@ Data-prep: Big Sandy initial_storage is nan and start_time NaT.
 pywatershed's node seeds storage at the NOR midpoint,
 (min_nor + max_nor)/2/100 * GRanD_CAP_MCM, at the epiweek of the
 control INIT time (one day before the first timestep) when start_time
-is NaT. That in-node fallback is deliberately not ported (our
-initialize_type raises on nan), so it is replicated HERE, test-side,
-and supplied in io units (the graph is cfs -> millions of cubic feet).
+is NaT. That in-node fallback is deliberately not ported, so it is
+replicated HERE, test-side, and supplied as the node's required
+initial state lake_storage_sub, in MCM (also in this cfs graph).
 
 Requires GENERATED pywatershed ucb_2yr test data (the drb tests use
 drb_2yr; ucb generation is the same pywatershed workflow) + the
@@ -61,7 +61,6 @@ from pws_phoenix.hydrology.pass_through_flow_node import PassThroughFlowNode
 from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import (
     StarfitFlowNode,
-    cms_to_cfs,
     nor_midpoint_initial_storage,
 )
 from pws_phoenix.model import Model
@@ -133,14 +132,14 @@ def graph_run(request, pyws_domain, big_sandy, tmp_path_factory):
         for nn in PYWS_INPUT_VOL_NAMES
     }
 
-    # -- Big Sandy's row: the GRAND parameters + the nan initial_storage
-    # -> NOR midpoint at the epiweek of one day BEFORE the first
-    # timestep (pywatershed's control init time), in io units (cfs
-    # graph: MCM -> Mcf) --
+    # -- Big Sandy's row: the GRAND parameters; its starting storage
+    # (the file's initial_storage is nan) = the NOR midpoint at the
+    # epiweek of one day BEFORE the first timestep (pywatershed's
+    # control init time), in MCM --
     starfit_params = {
         nn: float(big_sandy[nn])
         for nn, mm in StarfitFlowNode.fields.items()
-        if mm.kind == "parameter" and nn != "initial_storage"
+        if mm.kind == "parameter"
     }
     time0 = node_inputs["node_sroff_vol"]["time"].values[0]
     init_date = (
@@ -149,14 +148,17 @@ def graph_run(request, pyws_domain, big_sandy, tmp_path_factory):
         .astype(datetime.datetime)
     )
     init_stor_mcm = nor_midpoint_initial_storage(big_sandy, init_date)
-    starfit_params["initial_storage"] = (
-        init_stor_mcm * cms_to_cfs  # cm_to_cf == cms_to_cfs
-    )
 
     # -- the two INTERCEPTING insertions, collated in pywatershed's
     # scenario order (rows n_seg..n_seg+3): starfit, pt1, pt2, pt3 --
     pt3 = NewNode(PassThroughFlowNode, NHM_SEG_RESERVOIR_ABOVE, 9003)
-    starfit = NewNode(starfit_class, pt3, 999, starfit_params)
+    starfit = NewNode(
+        starfit_class,
+        pt3,
+        999,
+        starfit_params,
+        initial_state={"lake_storage_sub": init_stor_mcm},
+    )
     pt1 = NewNode(PassThroughFlowNode, NHM_SEG_PASS_THROUGH_ABOVE, 9001)
     pt2 = NewNode(PassThroughFlowNode, starfit, 9002)
     graph = splice_flow_graph(
@@ -179,6 +181,7 @@ def graph_run(request, pyws_domain, big_sandy, tmp_path_factory):
             "class": graph_class,
             "discretization": "nnodes",
             "parameters": graph.parameters,
+            **graph.initial_state,
             **node_inputs,
         },
     }

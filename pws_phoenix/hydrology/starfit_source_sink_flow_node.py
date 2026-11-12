@@ -48,6 +48,7 @@ from pws_phoenix.hydrology.source_sink_flow_node import SourceSinkFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import (
     StarfitFlowNode,
     initialize_starfit_type,
+    starfit_check_initial_state,
     istarf_release,
     post_release_calculations,
     pre_release_calculations,
@@ -204,6 +205,9 @@ class StarfitSourceSinkFlowNode:
         ),
     }
 
+    # the marching storage has no default: supplied, or from a restart
+    required_initial_state = ("lake_storage_sub",)
+
     # njit node contract (Dispatchers; dispatched by the graph kernel)
     prepare = _prepare
     substep = _substep
@@ -216,6 +220,12 @@ class StarfitSourceSinkFlowNode:
             n_substeps,
             io_in_cfs,
             StarfitSourceSinkFlowNode.type_name,
+        )
+
+    @staticmethod
+    def check_initial_state_type(dataset) -> list[str]:
+        return starfit_check_initial_state(
+            dataset, StarfitSourceSinkFlowNode.type_name
         )
 
     @staticmethod

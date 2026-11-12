@@ -490,16 +490,33 @@ the `epiweeks` dep).
   `dprst_stor_hru`). Supplying EVERY restart variable is the restart
   case, policed by the perfect-restart tests. Every `initialize()`
   was read for this (Nov 11, 2026): no other hook computes one
-  restart variable from another. `Process.required_state` (restart
-  variables with NO default): the Model raises at assembly when one
+  restart variable from another. `Process.required_initial_state`
+  (restart variables with NO default): the Model raises at assembly
+  when one
   is neither supplied nor coming from a restart; reported by
   `input_spec` as "required_initial_state". `check_initial_state()`
   (default: no problems) runs once after the starting state is in
   place (cold start or restart) and RETURNS messages -- the Model
   raises, on every rank under MPI (Allreduce, as for budgets). A
   composed FlowGraph takes the union of its node types'
-  `required_state` and calls their optional
-  `check_initial_state_type(dataset)`. LATER, when someone needs to set
+  `required_initial_state` and calls their optional
+  `check_initial_state_type(dataset)`. FIRST USER = the STARFIT
+  family (Nov 11, 2026): pywatershed's `initial_storage` PARAMETER
+  is no longer declared; `lake_storage_sub` [MCM, in a cfs graph
+  too -- the unit it is stored and restarted in] is required
+  initial state, nan on a reservoir's own row is reported by the
+  check; `NewNode(..., initial_state={...})` ->
+  `FlowGraphKit.initial_state` -> the graph's process_dict entry
+  (`insert_flow_graph` does it). WRINKLE: the requirement is by
+  CLASS composition, so a graph class that includes a STARFIT type
+  but has no reservoir rows still supplies an all-nan
+  `lake_storage_sub` (benchmarks/_flow_graph.py does). STILL
+  parameter-fed defaults (same smell, harder: the translation needs
+  maxima `initialize()` derives; and under calibration the starting
+  state must FOLLOW a calibrated maximum -- decide with the Phase 1
+  `reset` design): soil zone `soil_moist_init_frac` /
+  `soil_rechr_init_frac` / `ssstor_init_frac` (+ the ag pair),
+  runoff `dprst_frac_init`. LATER, when someone needs to set
   e.g. soil moisture alone (data assimilation): JLM's split
   `init_from_params() -> init_state -> init_diagnostic_state`, so
   derived state is recomputed from whatever state is in place --
@@ -842,7 +859,8 @@ incl. the ORDER-SENSITIVE `7.0*flow*24.0*60.0*60.0` weekly volumes
 so the njit substep reads it from `state`; epiweek 53 folds to 52 in
 `substep`. Parameters FREEZE at assembly => pywatershed's in-node
 data-prep moved OUT of the node: nan `Obs_MEANFLOW_CUMECS` <-
-`inflow_mean` is caller data-prep, nan `initial_storage`
+`inflow_mean` is caller data-prep, nan `initial_storage` [Nov 2026:
+no longer a parameter -- see "Initial state" in the Phase 2 backlog]
 (NOR-midpoint + start/end active-window gating) is NOT ported --
 `initialize_type` RAISES on both, scoped to its OWN rows via
 `node_type_names` attrs now stamped BEFORE the type hooks (small

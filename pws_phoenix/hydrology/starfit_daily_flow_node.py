@@ -69,6 +69,7 @@ import numpy as np
 from pws_phoenix.hydrology.starfit_flow_node import (
     StarfitFlowNode,
     initialize_starfit_type,
+    starfit_check_initial_state,
     istarf_release,
     starfit_advance_type,
     starfit_finalize,
@@ -228,6 +229,11 @@ class StarfitDailyFlowNode:
         ),
     }
 
+    # the starting storage has no default: supplied, or from a
+    # restart (the first substep of a cold start copies it into the
+    # daily marching lake_storage)
+    required_initial_state = ("lake_storage_sub",)
+
     # njit node contract (Dispatchers; dispatched by the graph kernel)
     prepare = _prepare
     substep = _substep
@@ -250,6 +256,12 @@ class StarfitDailyFlowNode:
             io_in_cfs,
             StarfitDailyFlowNode.type_name,
             compute_daily=True,
+        )
+
+    @staticmethod
+    def check_initial_state_type(dataset) -> list[str]:
+        return starfit_check_initial_state(
+            dataset, StarfitDailyFlowNode.type_name
         )
 
     @staticmethod

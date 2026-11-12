@@ -194,6 +194,11 @@ def phoenix_run(inflow_da, tmp_path_factory):
             "class": graph_class,
             "discretization": "nnodes",
             "parameters": graph_params,
+            # required initial state [MCM]: the file's initial_storage,
+            # as the pywatershed nodes above start from
+            "lake_storage_sub": xr.DataArray(
+                sub["initial_storage"].values, dims="nnodes"
+            ),
             "node_sroff_vol": vol_input(
                 "node_sroff_vol",
                 inflow_da.values * float(S_PER_TIME),

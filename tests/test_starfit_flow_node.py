@@ -33,9 +33,10 @@ exactly the pywatershed autotest matrix):
   means at 1e-7, plus a check that the applied diversion equals the
   request (limited only where a reservoir drains to the minimum).
 - each in cms (io_in_cfs=False; the reference's native units) AND cfs
-  (io_in_cfs=True; inflows/initial_storage/answers converted with the
-  pywatershed constants, as its autotest does -- checks the io-unit
-  boundary layer through the same numerics).
+  (io_in_cfs=True; inflows/answers converted with the pywatershed
+  constants, as its autotest does -- checks the io-unit boundary
+  layer through the same numerics). The starting storage is supplied
+  as lake_storage_sub in MCM in BOTH (state is stored in MCM).
 
 Data-prep here (pywatershed does these inside the node; parameters
 freeze at assembly in this framework):
@@ -105,6 +106,15 @@ def graph_params():
 
 
 @pytest.fixture(scope="module")
+def initial_storage():
+    """The reservoirs' starting storage [MCM] (the parameter file's
+    initial_storage): supplied as the required lake_storage_sub."""
+    with xr.load_dataset(PARAM_FILE) as ds:
+        sub = ds.isel(nreservoirs=STARFIT_INDS_TEST).load()
+    return xr.DataArray(sub["initial_storage"].values, dims="nnodes")
+
+
+@pytest.fixture(scope="module")
 def inflow_da():
     with xr.load_dataset(INFLOW_FILE) as ds:
         return ds["lake_inflow"].isel(grand_id=STARFIT_INDS_TEST).load()
@@ -129,7 +139,9 @@ SCENARIOS = [f"{nn}-{uu}" for nn in NODE_CLASSES for uu in ("cms", "cfs")]
 
 
 @pytest.fixture(scope="module", params=SCENARIOS)
-def graph_run(request, graph_params, inflow_da, tmp_path_factory):
+def graph_run(
+    request, graph_params, initial_storage, inflow_da, tmp_path_factory
+):
     class_key, units = request.param.rsplit("-", 1)
     node_class = NODE_CLASSES[class_key]
     io_in_cfs = units == "cfs"
@@ -183,13 +195,9 @@ def graph_run(request, graph_params, inflow_da, tmp_path_factory):
         )
 
     # io-side data arrive in the graph's flow units (the pywatershed
-    # autotest conversions): initial_storage x cm_to_cf and inflows x
-    # cms_to_cfs when cfs (io_factor = 1.0 when cms)
+    # autotest conversions): inflows x cms_to_cfs when cfs (io_factor
+    # = 1.0 when cms). The supplied lake_storage_sub is MCM in both.
     params = graph_params.copy()  # structure only; arrays shared
-    params["initial_storage"] = (
-        "nnodes",
-        graph_params["initial_storage"].values * io_factor,
-    )
     extra_inputs = {}
     if node_class is StarfitSourceSinkFlowNode:
         # the pywatershed autotest setup for the combined node (its
@@ -208,6 +216,7 @@ def graph_run(request, graph_params, inflow_da, tmp_path_factory):
             "class": graph_class,
             "discretization": "nnodes",
             "parameters": params,
+            "lake_storage_sub": initial_storage,
             "node_sroff_vol": vol_input(
                 "node_sroff_vol",
                 inflow_da.values * io_factor * float(S_PER_TIME),
