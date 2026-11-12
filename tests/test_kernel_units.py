@@ -27,8 +27,9 @@ numpy, run through the harness's ``func=``); the PRMSSoilzone family
 a bool kernel option run both ways, coverage accumulated); the
 PRMSSoilzoneAg family (the four soilzone helpers again, imported by
 name so patched in the Ag module; two bool options; the per-step area
-update, pre and post kernels via ``func=``). Harness:
-tests/kernel_units.py.
+update, pre and post kernels via ``func=``); PRMSRunoffAg (four ag
+helpers beside the base ones; the post-kernel area update via
+``func=``). Harness: tests/kernel_units.py.
 Synthetic data, CI-able.
 """
 
@@ -56,6 +57,7 @@ from pws_phoenix.hydrology.prms_canopy import PRMSCanopy  # noqa: E402
 from pws_phoenix.hydrology.prms_channel import PRMSChannel  # noqa: E402
 from pws_phoenix.hydrology.prms_runoff import (  # noqa: E402
     PRMSRunoff,
+    PRMSRunoffAg,
     PRMSRunoffNoDprst,
 )
 from pws_phoenix.hydrology.prms_soilzone import (  # noqa: E402
@@ -950,9 +952,11 @@ RUNOFF_CLASSES = [PRMSRunoffNoDprst, PRMSRunoff]
 def runoff_patches(cls) -> dict:
     """RUNOFF_PATCHES, less dprst_comp for the NoDprst kernel (a
     patched helper is coverage-traced, so it must be one the kernel
-    calls)."""
+    calls); RUNOFF_AG_PATCHES for the Ag kernel."""
     if cls is PRMSRunoff:
         return RUNOFF_PATCHES
+    if cls is PRMSRunoffAg:
+        return RUNOFF_AG_PATCHES
     return {
         kk: vv for kk, vv in RUNOFF_PATCHES.items() if kk[1] != "dprst_comp"
     }
@@ -1066,6 +1070,145 @@ def test_runoff_per_day_is_load_bearing(runoff_data, name):
             patches=RUNOFF_PATCHES,
             per_day=PER_DAY - {name},
         )
+
+
+# ----------------------------------------------------------------------
+# runoff Ag
+# ----------------------------------------------------------------------
+
+# the Ag kernel calls compute_infil (pervious) and the four ag helpers;
+# dprst_comp_ag replaces dprst_comp
+RUNOFF_AG_PATCHES = {
+    kk: vv for kk, vv in RUNOFF_PATCHES.items() if kk[1] != "dprst_comp"
+} | {
+    (prms_runoff, "ag_comp"): prms_runoff.ag_comp.py_func,
+    (prms_runoff, "check_capacity_ag"): prms_runoff.check_capacity_ag.py_func,
+    (prms_runoff, "compute_infil_ag"): prms_runoff.compute_infil_ag.py_func,
+    (prms_runoff, "dprst_comp_ag"): prms_runoff.dprst_comp_ag.py_func,
+}
+
+
+@pytest.fixture
+def runoff_ag_data(runoff_data) -> dict[str, np.ndarray]:
+    """runoff_data plus an agricultural fifth of every hru (none on the
+    dry hru 0 and the lake 11), so the base hrus' forcings drive the
+    same branches of the ag helpers (ag soil moisture 3.9 on hru 5 for
+    the capacity excess, 30 on hru 8 for the smidx cap), and two more
+    hrus for dprst_comp_ag's explicit zero-maximum-volume branches:
+
+    20 no open depressions (dprst_frac_open 0)
+    21 no closed depressions (dprst_frac_open 1; every nhm domain)
+    """
+    nhru = 22
+
+    def grow(arr):
+        # hru 0 holds the defaults (dry, 100 acres, 10% impervious ...)
+        return np.concatenate([arr, arr[[0, 0]]])
+
+    def at(default, dtype=np.float64, **by_hru):
+        arr = np.full(nhru, default, dtype=dtype)
+        for key, value in by_hru.items():
+            arr[int(key[1:])] = value
+        return arr
+
+    data = {
+        kk: grow(vv) if np.ndim(vv) else vv for kk, vv in runoff_data.items()
+    }
+    zeros = np.zeros(nhru)
+    data["dprst_frac_open"][20] = 0.0
+    data["dprst_area_open_max"][20] = 0.0
+    data["dprst_vol_open_max"][20] = 0.0
+    data["dprst_vol_thres_open"][20] = 0.0
+    data["dprst_vol_open"][20] = 0.0
+    data["dprst_frac_clos"][20] = 1.0
+    data["dprst_area_clos_max"][20] = 5.0
+    data["dprst_vol_clos_max"][20] = 20.0
+    data["dprst_frac_open"][21] = 1.0
+    data["dprst_area_open_max"][21] = 5.0
+    data["dprst_vol_open_max"][21] = 20.0
+    data["dprst_vol_thres_open"][21] = 10.0
+    data["dprst_frac_clos"][21] = 0.0
+    data["dprst_area_clos_max"][21] = 0.0
+    data["dprst_vol_clos_max"][21] = 0.0
+    data["dprst_vol_clos"][21] = 0.0
+    ag_frac = at(0.2, h0=0.0, h11=0.0)
+    data |= {
+        "ag_frac": ag_frac,
+        "ag_area": ag_frac * data["hru_area"],
+        "hru_perv": at(65.0, h0=85.0, h11=85.0, h16=2.0),
+        "hru_frac_perv": at(0.65, h0=0.85, h11=0.85, h16=0.2),
+        "ag_soil_moist_prev": at(1.0, h5=3.9, h8=30.0),
+        "ag_soil_rechr_prev": at(0.5),
+        "ag_soil_moist_max": at(4.0),
+        "ag_soil_rechr_max": at(1.5),
+        "infil_ag": zeros.copy(),
+        "hru_sroff_ag": zeros.copy(),
+        "infil_perv_hru": zeros.copy(),
+        "infil_ag_hru": zeros.copy(),
+    }
+    return data
+
+
+def test_runoff_ag_kernel_units(runoff_ag_data):
+    out, out_in_net_rain = runoff_both_options(PRMSRunoffAg, runoff_ag_data)
+    assert out["infil_ag"][0] == 0.0  # no ag area
+    assert out["hru_sroff_ag"][1] > 0.0 and out["infil_ag"][1] > 0.0
+    assert out["infil_ag"][2] > 0.0  # changeover water infiltrates ...
+    assert out_in_net_rain["infil_ag"][2] == 0.0  # ... unless in net_rain
+    assert out["infil_ag"][3] > 0.0  # rain on a pack: capacity check
+    assert out["infil_ag"][4] == pytest.approx(0.3)  # all melt infiltrates
+    # over capacity: snowinfil_max x 1 day + capacity (4 - 3.9)
+    assert out["infil_ag"][5] == pytest.approx(0.5 + 0.1)
+    assert out["hru_sroff_ag"][6] > 0.0  # smidx on melt + rain
+    assert out["hru_sroff_ag"][7] == 0.0  # capacity check
+    # smidx > 25 (carea_max) and the carea_max clamp: 0.5 - 0.6 x 0.5
+    assert out["infil_ag"][8] == pytest.approx(0.2)
+    assert out["infil_ag"][9] == pytest.approx(0.2)
+    assert out["sroff"][11] == 0.0  # lake
+    assert out["hru_sroff_ag"][12] == 0.0  # driven negative, clamped
+    assert out["dprst_in"][1] > 0.0
+    assert out["dprst_insroff_hru"][1] > 0.0
+    assert out["dprst_vol_open_frac"][20] == 0.0
+    assert out["dprst_vol_clos_frac"][20] > 0.0
+    assert out["dprst_vol_open_frac"][21] > 0.0
+    assert out["dprst_vol_clos_frac"][21] == 0.0
+
+
+def test_runoff_ag_post_areas_units(runoff_ag_data):
+    data = runoff_ag_data | {
+        "infil": np.full(22, 0.3),
+        "infil_ag": np.full(22, 0.1),
+        "sroff": np.full(22, 0.01),
+        "hru_impervstor": np.full(22, 0.02),
+        "dprst_stor_hru": np.full(22, 0.5),
+    }
+    out = assert_kernel_dimensionally_consistent(
+        PRMSRunoffAg, data, func=PRMSRunoffAg._post_areas.py_func
+    )
+    assert out["ag_area"][1] == 20.0
+    assert out["hru_perv"][1] == 65.0
+    assert out["hru_perv"][0] == 85.0  # no ag area
+    assert out["hru_frac_perv"][16] == pytest.approx(0.2)
+    assert out["infil_hru"][1] == pytest.approx(0.3 * 0.65 + 0.1 * 0.2)
+    assert out["infil_hru"][0] == pytest.approx(0.3 * 0.85)
+    assert out["hru_impervstor_change"][1] == 0.02
+    assert out["dprst_stor_hru_change"][1] == 0.5
+    assert out["sroff_vol"][1] == pytest.approx(0.01 * 3000.0)
+
+
+@pytest.mark.parametrize(
+    "dropped",
+    ["ag_comp", "check_capacity_ag", "compute_infil_ag", "dprst_comp_ag"],
+)
+def test_runoff_ag_patches_are_load_bearing(runoff_ag_data, dropped):
+    """Each ag helper patch is needed: a compiled helper cannot type a
+    Quantity (the float patches are checked on the base kernel)."""
+    patches = {
+        kk: vv for kk, vv in RUNOFF_AG_PATCHES.items() if kk[1] != dropped
+    }
+    assert len(patches) == len(RUNOFF_AG_PATCHES) - 1
+    with pytest.raises(numba.core.errors.TypingError, match="nopython"):
+        run_quantified(PRMSRunoffAg, runoff_ag_data, patches=patches)
 
 
 # ----------------------------------------------------------------------

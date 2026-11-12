@@ -457,7 +457,16 @@ module while the helpers' own bodies read prms_soilzone's floats;
 `_ISCLOSE_ATOL_ACRES`; ObsET's missing-value sentinel is in inches
 (`_AET_MISSING_INCHES`) and pint's `==`/`!=` with a bare number is
 False/True, NEVER an error -- only the magnitude comparison catches a
-bare sentinel; no marker needed; no declaration errors. pint accepts a bare zero in `+` and comparisons but NOT
+bare sentinel; no marker needed; no declaration errors. PRMSRunoffAg
+(Nov 11, 2026; the kernel under both bool options + `_post_areas` via
+`func=`; four ag helpers beside the base ones, `dprst_comp_ag`
+replacing `dprst_comp`): no declaration errors; the same per-unit
+zero/near-zero names as the base kernel; `dprst_comp_ag`'s explicit
+`else: ... = 0.0` branches for a zero maximum volume are reachable
+for open-only or closed-only depressions (two fixture hrus) but not
+for both (initialize() rejects `dprst_depth_avg == 0`) -> one marker,
+plus the two never-true evap clamps mirrored from `dprst_comp`. THE
+AG FAMILY IS DONE. pint accepts a bare zero in `+` and comparisons but NOT
 assigned into a dimensional array or after scaling (`0.0 * cov >
 potet`), so a kernel's zeros of a working unit are a named module
 float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code

@@ -579,7 +579,7 @@ def ag_comp(
     moisture; smidx module hardwired upstream, carea unimplemented).
     ag_soil_rechr_prev is in upstream's signature but unused."""
     smidx = ag_soil_moist_prev + 0.5 * ptc
-    if smidx > 25.0:
+    if smidx > _SMIDX_MAX_INCHES:
         ca_fraction = carea_max
     else:
         ca_fraction = smidx_coef * 10.0 ** (smidx_exp * smidx)
@@ -638,8 +638,8 @@ def compute_infil_ag(
     (upstream _compute_infil_ag; ag_soil_rechr_max is in its
     signature but unused; note its rain-on-snow check is HARDCODED
     net_rain < nearzero -- upstream's flag does not reach it)."""
-    infil_ag = 0.0
-    sroff_ag = 0.0
+    infil_ag = _ZERO_INCHES
+    sroff_ag = _ZERO_INCHES
 
     # Process intcp_changeover
     if intcp_changeover > 0.0 and not intcp_changeover_in_net_rain:
@@ -677,7 +677,7 @@ def compute_infil_ag(
     if snowmelt > 0.0:
         infil_ag = infil_ag + snowmelt
         if hru_type == _LAND:
-            if (pkwater_equiv > 0.0) or (net_rain < _NEARZERO):
+            if (pkwater_equiv > 0.0) or (net_rain < _NEARZERO_INCHES):
                 # Check capacity
                 infil_ag, sroff_ag = check_capacity_ag(
                     ag_soil_moist_prev,
@@ -702,7 +702,7 @@ def compute_infil_ag(
 
     elif pkwater_equiv < _DNEARZERO:
         # No snowpack
-        if net_snow < _NEARZERO and through_rain > 0.0:
+        if net_snow < _NEARZERO_INCHES and through_rain > 0.0:
             infil_ag = infil_ag + through_rain
             if hru_type == _LAND:
                 infil_ag, sroff_ag = ag_comp(
@@ -783,7 +783,7 @@ def dprst_comp_ag(
     """
     inflow = through_rain + snowmelt
 
-    dprst_in = 0.0
+    dprst_in = _ZERO_ACRE_INCHES
     if dprst_area_open_max > 0.0:
         dprst_in = inflow * dprst_area_open_max
         dprst_vol_open = dprst_vol_open + dprst_in
@@ -795,9 +795,9 @@ def dprst_comp_ag(
     dprst_in = dprst_in / hru_area
 
     # Add pervious surface runoff fraction to depressions
-    dprst_srp = 0.0
-    dprst_sri = 0.0
-    dprst_sra = 0.0
+    dprst_srp = _ZERO_INCHES
+    dprst_sri = _ZERO_INCHES
+    dprst_sra = _ZERO_INCHES
 
     if srp > 0.0:
         tmp = srp * perv_frac * sro_to_dprst_perv * hru_area
@@ -811,7 +811,7 @@ def dprst_comp_ag(
             dprst_vol_clos = dprst_vol_clos + dprst_srp_clos
         srp = srp - dprst_srp / perv_frac
         if srp < 0.0:
-            srp = 0.0
+            srp = _ZERO_INCHES
 
     if sri > 0.0:
         tmp = sri * imperv_frac * sro_to_dprst_imperv * hru_area
@@ -825,7 +825,7 @@ def dprst_comp_ag(
             dprst_vol_clos = dprst_vol_clos + dprst_sri_clos
         sri = sri - dprst_sri / imperv_frac
         if sri < 0.0:
-            sri = 0.0
+            sri = _ZERO_INCHES
 
     # Add pervious and impervious contributions first
     dprst_insroff_hru = dprst_srp + dprst_sri
@@ -843,10 +843,10 @@ def dprst_comp_ag(
             dprst_vol_clos = dprst_vol_clos + dprst_sra_clos
         sroff_ag = sroff_ag - dprst_sra / ag_frac
         if sroff_ag < 0.0:
-            sroff_ag = 0.0
+            sroff_ag = _ZERO_INCHES
         dprst_insroff_hru = dprst_insroff_hru + dprst_sra
 
-    dprst_area_open = 0.0
+    dprst_area_open = _ZERO_ACRES
     if dprst_vol_open > 0.0:
         open_vol_r = dprst_vol_open / dprst_vol_open_max
         if open_vol_r < _NEARZERO:
@@ -860,7 +860,7 @@ def dprst_comp_ag(
             dprst_area_open = dprst_area_open_max
 
     if dprst_area_clos_max > 0.0:
-        dprst_area_clos = 0.0
+        dprst_area_clos = _ZERO_ACRES
         if dprst_vol_clos > 0.0:
             clos_vol_r = dprst_vol_clos / dprst_vol_clos_max
             if clos_vol_r < _NEARZERO:
@@ -876,10 +876,10 @@ def dprst_comp_ag(
     # Evaporate water from depressions
     unsatisfied_et = avail_et
     dprst_avail_et = potet * (1.0 - snowcov_area) * dprst_et_coef
-    dprst_evap_hru = 0.0
+    dprst_evap_hru = _ZERO_INCHES
     if dprst_avail_et > 0.0:
-        dprst_evap_open = 0.0
-        dprst_evap_clos = 0.0
+        dprst_evap_open = _ZERO_ACRE_INCHES
+        dprst_evap_clos = _ZERO_ACRE_INCHES
         if dprst_area_open > 0.0:
             dprst_evap_open = min(
                 dprst_area_open * dprst_avail_et, dprst_vol_open
@@ -889,8 +889,10 @@ def dprst_comp_ag(
             )
             if dprst_evap_open / hru_area > unsatisfied_et:
                 dprst_evap_open = unsatisfied_et * hru_area
+            # never true: dprst_evap_open starts as min(..., dprst_vol_open)
+            # and the unsatisfied-ET limit only lowers it
             if dprst_evap_open > dprst_vol_open:
-                dprst_evap_open = dprst_vol_open
+                dprst_evap_open = dprst_vol_open  # units-test: unreachable
             unsatisfied_et = unsatisfied_et - dprst_evap_open / hru_area
             dprst_vol_open = dprst_vol_open - dprst_evap_open
 
@@ -900,20 +902,22 @@ def dprst_comp_ag(
             )
             if dprst_evap_clos / hru_area > unsatisfied_et:
                 dprst_evap_clos = unsatisfied_et * hru_area
+            # never true: dprst_evap_clos starts as min(..., dprst_vol_clos)
+            # and the unsatisfied-ET limit only lowers it
             if dprst_evap_clos > dprst_vol_clos:
-                dprst_evap_clos = dprst_vol_clos
+                dprst_evap_clos = dprst_vol_clos  # units-test: unreachable
             dprst_vol_clos = dprst_vol_clos - dprst_evap_clos
 
         dprst_evap_hru = (dprst_evap_open + dprst_evap_clos) / hru_area
 
     # Compute seepage
-    dprst_seep_hru = 0.0
+    dprst_seep_hru = _ZERO_INCHES
     if dprst_vol_open > 0.0:
         seep_open = dprst_vol_open * dprst_seep_rate_open
         dprst_vol_open = dprst_vol_open - seep_open
         if dprst_vol_open < 0.0:
             seep_open = seep_open + dprst_vol_open
-            dprst_vol_open = 0.0
+            dprst_vol_open = _ZERO_ACRE_INCHES
         dprst_seep_hru = seep_open / hru_area
 
     if dprst_area_clos_max > 0.0:
@@ -922,15 +926,17 @@ def dprst_comp_ag(
             dprst_vol_clos = dprst_vol_clos - seep_clos
             if dprst_vol_clos < 0.0:
                 seep_clos = seep_clos + dprst_vol_clos
-                dprst_vol_clos = 0.0
+                dprst_vol_clos = _ZERO_ACRE_INCHES
             dprst_seep_hru = dprst_seep_hru + seep_clos / hru_area
 
     # Compute open surface runoff
-    dprst_sroff_hru = 0.0
+    dprst_sroff_hru = _ZERO_INCHES
     if dprst_vol_open > 0.0:
-        dprst_sroff_hru = max(0.0, dprst_vol_open - dprst_vol_open_max)
+        dprst_sroff_hru = max(
+            _ZERO_ACRE_INCHES, dprst_vol_open - dprst_vol_open_max
+        )
         dprst_sroff_hru = dprst_sroff_hru + max(
-            0.0,
+            _ZERO_ACRE_INCHES,
             (dprst_vol_open - dprst_sroff_hru - dprst_vol_thres_open)
             * dprst_flow_coef,
         )
@@ -954,7 +960,9 @@ def dprst_comp_ag(
             dprst_vol_open_max + dprst_vol_clos_max
         )
     else:
-        dprst_vol_frac = 0.0
+        # never true: called only where dprst_area_max > 0, and
+        # initialize() rejects dprst_depth_avg == 0 there
+        dprst_vol_frac = 0.0  # units-test: unreachable
 
     return (
         dprst_in,
@@ -2684,25 +2692,25 @@ class PRMSRunoffAg(PRMSRunoff):
         for ii in numba.prange(nhru):
             soil_moist_prev = soil_lower_prev[ii] + soil_rechr_prev[ii]
 
-            runoff = 0.0
+            runoff = _ZERO_ACRE_INCHES
             hruarea = hru_area[ii]
             perv_area = hru_perv[ii]
             perv_frac = hru_frac_perv[ii]
-            srp = 0.0
-            sri = 0.0
-            sroff_ag = 0.0
-            hru_sroffp[ii] = 0.0
-            hru_sroff_ag[ii] = 0.0
+            srp = _ZERO_INCHES
+            sri = _ZERO_INCHES
+            sroff_ag = _ZERO_INCHES
+            hru_sroffp[ii] = _ZERO_INCHES
+            hru_sroff_ag[ii] = _ZERO_INCHES
             contrib_fraction[ii] = 0.0
-            infil[ii] = 0.0
-            infil_ag[ii] = 0.0
+            infil[ii] = _ZERO_INCHES
+            infil_ag[ii] = _ZERO_INCHES
             hruarea_imperv = hru_imperv[ii]
             imperv_frac = 0.0
             if hruarea_imperv > 0.0:
                 imperv_frac = hru_percent_imperv[ii]
-                hru_sroffi[ii] = 0.0
-                imperv_evap[ii] = 0.0
-                hru_impervevap[ii] = 0.0
+                hru_sroffi[ii] = _ZERO_INCHES
+                imperv_evap[ii] = _ZERO_INCHES
+                hru_impervevap[ii] = _ZERO_INCHES
 
             avail_et = potet[ii] - snow_evap[ii] - hru_intcpevap[ii]
 
@@ -2766,7 +2774,7 @@ class PRMSRunoffAg(PRMSRunoff):
 
             # dprst incl. agricultural runoff routing (frozen ground
             # hardwired OFF upstream)
-            dprst_in[ii] = 0.0
+            dprst_in[ii] = _ZERO_INCHES
             dprst_chk = False
             if dprst_area_max[ii] > 0.0:
                 dprst_chk = True
@@ -2827,7 +2835,7 @@ class PRMSRunoffAg(PRMSRunoff):
                 runoff = runoff + dprst_sroff_hru[ii] * hruarea
 
             # runoff for pervious, impervious, and agricultural areas
-            srunoff = 0.0
+            srunoff = _ZERO_INCHES
             if hru_type[ii] == _LAND:
                 runoff = runoff + srp * perv_area + sri * hruarea_imperv
                 if ag_area[ii] > 0.0:
@@ -2852,12 +2860,12 @@ class PRMSRunoffAg(PRMSRunoff):
                     if avail_et < 0.0:
                         hru_impervevap[ii] = hru_impervevap[ii] + avail_et
                         if hru_impervevap[ii] < 0.0:
-                            hru_impervevap[ii] = 0.0
+                            hru_impervevap[ii] = _ZERO_INCHES
                         imperv_evap[ii] = imperv_evap[ii] / imperv_frac
                         imperv_stor[ii] = (
                             imperv_stor[ii] - avail_et / imperv_frac
                         )
-                        avail_et = 0.0
+                        avail_et = _ZERO_INCHES
 
                     hru_impervstor[ii] = imperv_stor[ii] * imperv_frac
 
