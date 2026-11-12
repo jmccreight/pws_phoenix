@@ -182,7 +182,7 @@ def case_run(request, tmp_path_factory):
         },
     }
     if request.param == "groundwater":
-        process_dict["proc"]["gwstor_init"] = parameters["gwstor_init"]
+        process_dict["proc"]["gwres_stor"] = parameters["gwstor_init"]
     control = {
         "output_var_names": list(case["answers"]),
         "output_serial_zarr": out_dir / "proc.zarr",

@@ -54,7 +54,6 @@ from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import (
     _OMEGA,
     StarfitFlowNode,
-    cms_to_cfs,
 )
 from pws_phoenix.hydrology.starfit_source_sink_flow_node import (
     StarfitSourceSinkFlowNode,
@@ -144,6 +143,7 @@ def _graph_model(
     n_extra,
     extra_params=None,
     extra_inputs=None,
+    initial_state=None,
 ) -> Model:
     """Assemble the nnodes Discretization + the one-process Model from
     the composed topology (the tests' shared tail)."""
@@ -188,6 +188,7 @@ def _graph_model(
             "parameters": graph_params,
             **node_inputs,
             **(extra_inputs or {}),
+            **(initial_state or {}),
         },
     }
     assert n_nodes == node_inputs["node_sroff_vol"].shape[1]
@@ -249,13 +250,15 @@ def _all_types_class():
     )
 
 
-def _all_types_extras(n_nodes: int, times) -> tuple[dict, dict]:
+def _all_types_extras(n_nodes: int, times) -> tuple[dict, dict, dict]:
     """What the seven-type class DECLARES beyond the channel's fields,
     with no member rows: every STARFIT parameter nan, flow_min and
     source_sink_storage_min zero, obs_flow -1 (pass through) and a
     zero source_sink request on every node. The type hooks only read
     their own rows, so a graph with no reservoir/obsin/source_sink
-    nodes runs on these as-is."""
+    nodes runs on these as-is. Third item: the STARFIT family's
+    REQUIRED initial state (lake_storage_sub [MCM]), nan on every
+    node (the class declares it even with no reservoir rows)."""
     extra_params = {
         nn: np.full(n_nodes, np.nan)
         for nn, mm in StarfitFlowNode.fields.items()
@@ -276,7 +279,12 @@ def _all_types_extras(n_nodes: int, times) -> tuple[dict, dict]:
         "node_obs_flow": flat_input("node_obs_flow", -1.0),
         "node_source_sink": flat_input("node_source_sink", 0.0),
     }
-    return extra_params, extra_inputs
+    initial_state = {
+        "lake_storage_sub": xr.DataArray(
+            np.full(n_nodes, np.nan), dims="nnodes"
+        )
+    }
+    return extra_params, extra_inputs, initial_state
 
 
 def _all_types_class_channel_graph(domain: str) -> Model:
@@ -289,7 +297,7 @@ def _all_types_class_channel_graph(domain: str) -> Model:
         n_seg, graph_class.node_type_code("prms_channel"), dtype=np.int64
     )
     times = node_vol_input("sroff_vol", 0)["time"].values
-    extra_params, extra_inputs = _all_types_extras(n_seg, times)
+    extra_params, extra_inputs, initial_state = _all_types_extras(n_seg, times)
     return _graph_model(
         dis_seg,
         channel,
@@ -300,6 +308,7 @@ def _all_types_class_channel_graph(domain: str) -> Model:
         0,
         extra_params,
         extra_inputs,
+        initial_state,
     )
 
 
@@ -386,9 +395,11 @@ def _all_types_graph(domain: str) -> Model:
         new["starfit_source_sink"],
     ]
     times = node_vol_input("sroff_vol", n_extra)["time"].values
-    extra_params, extra_inputs = _all_types_extras(n_nodes, times)
+    extra_params, extra_inputs, initial_state = _all_types_extras(
+        n_nodes, times
+    )
     for nn in extra_params:
-        if nn in StarfitFlowNode.fields and nn != "initial_storage":
+        if nn in StarfitFlowNode.fields:
             extra_params[nn][reservoir_rows] = float(big_sandy[nn])
 
     init_date = (
@@ -396,10 +407,9 @@ def _all_types_graph(domain: str) -> Model:
         .astype("datetime64[s]")
         .astype(datetime.datetime)
     )
-    init_stor_mcm = _nor_midpoint_initial_storage(big_sandy, init_date)
-    extra_params["initial_storage"][reservoir_rows] = (
-        init_stor_mcm
-        * cms_to_cfs  # cfs graph: MCM -> Mcf (cm_to_cf == cms_to_cfs)
+    # MCM, also in this cfs graph (the unit the state is stored in)
+    initial_state["lake_storage_sub"].values[reservoir_rows] = (
+        _nor_midpoint_initial_storage(big_sandy, init_date)
     )
 
     # -- per-step inputs: the source_sink splice stays neutral (0.0),
@@ -417,6 +427,7 @@ def _all_types_graph(domain: str) -> Model:
         n_extra,
         extra_params,
         extra_inputs,
+        initial_state,
     )
 
 

@@ -69,7 +69,6 @@ def _write_input_file(path, toy, *, param_up_0_percent, forcing_in_feet):
             param_up_0=param_up_0,
             param_up_1=up["param_up_1"],
             param_shared_name=up["param_shared_name"],
-            flow_initial=toy["up_flow_initial"],
         )
     )
     for name, key in UNITS.items():
@@ -91,13 +90,18 @@ def _stamped_lower(toy):
     return {
         "parameters": low,
         "forcing_low": forcing_low,
-        "storage_initial": toy["low_storage_initial"],
+        "storage": toy["low_storage_initial"],
     }
 
 
 def _build(data_dir, toy, weights, tag, mode="convert"):
     process_dict = {
-        "upper": {"class": Upper, "discretization": "hru"},
+        "upper": {
+            "class": Upper,
+            "discretization": "hru",
+            # initial state: full extent, under the variable's own name
+            "flow": toy["up_flow_initial"],
+        },
         "lower": {
             "class": Lower,
             "discretization": "segment",

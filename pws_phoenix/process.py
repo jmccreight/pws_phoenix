@@ -61,7 +61,7 @@ class DataArrayMeta:
             forcing_up  = DataArrayMeta(kind="input",     dims=("space",),
                                        dtype=np.float64)
             flow       = DataArrayMeta(kind="variable",  dims=("space",),
-                                       dtype=np.float64, initial="flow_initial")
+                                       dtype=np.float64, restart=True)
     """
 
     kind: Literal[
@@ -79,14 +79,19 @@ class DataArrayMeta:
     dims: tuple[str, ...]
     dtype: type
     description: str = ""
-    initial: str | None = None  # kwarg name supplying initial values
     # PROGNOSTIC state marker (kind="variable" only): the variable
     # belongs in a restart file -- the minimal set that, restored at a
     # time step, reproduces the continuous run exactly (the perfect-
-    # restart tests police completeness). Flag CURRENT state variables
-    # only, never their *_prev copies: advance() runs before any
-    # calculate(), so restored currents regenerate the prevs. Also the
-    # natural cut at the prognostic variables for state-updating
+    # restart tests police completeness). It is also the INITIAL-STATE
+    # surface: at a cold start initialize() sets each restart
+    # variable's DEFAULT, and a value supplied in the process_dict
+    # entry under the variable's OWN name overrides it (Nov 2026;
+    # replaced the `initial=` seams). Not checked for nan: nan is a
+    # legitimate state value for some (e.g. stream temp's
+    # never-has-flow marker, FlowGraph union rows). Flag CURRENT state
+    # variables only, never their *_prev copies: advance() runs before
+    # any calculate(), so restored currents regenerate the prevs. Also
+    # the natural cut at the prognostic variables for state-updating
     # techniques (JLM, Aug 2026).
     restart: bool = False
     # SUPPLY-OR-DERIVE provenance (kind="parameter" only). THE
@@ -298,6 +303,21 @@ class Process(ABC):
     # dict.
     budgets: dict[str, dict[str, tuple[str, ...]]] = {}
 
+    # Restart variables that must be SUPPLIED TOGETHER as initial state
+    # (the Model raises on part of a group; none of it, or a restart,
+    # is fine). Declare a group when initialize() computes some of its
+    # members from the DEFAULTS of others (e.g. soil_lower =
+    # soil_moist - soil_rechr): supplied state is written after
+    # initialize(), so supplying one member alone would leave the rest
+    # computed from a default that was then replaced. A variant
+    # inherits the tuple or redeclares it whole.
+    state_groups: tuple[tuple[str, ...], ...] = ()
+
+    # Restart variables with NO default: initialize() leaves them
+    # unset, so they must be supplied as initial state or come from a
+    # restart. The Model raises at assembly when one is missing.
+    required_initial_state: tuple[str, ...] = ()
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         Process._registry[cls.__name__] = cls
@@ -350,6 +370,14 @@ class Process(ABC):
         Model freezes them (read-only) after all hooks run. Contract:
         LOCAL (no collectives), reads params/dis vars off self._refs, no
         Time (construction, not runtime)."""
+
+    def check_initial_state(self) -> list[str]:
+        """Called ONCE by the Model after the starting state is in place
+        (initialize() defaults, then supplied state or a restart).
+        Returns this rank's problems as messages (default: none).
+        Contract: LOCAL (no collectives), never raises -- the Model
+        raises, on every rank under MPI."""
+        return []
 
     @abstractmethod
     def advance(self) -> None:

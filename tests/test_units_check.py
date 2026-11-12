@@ -46,14 +46,14 @@ def _process_dict(toy: dict) -> dict:
             "discretization": "hru",
             "parameters": toy["up_params"],
             "forcing_up": toy["forcing_up"],
-            "flow_initial": toy["up_flow_initial"],
+            "flow": toy["up_flow_initial"],
         },
         "lower": {
             "class": Lower,
             "discretization": "segment",
             "parameters": toy["low_params"],
             "forcing_low": toy["forcing_low"],
-            "storage_initial": toy["low_storage_initial"],
+            "storage": toy["low_storage_initial"],
         },
     }
 

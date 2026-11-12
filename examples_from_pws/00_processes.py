@@ -159,9 +159,10 @@ dis_hru.parameters
 # %% [markdown]
 # *Parameters:*
 # The static values the process uses beyond those in the
-# discretization: here the routing and sink coefficients and the
-# initial storage. A parameter set is just an `xarray.Dataset`; we
-# load pywatershed's file for this process.
+# discretization: here the routing and sink coefficients. A
+# parameter set is just an `xarray.Dataset`; we load pywatershed's
+# file for this process. (The file also holds `gwstor_init`, the
+# starting storage, which we'll use below.)
 
 # %%
 param_file = DOMAIN_DIR / "parameters_PRMSGroundwater.nc"
@@ -219,13 +220,16 @@ control = {
 }
 
 # %% [markdown]
-# *Initial values:*
-# Variables that carry state need a starting value. The process says
-# which parameter supplies it (`gwres_stor` starts from `gwstor_init`,
-# as in PRMS); we pass that array under the parameter's name.
+# *Initial state:*
+# Variables that carry state from one step to the next need a
+# starting value. Each has a default (`gwres_stor` starts at 2
+# inches, PRMS's default); to start somewhere else we pass an array
+# under the variable's own name. PRMS and pywatershed keep this
+# starting storage in a parameter, `gwstor_init`, so we pass that
+# array as `gwres_stor`.
 #
 # Putting it all together: the process entry names its class, its
-# grid, its parameters, its initial values and its inputs.
+# grid, its parameters, its initial state and its inputs.
 
 # %%
 process_dict = {
@@ -233,7 +237,7 @@ process_dict = {
         "class": PRMSGroundwater,
         "discretization": "nhru",
         "parameters": params,
-        "gwstor_init": params["gwstor_init"],
+        "gwres_stor": params["gwstor_init"],
         **inputs,
     },
 }

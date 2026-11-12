@@ -127,6 +127,45 @@ def requested_output_names(
     return kept, dropped
 
 
+def seg_inflow_from_segment_flow_init(
+    segment_flow_init: xr.DataArray, tosegment: xr.DataArray
+) -> xr.DataArray:
+    """PRMS's segment_flow_init -> the starting seg_inflow: each
+    segment's initial flow becomes its downstream segment's inflow.
+    pywatershed's channel initialization VERBATIM, including the
+    ASSIGNMENT at confluences (the last upstream segment in index
+    order wins, not the sum). `tosegment` is 1-based, 0 = outlet."""
+    tosegment0 = tosegment.values - 1
+    seg_inflow = np.zeros(segment_flow_init.shape, dtype=np.float64)
+    for iseg in range(tosegment0.shape[0]):
+        jseg = tosegment0[iseg]
+        if jseg < 0:
+            continue
+        seg_inflow[jseg] = segment_flow_init.values[iseg]
+    return xr.DataArray(seg_inflow, dims=segment_flow_init.dims)
+
+
+def prms_initial_state(params: xr.Dataset) -> dict[str, xr.DataArray]:
+    """Translate PRMS's initial-condition PARAMETERS into pws_phoenix
+    supplied initial state: restart variables under their OWN names.
+    PRMS consumes state from parameters; pws_phoenix does not -- this
+    is the one place that convention lives. Only names present in
+    `params` are translated (an absent one leaves the state to the
+    process's initialize() default).
+
+    - gwres_stor <- gwstor_init (a rename).
+    - seg_inflow <- segment_flow_init, propagated one segment
+      downstream (seg_inflow_from_segment_flow_init)."""
+    state: dict[str, xr.DataArray] = {}
+    if "gwstor_init" in params:
+        state["gwres_stor"] = params["gwstor_init"]
+    if "segment_flow_init" in params:
+        state["seg_inflow"] = seg_inflow_from_segment_flow_init(
+            params["segment_flow_init"], params["tosegment"]
+        )
+    return state
+
+
 def assemble_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
@@ -310,9 +349,15 @@ def assemble_from_control(
         if name in params and "units" in params[name].attrs:
             da.attrs["units"] = params[name].attrs["units"]
 
+    # PRMS initial-condition parameters -> supplied state, given to the
+    # process that owns each restart variable
+    initial_state = prms_initial_state(params)
+    for entry in process_dict.values():
+        for name in entry["class"].get_restart_variables():
+            if name in initial_state:
+                entry[name] = initial_state[name]
+
     for grid, gg in spec["required"].items():
-        for init_name, info in gg["initial_values"].items():
-            process_dict[info["process"]][init_name] = params[init_name]
         for name, info in gg["external_inputs"].items():
             consumer = info["consumers"][0]
             if name in dyn_inputs:
@@ -397,6 +442,9 @@ def insert_flow_graph(
     the schedule) on a new ``nnodes`` grid; the three lateral-volume
     Maps are padded with zero rows for the new nodes and re-targeted to
     the graph's ``node_*_vol`` inputs; the ``nsegment`` grid goes away.
+    Initial state supplied in the channel entry (``seg_inflow``) is
+    carried onto the graph's channel rows, zero on the new nodes; the
+    new nodes' own initial state (``NewNode.initial_state``) is added.
     ``control["output_var_names"]`` is re-filtered to the graph's
     variables (``seg_inflow``/``seg_outflow`` survive -- the channel
     node declares them as its rows' state, now on ``nnodes``; anything
@@ -441,11 +489,26 @@ def insert_flow_graph(
     process_dict: dict[str, dict[str, Any]] = {}
     for slot, entry in kit.process_dict.items():
         if slot == "prms_channel":
-            process_dict["flow_graph"] = {
+            graph_entry = {
                 "class": fg.graph_class,
                 "discretization": "nnodes",
                 "parameters": fg.parameters,
             }
+            # supplied channel state rides onto the graph: zeros on
+            # the new nodes' rows (what initialize_type writes there)
+            for name in fg.graph_class.get_restart_variables():
+                if name in entry:
+                    padded = np.zeros(fg.n_nodes, dtype=np.float64)
+                    padded[: fg.n_seg] = entry[name].values
+                    graph_entry[name] = xr.DataArray(padded, dims="nnodes")
+            # the new nodes' initial state (NewNode.initial_state); on
+            # a name the channel also supplied, a new node's value
+            # wins on its own row
+            for name, values in fg.initial_state.items():
+                if name in graph_entry:
+                    values = values.fillna(graph_entry[name])
+                graph_entry[name] = values
+            process_dict["flow_graph"] = graph_entry
         else:
             process_dict[slot] = entry
 

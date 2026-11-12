@@ -44,7 +44,8 @@ class _RankLeakyBucket(_Bucket):
 @pytest.fixture(scope="module")
 def input_file():
     """Rank 0 writes the kitchen-sink input file (inflow over time,
-    leak_coef + storage_init static) on the default "space" grid."""
+    leak_coef static) on the default "space" grid. The starting
+    storage is supplied in process_dict (see `runs`)."""
     comm = MPI.COMM_WORLD
     tmp = tempfile.mkdtemp() if comm.rank == 0 else None
     tmp = comm.bcast(tmp, root=0)
@@ -56,7 +57,6 @@ def input_file():
             {
                 "inflow": inp["inflow"],
                 "leak_coef": inp["parameters"]["leak_coef"],
-                "storage_init": inp["storage_init"],
             }
         ).to_netcdf(path)
     comm.Barrier()
@@ -73,7 +73,12 @@ def runs(input_file):
     out = {}
     for mode in ("error", "warn"):
         model = ModelMPI(
-            {"bucket": {"class": _RankLeakyBucket}},
+            {
+                "bucket": {
+                    "class": _RankLeakyBucket,
+                    "storage": _inputs(np.random.default_rng(0))["storage"],
+                }
+            },
             {
                 "input_file": input_file,
                 "output_parallel_netcdf": input_file.parent / f"{mode}.nc",

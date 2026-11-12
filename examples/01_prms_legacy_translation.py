@@ -281,7 +281,7 @@ print(
 # ### 7. Putting it together
 #
 # The kit is exactly these pieces -- a process dictionary (classes +
-# their parameters, initial values, and forcings), the two grids, and
+# their parameters, initial state, and forcings), the two grids, and
 # the maps. `kit.model()` is just the `Model` constructor, which
 # validates the whole assembly as it builds. Let's close the loop:
 # build the model from the kit we've been checking against, run the

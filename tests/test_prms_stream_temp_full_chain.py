@@ -55,6 +55,7 @@ from pws_phoenix.hydrology.prms_stream_temp import (
 )
 from pws_phoenix.maps import Map
 from pws_phoenix.model import Model
+from pws_phoenix.prms_translate import seg_inflow_from_segment_flow_init
 from pws_phoenix.process import DataArrayMeta, Process
 
 DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
@@ -270,7 +271,7 @@ def model_run(tmp_path_factory):
             "class": PRMSGroundwater,
             "discretization": "nhru",
             "parameters": gw_parameters,
-            "gwstor_init": gw_parameters["gwstor_init"],
+            "gwres_stor": gw_parameters["gwstor_init"],
         },
         "humidity_carrier": {
             "class": HumidityCarrier,
@@ -283,7 +284,10 @@ def model_run(tmp_path_factory):
             "class": PRMSChannel,
             "discretization": "nsegment",
             "parameters": channel_parameters,
-            "segment_flow_init": channel_parameters["segment_flow_init"],
+            "seg_inflow": seg_inflow_from_segment_flow_init(
+                channel_parameters["segment_flow_init"],
+                dis_seg["tosegment"],
+            ),
         },
         "prms_hydraulic_geometry": {
             "class": PRMSHydraulicGeometryWidthOnly,

@@ -1867,6 +1867,19 @@ class PRMSRunoff(PRMSRunoffNoDprst):
     }
     budgets = {"mass": _MASS_BUDGET}
 
+    # initialize() computes the dprst areas and dprst_stor_hru from
+    # the DEFAULT volumes; dprst_area_clos is never recomputed after
+    # (see Process.state_groups)
+    state_groups = (
+        (
+            "dprst_vol_open",
+            "dprst_vol_clos",
+            "dprst_area_open",
+            "dprst_area_clos",
+            "dprst_stor_hru",
+        ),
+    )
+
     # ------------------------------------------------------------------
     # Initialization (basin_init + dprst_init, no-restart path)
     # ------------------------------------------------------------------

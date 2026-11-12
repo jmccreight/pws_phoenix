@@ -363,7 +363,13 @@ def make_flow_graph(
             A type may optionally declare ``time_context`` (a tuple of
             time-scalar names it reads, e.g. ``("epiweek",)``); the
             graph computes only the union and serves them per step in
-            the ``tctx`` namedtuple passed to ``substep``.
+            the ``tctx`` namedtuple passed to ``substep``. Also
+            optional: ``required_initial_state`` (a tuple of its restart
+            variables that have no default -- the composed class's
+            ``Process.required_initial_state`` is the union) and
+            ``check_initial_state_type(dataset) -> list[str]``
+            (problems in its OWN rows of the starting state, run from
+            the composed class's ``check_initial_state``).
         class_name: name of the composed class. Pass a DISTINCT name
             per composition if resolving classes by name
             (Process._registry) -- same-named compositions overwrite.
@@ -481,6 +487,16 @@ def make_flow_graph(
             **{nm: self._obj[nm].values for nm in field_names}
         )
 
+    def check_initial_state(self) -> list[str]:
+        # each node type may check its OWN rows of the starting state
+        # (optional hook: check_initial_state_type(dataset) -> messages)
+        problems: list[str] = []
+        for tt_class in node_types:
+            hook = getattr(tt_class, "check_initial_state_type", None)
+            if hook is not None:
+                problems.extend(hook(self._obj))
+        return problems
+
     def advance(self) -> None:
         for tt_class in node_types:
             tt_class.advance_type(self._obj)
@@ -498,7 +514,17 @@ def make_flow_graph(
     class_attrs["_n_substeps"] = n_substeps
     class_attrs["_io_in_cfs"] = io_in_cfs
     class_attrs["budgets"] = {"mass": _MASS_BUDGET}
+    # union of the node types' required state (optional per type),
+    # first appearance order
+    class_attrs["required_initial_state"] = tuple(
+        dict.fromkeys(
+            nm
+            for tt in node_types
+            for nm in getattr(tt, "required_initial_state", ())
+        )
+    )
     class_attrs["initialize"] = initialize
+    class_attrs["check_initial_state"] = check_initial_state
     class_attrs["advance"] = advance
     class_attrs["calculate"] = calculate
     class_attrs["__doc__"] = (

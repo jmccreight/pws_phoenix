@@ -112,13 +112,13 @@ class TestRegression:
             "upper": {
                 "class": Upper,
                 "forcing_up": toy_ds["forcing_up"],
-                "flow_initial": toy_ds["flow_initial"],
+                "flow": toy_ds["flow_initial"],
                 "parameters": toy_ds[PARAM_NAMES],
             },
             "lower": {
                 "class": Lower,
                 "forcing_low": toy_ds["forcing_low"],
-                "storage_initial": toy_ds["storage_initial"],
+                "storage": toy_ds["storage_initial"],
                 "parameters": toy_ds[PARAM_NAMES],
             },
         }
@@ -140,13 +140,13 @@ class TestRegression:
             "upper": {
                 "class": Upper,
                 "forcing_up": model_inputs["forcing_up"],
-                "flow_initial": model_inputs["flow_initial"],
+                "flow": model_inputs["flow_initial"],
                 "parameters": model_inputs["parameters"],
             },
             "lower": {
                 "class": Lower,
                 "forcing_low": model_inputs["forcing_low"],
-                "storage_initial": model_inputs["storage_initial"],
+                "storage": model_inputs["storage_initial"],
                 "parameters": model_inputs["parameters"],
             },
         }

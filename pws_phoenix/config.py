@@ -2,8 +2,8 @@
 config.py
 =========
 Minimal yaml model configuration: ``load_model_yaml(path)`` returns the
-``(process_dict, control, maps)`` triple that feeds ``Model`` or
-``ModelMPI`` equally.
+``(process_dict, control, maps, discretizations)`` tuple that feeds
+``Model`` or ``ModelMPI`` equally.
 
 A deliberate PROBE for the future ``Options`` design (see "Global state"
 in pws_phoenix/CLAUDE.md) -- the schema is minimal and may change. yaml
@@ -16,6 +16,11 @@ cannot hold classes or arrays, so:
   - a map entry's ``class:`` is ``"Map"`` or ``"MapMPI"``; its
     ``weights:`` is either an inline (nested-list) matrix or a path to a
     single-variable NetCDF (opened, loaded, closed);
+  - a discretization entry gives the grid's ``dims`` and, optionally,
+    its ``parameters`` file (the dis dataset) and a ``topo_order``
+    mapping (+ ``topo_one_based``) -- the ``Discretization``
+    constructor's keywords. Serial grids only (``comm`` is not a yaml
+    value; an MPI run builds its distributed grid in code);
   - every path string is resolved RELATIVE TO THE YAML FILE's directory
     (absolute paths pass through);
   - the ``processes:`` mapping ORDER IS THE EXECUTION SCHEDULE (yaml
@@ -25,8 +30,15 @@ cannot hold classes or arrays, so:
     one-pass order validation will catch it at build, but save yourself
     the trip).
 
-Schema (maps optional):
+Schema (maps and discretizations optional):
 
+    discretizations:
+      hru:
+        dims: [hru]
+      segment:
+        dims: [segment]
+        parameters: dis_segment.nc
+        topo_order: {segment_order: tosegment}
     control:
       input_file: hru_input.nc
       output_parallel_netcdf: hru_output.nc
@@ -38,12 +50,13 @@ Schema (maps optional):
       upper:
         class: Upper
         discretization: hru
+        flow: flow_initial.nc
       lower:
         class: Lower
         discretization: segment
         parameters: low_params.nc
         forcing_low: forcing_low.nc
-        storage_initial: storage_initial.nc
+        storage: storage_initial.nc
     maps:
       hru_to_seg:
         class: MapMPI
@@ -59,6 +72,7 @@ import numpy as np
 import xarray as xr
 import yaml
 
+from pws_phoenix.discretization import Discretization
 from pws_phoenix.maps import Map, MapMPI
 from pws_phoenix.process import Process
 
@@ -85,14 +99,33 @@ def _load_weights(spec: Any, base_dir: pl.Path) -> np.ndarray:
     return np.asarray(spec)
 
 
+def _load_discretizations(
+    cfg: dict[str, Any], base_dir: pl.Path
+) -> dict[str, Discretization]:
+    """The ``discretizations:`` section -> serial Discretizations."""
+    discretizations: dict[str, Discretization] = {}
+    for grid, entry in cfg.get("discretizations", {}).items():
+        kwargs: dict[str, Any] = {}
+        if "parameters" in entry:
+            kwargs["parameters"] = _resolve_path(entry["parameters"], base_dir)
+        for key in ("topo_order", "topo_one_based"):
+            if key in entry:
+                kwargs[key] = entry[key]
+        discretizations[grid] = Discretization(list(entry["dims"]), **kwargs)
+    return discretizations
+
+
 def load_model_yaml(
     yaml_file: pl.Path,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Discretization]
+]:
     """Load a fully-serialized model configuration.
 
-    Returns ``(process_dict, control, maps)`` -- model-agnostic (feeds
-    ``Model`` or ``ModelMPI``). See the module docstring for the schema
-    and resolution rules.
+    Returns ``(process_dict, control, maps, discretizations)`` --
+    model-agnostic (feeds ``Model`` or ``ModelMPI``; ``discretizations``
+    is ``{}`` when the yaml has no such section). See the module
+    docstring for the schema and resolution rules.
     """
     yaml_file = pl.Path(yaml_file)
     base_dir = yaml_file.parent
@@ -136,4 +169,4 @@ def load_model_yaml(
             variable=dict(entry["variable"]),
         )
 
-    return process_dict, control, maps
+    return process_dict, control, maps, _load_discretizations(cfg, base_dir)

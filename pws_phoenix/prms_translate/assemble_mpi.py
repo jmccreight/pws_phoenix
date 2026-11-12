@@ -8,14 +8,16 @@ rank. So the parallel path has two halves:
 - ``write_mpi_input_file(kit, path, n_days=None)`` -- the PREP half,
   run serially (a notebook cell, a script): merge the kit's
   distributed-grid content into the combined input file -- static
-  parameters + initial values as ``(nhru, ...)``, forcings as
-  ``(time, nhru)``, real dim-coordinates. ``n_days`` truncates the
+  parameters as ``(nhru, ...)``, forcings as ``(time, nhru)``, real
+  dim-coordinates. Initial state is NOT in the file: it is supplied
+  in memory, in process_dict, as in serial. ``n_days`` truncates the
   time axis (the stream defines the run length).
 - ``mpi_model_from_control(control_file, control)`` -- the parallel
   one-liner, callable ONLY under mpirun (SPMD: every rank calls it):
   rebuilds the kit from the legacy files (deterministic, so the
   replicated serial grid is identical across ranks), strips the
-  distributed grid's in-memory data (the input file serves it),
+  distributed grid's in-memory data (the input file serves it) except
+  its supplied initial state,
   converts every Map to MapMPI, and constructs ModelMPI.
 
 Required control keys beyond the serial dict: ``input_file`` (from
@@ -53,9 +55,10 @@ def write_mpi_input_file(
 ) -> pl.Path:
     """Write the combined distributed-grid input file from a (serial)
     ModelKit: every mpi-grid process entry's parameter dataset plus
-    its loose DataArray entries (forcings, initial-value seams),
-    merged into one dataset with real dim-coordinates. Returns the
-    path."""
+    its loose DataArray entries (forcings), merged into one dataset
+    with real dim-coordinates. Supplied initial state (restart
+    variables under their own names) is skipped: ModelMPI takes it
+    from process_dict. Returns the path."""
     merged = xr.Dataset()
     for entry in kit.process_dict.values():
         if entry["discretization"] != mpi_grid:
@@ -64,8 +67,11 @@ def write_mpi_input_file(
             # same-named parameters across processes carry identical
             # values (packaged from one flat source): first wins
             merged = merged.merge(entry["parameters"], compat="override")
+        state_names = set(entry["class"].get_restart_variables())
         for key, val in entry.items():
             if key in ("class", "discretization", "parameters"):
+                continue
+            if key in state_names:
                 continue
             if isinstance(val, xr.DataArray) and key not in merged:
                 merged[key] = val
@@ -113,10 +119,15 @@ def mpi_model_from_control(
     mpi_vars: set[str] = set()
     for slot, entry in kit.process_dict.items():
         if entry["discretization"] == mpi_grid:
-            # data ride in input_file; keep class + grid only
+            # data ride in input_file; keep class + grid + supplied
+            # initial state (full extent; each rank takes its block)
             process_dict[slot] = {
                 "class": entry["class"],
                 "discretization": mpi_grid,
+            } | {
+                name: entry[name]
+                for name in entry["class"].get_restart_variables()
+                if name in entry
             }
             mpi_vars |= set(entry["class"].get_var_names(include_budget=True))
         else:

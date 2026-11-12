@@ -51,7 +51,11 @@ def mpi_paths(dimensions, make_toy_input):
     output_file = data_dir / "model_output.nc"
     if comm.rank == 0:
         data_dir.mkdir(parents=True, exist_ok=True)
-        make_toy_input(dimensions).to_netcdf(input_file)
+        # initial state stays OUT of the combined file (supplied in
+        # process_dict, see mpi_run)
+        make_toy_input(dimensions).drop_vars(
+            ["flow_initial", "storage_initial"]
+        ).to_netcdf(input_file)
     comm.Barrier()
     yield {"input_file": input_file, "output_file": output_file}
 
@@ -87,11 +91,16 @@ def answers(dimensions, make_toy_input, compute_answers):
 
 
 @pytest.fixture(scope="module")
-def mpi_run(mpi_paths):
+def mpi_run(mpi_paths, dimensions, make_toy_input):
     """Build + run + finalize ModelMPI ONCE. Every collective MPI op lives here,
     so the test_* methods are pure asserts."""
     comm = MPI.COMM_WORLD
-    process_dict = {"upper": {"class": Upper}, "lower": {"class": Lower}}
+    # deterministic toy: every rank builds the same full-extent state
+    ds = make_toy_input(dimensions)
+    process_dict = {
+        "upper": {"class": Upper, "flow": ds["flow_initial"]},
+        "lower": {"class": Lower, "storage": ds["storage_initial"]},
+    }
     control = {
         "input_file": mpi_paths["input_file"],
         "output_parallel_netcdf": mpi_paths["output_file"],

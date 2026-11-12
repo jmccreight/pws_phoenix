@@ -163,7 +163,7 @@ IO primitives), `discretization.py` (`Discretization`), `maps.py` (`Map` +
 `MapMPI`; formerly `map.py`),
 `process.py` (`DataArrayMeta` + the `Process` ABC), `model.py` (`Model`
 serial + `ModelMPI` streaming), `config.py` (minimal yaml ->
-`(process_dict, control, maps)`; a probe for the `Options` design),
+`(process_dict, control, maps, discretizations)`; a probe for the `Options` design),
 `processes_concrete.py` (the toy Upper/Lower processes), and
 `hydrology/` (REAL pywatershed process ports, mirroring pywatershed's
 `hydrology/` module structure -- one process per module; see "Porting
@@ -271,8 +271,13 @@ open_writer → declare buffers → create → iterate → write`.
   directly to its grid's shared dataset.)
 - Inputs: time-dimensioned file vars are windowed to one step by
   `as_iterable` and shadowed by `(hru,)` buffers refilled each step from
-  `step.mpi.src`; static space-only params/ICs stay whole on `ds_mpi`
+  `step.mpi.src`; static space-only params stay whole on `ds_mpi`
   (loaded into memory so their buffers are shared by reference).
+- Initial state is NOT in the input file (Nov 2026): it is supplied
+  FULL-extent in process_dict under the state variable's own name,
+  and each rank writes its `_decomp_slice` block after the init hooks
+  (`_restore_grid_var`, the restart restore path). See "Initial
+  state" below.
 - `control["progress"]` (default False) turns on mpixarray's rank-0
   progress bar over the time loop.
 - `parallelize()` now lives in **`Discretization`** (`discretization.py`):
@@ -325,7 +330,8 @@ The "Global" item is split into two objects with different lifetimes and reach
 - **`Options`** (not yet a class) -- construction-time run config, consumed at
   _build_ and baked into processes; a Process never needs it at runtime. The
   Model `control` dict plays this role today. (`config.load_model_yaml` --
-  a minimal yaml -> `(process_dict, control, maps)` loader, July 2026 -- is
+  a minimal yaml -> `(process_dict, control, maps, discretizations)`
+  loader, July 2026; serial `discretizations:` section Nov 2026 -- is
   a first serialization probe for this design; classes resolve by name via
   `Process._registry`, paths resolve relative to the yaml.)
 
@@ -599,12 +605,74 @@ mode; declared cms).
   topology (networkx, replicating pywatershed's construction EXACTLY --
   a different valid order changes float accumulation downstream; a
   dependency-free ordering is a later step with a tolerance decision).
-  A future `Model.from_yaml()` classmethod (evolution of
-  `config.load_model_yaml`) will construct Discretizations from a yaml
-  section.
+  `config.load_model_yaml` builds serial Discretizations from its
+  `discretizations:` section (Nov 2026); a future `Model.from_yaml()`
+  classmethod is its evolution.
+- **Initial state (Nov 2026; `DataArrayMeta.initial` REMOVED)**:
+  starting state = the `restart=True` variables, ONE rule in both
+  paths: allocate -> `initialize()` sets each one's DEFAULT ->
+  supplied state (an array in the process_dict entry under the
+  variable's OWN name; recorded in `_supplied_state`, written by
+  `_apply_supplied_state` via `_restore_grid_var`) overrides it |
+  `control["restart_read"]` overrides it. Supplied state +
+  `restart_read` raises ("use one source"). No nan check: nan is a
+  legitimate state value (stream temp's never-has-flow marker,
+  FlowGraph union rows, STARFIT `lake_storage`). A process never
+  consumes state from a parameter: PRMS's `gwstor_init` /
+  `segment_flow_init` are translated only in
+  `prms_translate.prms_initial_state` (-> `gwres_stor`, and
+  `seg_inflow` by one-segment-downstream propagation).
+  PRMSGroundwater's default is PRMS's declared 2.0 inches.
+  `Process.state_groups` (tuples of restart variables): the Model
+  raises when only PART of a group is supplied, because
+  `initialize()` computes some members from the others' defaults
+  and supplied state lands after the hook. Declared on
+  PRMSSoilzone{NoDprst,Ag} (`soil_moist`, `soil_rechr`,
+  `soil_lower`) and PRMSRunoff (the two dprst volumes, two areas,
+  `dprst_stor_hru`). Supplying EVERY restart variable is the restart
+  case, policed by the perfect-restart tests. Every `initialize()`
+  was read for this (Nov 11, 2026): no other hook computes one
+  restart variable from another. `Process.required_initial_state`
+  (restart variables with NO default): the Model raises at assembly
+  when one
+  is neither supplied nor coming from a restart; reported by
+  `input_spec` as "required_initial_state". `check_initial_state()`
+  (default: no problems) runs once after the starting state is in
+  place (cold start or restart) and RETURNS messages -- the Model
+  raises, on every rank under MPI (Allreduce, as for budgets). A
+  composed FlowGraph takes the union of its node types'
+  `required_initial_state` and calls their optional
+  `check_initial_state_type(dataset)`. FIRST USER = the STARFIT
+  family (Nov 11, 2026): pywatershed's `initial_storage` PARAMETER
+  is no longer declared; `lake_storage_sub` [MCM, in a cfs graph
+  too -- the unit it is stored and restarted in] is required
+  initial state, nan on a reservoir's own row is reported by the
+  check; `NewNode(..., initial_state={...})` ->
+  `FlowGraphKit.initial_state` -> the graph's process_dict entry
+  (`insert_flow_graph` does it). WRINKLE: the requirement is by
+  CLASS composition, so a graph class that includes a STARFIT type
+  but has no reservoir rows still supplies an all-nan
+  `lake_storage_sub` (benchmarks/_flow_graph.py does). STILL
+  parameter-fed defaults (same smell, harder: the translation needs
+  maxima `initialize()` derives; and under calibration the starting
+  state must FOLLOW a calibrated maximum -- decide with the Phase 1
+  `reset` design): soil zone `soil_moist_init_frac` /
+  `soil_rechr_init_frac` / `ssstor_init_frac` (+ the ag pair),
+  runoff `dprst_frac_init`. LATER, when someone needs to set
+  e.g. soil moisture alone (data assimilation): JLM's split
+  `init_from_params() -> init_state -> init_diagnostic_state`, so
+  derived state is recomputed from whatever state is in place --
+  not uniformly clean (`dprst_area_clos` is frozen at its initial
+  value and must stay stored). KNOWN GAPS: three first-step blocks
+  overwrite supplied state on a cold start (a restart resumes past
+  them): PRMSAtmosphere `_transp_tindex` at `istep0`,
+  PRMSSoilzoneAg `_istep0_areas`, StarfitDailyFlowNode's first
+  substep. (`prms_translate.insert_flow_graph` carries the channel
+  entry's supplied state onto the graph's channel rows, zero on the
+  new nodes -- Nov 11, 2026.)
 - **Per-process init hook (IMPLEMENTED July 2026)**:
   `Process.initialize()` (default no-op), called once by the Model
-  after binding/ICs/input-validation, before the run loop; contract =
+  after binding/input-validation, before the run loop; contract =
   LOCAL (no collectives), no `Time`. Computes
   **`kind="parameter_internal"`** fields (parameters COMPUTED at init
   rather than supplied -- e.g. Muskingum c0/c1/c2 from mann_n + dis
@@ -933,7 +1001,8 @@ incl. the ORDER-SENSITIVE `7.0*flow*24.0*60.0*60.0` weekly volumes
 so the njit substep reads it from `state`; epiweek 53 folds to 52 in
 `substep`. Parameters FREEZE at assembly => pywatershed's in-node
 data-prep moved OUT of the node: nan `Obs_MEANFLOW_CUMECS` <-
-`inflow_mean` is caller data-prep, nan `initial_storage`
+`inflow_mean` is caller data-prep, nan `initial_storage` [Nov 2026:
+no longer a parameter -- see "Initial state" in the Phase 2 backlog]
 (NOR-midpoint + start/end active-window gating) is NOT ported --
 `initialize_type` RAISES on both, scoped to its OWN rows via
 `node_type_names` attrs now stamped BEFORE the type hooks (small
@@ -1525,9 +1594,14 @@ the mpixarray-fork problems.
 
 **The lever -- split static vs streamed inputs:**
 
-- _Static_ (params, ICs; space-only): trivially merged into the one `ds_mpi`
+- _Static_ (params; space-only): trivially merged into the one `ds_mpi`
   after `parallelize`, load-once. Multi-file here is ~free and keeps Phase 1's
-  structural sharing.
+  structural sharing. (ICs left the combined file Nov 2026 -- see "Initial
+  state" under the Phase 2 backlog. JLM, Nov 2026: the same argument
+  applies to parameters -- a combined file is "baked" to one parameter
+  set, and calibration swaps parameters -- so forcings, parameters and
+  ICs should be SEPARATE files; only streamed forcings need the one
+  streamed dataset.)
 - _Streamed_ (time-varying forcings; time x space): the **only** hard part --
   multiple streamed files = multiple `iterate` loops to co-step.
 

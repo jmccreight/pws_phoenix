@@ -394,7 +394,6 @@ class PRMSChannel(Process):
         dtype=np.float64,
         units="cfs",
         description="Segment outflow, daily mean [cfs]",
-        initial="segment_flow_init",
     )
     inflow_ts_prev = DataArrayMeta(
         kind="variable",
@@ -458,6 +457,7 @@ class PRMSChannel(Process):
             "seg_lateral_inflow",
             "seg_upstream_inflow",
             "seg_inflow",
+            "seg_outflow",
             "outflow_ts",
             "seg_stor_change",
             "channel_outflow_vol",
@@ -465,25 +465,18 @@ class PRMSChannel(Process):
             "seg_current_sum",
         ):
             refs[name][:] = 0.0
-        # pywatershed order: inflow_ts_prev from seg_inflow (still zero)
-        # BEFORE the seg_inflow propagation below
+        # pywatershed order: inflow_ts_prev from seg_inflow (zero)
         refs["inflow_ts_prev"][:] = refs["seg_inflow"]
 
         # -- 0-based connectivity for the kernel --
         refs["tosegment0"][:] = refs["tosegment"] - 1
-        tosegment0 = refs["tosegment0"]
 
-        # -- initial seg_inflow propagation (non-restart). NOTE
-        # assignment, not +=: with multiple upstreams the LAST one in
-        # index order wins -- pywatershed verbatim. seg_outflow arrived
-        # via initial="segment_flow_init". --
-        seg_inflow = refs["seg_inflow"]
-        seg_outflow = refs["seg_outflow"]
-        for iseg in range(tosegment0.shape[0]):
-            jseg = tosegment0[iseg]
-            if jseg < 0:
-                continue
-            seg_inflow[jseg] = seg_outflow[iseg]
+        # Initial state: the defaults above (zeros). A nonzero start is
+        # SUPPLIED state (seg_inflow, outflow_ts under their own names,
+        # written after this hook). PRMS's segment_flow_init parameter
+        # is translated to a supplied seg_inflow by prms_translate
+        # (pywatershed's propagation, verbatim); the channel no longer
+        # consumes state from parameters.
 
         # -- Muskingum coefficients (module function above; shared with
         # the FlowGraph channel node type) --

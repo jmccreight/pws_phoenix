@@ -86,21 +86,21 @@ def mpi_paths(two_grid_toy, two_grid_weights):
         "low_params": data_dir / "low_params.nc",
         "forcing_low": data_dir / "forcing_low.nc",
         "storage_initial": data_dir / "storage_initial.nc",
+        "flow_initial": data_dir / "flow_initial.nc",
         "weights": data_dir / "weights.nc",
         "yaml_file": data_dir / "model.yaml",
     }
     if comm.rank == 0:
         data_dir.mkdir(parents=True, exist_ok=True)
         # The distributed grid's kitchen-sink input file: forcing +
-        # time-varying param as (time|month, hru); static params + IC as
-        # (hru,). Segment data never enter it.
+        # time-varying param as (time|month, hru); static params as
+        # (hru,). Segment data and initial state never enter it.
         xr.Dataset(
             data_vars=dict(
                 forcing_up=toy["forcing_up"],
                 param_up_0=toy["up_params"]["param_up_0"],
                 param_up_1=toy["up_params"]["param_up_1"],
                 param_shared_name=toy["up_params"]["param_shared_name"],
-                flow_initial=toy["up_flow_initial"],
             ),
         ).to_netcdf(paths["input_file"])
         # Segment inputs + weights, one file each (the bare DataArrays
@@ -111,6 +111,11 @@ def mpi_paths(two_grid_toy, two_grid_weights):
         )
         toy["low_storage_initial"].rename("storage_initial").to_netcdf(
             paths["storage_initial"]
+        )
+        # the distributed grid's initial state: full extent, its own
+        # file, each rank takes its block
+        toy["up_flow_initial"].rename("flow_initial").to_netcdf(
+            paths["flow_initial"]
         )
         xr.DataArray(
             two_grid_weights, dims=["segment", "hru"], name="weights"
@@ -126,13 +131,17 @@ def mpi_paths(two_grid_toy, two_grid_weights):
                 "mpi_grid": "hru",
             },
             "processes": {
-                "upper": {"class": "Upper", "discretization": "hru"},
+                "upper": {
+                    "class": "Upper",
+                    "discretization": "hru",
+                    "flow": "flow_initial.nc",
+                },
                 "lower": {
                     "class": "Lower",
                     "discretization": "segment",
                     "parameters": "low_params.nc",
                     "forcing_low": "forcing_low.nc",
-                    "storage_initial": "storage_initial.nc",
+                    "storage": "storage_initial.nc",
                 },
             },
             "maps": {
@@ -167,14 +176,17 @@ def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
     data_dir = mpi_paths["data_dir"]
 
     if style == "yaml":
-        process_dict, control, maps = load_model_yaml(mpi_paths["yaml_file"])
+        process_dict, control, maps, _ = load_model_yaml(
+            mpi_paths["yaml_file"]
+        )
     else:
         if style == "mixed":  # segment data in memory
             lower_data = {
                 "parameters": toy["low_params"],
                 "forcing_low": toy["forcing_low"],
-                "storage_initial": toy["low_storage_initial"],
+                "storage": toy["low_storage_initial"],
             }
+            upper_data = {"flow": toy["up_flow_initial"]}
             weights = two_grid_weights
         else:  # "files": segment inputs and the weights all from disk
             # TODO: JLM: is this branch worthwhile? it requires files to
@@ -182,13 +194,18 @@ def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
             lower_data = {
                 "parameters": mpi_paths["low_params"],
                 "forcing_low": mpi_paths["forcing_low"],
-                "storage_initial": mpi_paths["storage_initial"],
+                "storage": mpi_paths["storage_initial"],
             }
+            upper_data = {"flow": mpi_paths["flow_initial"]}
             with xr.load_dataarray(mpi_paths["weights"]) as da:
                 weights = da.load().values
 
         process_dict = {
-            "upper": {"class": Upper, "discretization": "hru"},
+            "upper": {
+                "class": Upper,
+                "discretization": "hru",
+                **upper_data,
+            },
             "lower": {
                 "class": Lower,
                 "discretization": "segment",
@@ -340,13 +357,17 @@ def buffer_probe_run(mpi_paths, two_grid_toy, two_grid_weights):
     toy = two_grid_toy
     data_dir = mpi_paths["data_dir"]
     process_dict = {
-        "upper": {"class": UpperProbe, "discretization": "hru"},
+        "upper": {
+            "class": UpperProbe,
+            "discretization": "hru",
+            "flow": toy["up_flow_initial"],
+        },
         "lower": {
             "class": Lower,
             "discretization": "segment",
             "parameters": toy["low_params"],
             "forcing_low": toy["forcing_low"],
-            "storage_initial": toy["low_storage_initial"],
+            "storage": toy["low_storage_initial"],
         },
     }
     maps = {

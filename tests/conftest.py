@@ -154,6 +154,14 @@ def pyws_domain_files(domain):
     ]
 
 
+def cold_start_state(control, **state):
+    """Supplied initial state for a process_dict entry -- or nothing
+    when `control` restarts: a model takes its starting state from ONE
+    source (supplied state + restart_read raises). Usage:
+    `{"class": ..., **cold_start_state(control, flow=...)}`."""
+    return {} if control.get("restart_read") is not None else state
+
+
 @pytest.fixture(scope="session")
 def pyws_domain():
     """Factory: pywatershed domain name -> the channel FlowGraph data

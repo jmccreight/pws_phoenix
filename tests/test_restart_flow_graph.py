@@ -37,6 +37,7 @@ sys.path.append(str(pl.Path(__file__).parent))
 from conftest import (
     PWS_TEST_DATA,
     STARFIT_INDS_TEST,
+    cold_start_state,
     pyws_domain_files,
 )
 from pws_phoenix.discretization import Discretization
@@ -195,6 +196,11 @@ def test_starfit_graph(node_class, n_substeps, tmp_path):
     graph_params = xr.Dataset(
         {nn: ("nnodes", sub[nn].values) for nn in param_names}
     )
+    # required initial state [MCM] on a cold start; the warm start
+    # takes it from the restart
+    initial_storage = xr.DataArray(
+        sub["initial_storage"].values, dims="nnodes"
+    )
     with xr.load_dataset(INFLOW_FILE) as ds:
         inflow_da = ds["lake_inflow"].isel(grand_id=STARFIT_INDS_TEST).load()
     n_nodes = len(STARFIT_INDS_TEST)
@@ -227,12 +233,13 @@ def test_starfit_graph(node_class, n_substeps, tmp_path):
         ),
     }
 
-    def make_model(control):
+    def make_model(control, **state):
         process_dict = {
             "flow_graph": {
                 "class": graph_class,
                 "discretization": "nnodes",
                 "parameters": graph_params,
+                **cold_start_state(control, **state),
                 **node_inputs,
             },
         }
@@ -265,4 +272,23 @@ def test_starfit_graph(node_class, n_substeps, tmp_path):
             process_dict, dict(control), discretizations=discretizations
         )
 
-    perfect_restart(make_model, S_PER_TIME, 90, tmp_path)
+    # the starting storage is REQUIRED initial state: not supplied, the
+    # Model raises at assembly; nan on a reservoir's row is reported by
+    # the node type's check once the state is in place
+    assert graph_class.required_initial_state == ("lake_storage_sub",)
+    with pytest.raises(
+        ValueError, match=r"\['lake_storage_sub'\] has no default"
+    ):
+        make_model({})
+    one_nan = initial_storage.copy()
+    one_nan[3] = np.nan
+    with pytest.raises(
+        ValueError,
+        match=rf"{node_class.type_name}: nan lake_storage_sub on 1 of",
+    ):
+        make_model({}, lake_storage_sub=one_nan)
+
+    def make_supplied_model(control):
+        return make_model(control, lake_storage_sub=initial_storage)
+
+    perfect_restart(make_supplied_model, S_PER_TIME, 90, tmp_path)

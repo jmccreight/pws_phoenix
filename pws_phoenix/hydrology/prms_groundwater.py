@@ -131,7 +131,6 @@ class PRMSGroundwaterNoDprst(Process):
         dtype=np.float64,
         units="inches",
         description="Groundwater reservoir storage [inches]",
-        initial="gwstor_init",
     )
     gwres_stor_old = DataArrayMeta(
         kind="variable",
@@ -139,7 +138,6 @@ class PRMSGroundwaterNoDprst(Process):
         dtype=np.float64,
         units="inches",
         description="Groundwater reservoir storage, previous timestep",
-        initial="gwstor_init",
     )
     gwres_flow = DataArrayMeta(
         kind="variable",
@@ -186,6 +184,14 @@ class PRMSGroundwaterNoDprst(Process):
     # ------------------------------------------------------------------
     # Computation
     # ------------------------------------------------------------------
+
+    def initialize(self) -> None:
+        """Cold-start default: gwres_stor = 2.0 inches, PRMS's declared
+        default for gwstor_init (gwflow.f90 declparam, 5.2.1 and
+        5.2.1.1; pywatershed declares none). A domain's own value is
+        SUPPLIED gwres_stor (prms_translate renames gwstor_init),
+        written after this hook."""
+        self._refs["gwres_stor"][:] = 2.0
 
     def advance(self) -> None:
         self._refs["gwres_stor_old"][:] = self._refs["gwres_stor"]

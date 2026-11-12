@@ -51,6 +51,7 @@ from pws_phoenix.hydrology.prms_stream_temp import (
 )
 from pws_phoenix.maps import MapMPI
 from pws_phoenix.model import ModelMPI
+from pws_phoenix.prms_translate import seg_inflow_from_segment_flow_init
 from pws_phoenix.process import DataArrayMeta, Process
 
 DOMAIN_DIR = PWS_TEST_DATA / "drb_2yr"
@@ -163,7 +164,7 @@ def mpi_paths():
                 _params("Snow"),
                 _params("Runoff"),
                 _params("Soilzone"),
-                gw_params[["gwflow_coef", "gwsink_coef", "gwstor_init"]],
+                gw_params[["gwflow_coef", "gwsink_coef"]],
                 dis_hru[
                     [
                         "hru_type",
@@ -287,6 +288,11 @@ def mpi_run(mpi_paths):
         "prms_groundwater": {
             "class": PRMSGroundwater,
             "discretization": "nhru",
+            # PRMS gwstor_init = the supplied gwres_stor (full extent;
+            # each rank takes its block)
+            "gwres_stor": xr.load_dataset(
+                DOMAIN_DIR / "parameters_PRMSGroundwater.nc"
+            )["gwstor_init"],
         },
         "humidity_carrier": {
             "class": HumidityCarrier,
@@ -296,7 +302,9 @@ def mpi_run(mpi_paths):
             "class": PRMSChannel,
             "discretization": "nsegment",
             "parameters": channel_params,
-            "segment_flow_init": channel_params["segment_flow_init"],
+            "seg_inflow": seg_inflow_from_segment_flow_init(
+                channel_params["segment_flow_init"], dis_seg["tosegment"]
+            ),
         },
         "prms_hydraulic_geometry": {
             "class": PRMSHydraulicGeometryWidthOnly,

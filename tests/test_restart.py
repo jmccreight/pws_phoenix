@@ -23,8 +23,9 @@ same recipe -- see the restart arc (R2).
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import cold_start_state
 from pws_phoenix.model import Model
-from pws_phoenix.process import Process
+from pws_phoenix.process import DataArrayMeta, Process
 from pws_phoenix.processes_concrete import Lower, Upper
 
 PARAM_NAMES = [
@@ -42,13 +43,13 @@ def _make_model(toy_ds, control):
         "upper": {
             "class": Upper,
             "forcing_up": toy_ds["forcing_up"],
-            "flow_initial": toy_ds["flow_initial"],
+            **cold_start_state(control, flow=toy_ds["flow_initial"]),
             "parameters": toy_ds[PARAM_NAMES],
         },
         "lower": {
             "class": Lower,
             "forcing_low": toy_ds["forcing_low"],
-            "storage_initial": toy_ds["storage_initial"],
+            **cold_start_state(control, storage=toy_ds["storage_initial"]),
             "parameters": toy_ds[PARAM_NAMES],
         },
     }
@@ -131,19 +132,214 @@ def test_restart_empty_dir_fails_loudly(toy_ds, tmp_path):
         _make_model(toy_ds, {"restart_read": empty})
 
 
-def test_missing_initial_fails_loudly(toy_ds):
-    """An absent initial= name raises at assembly rather than starting
-    the state as nan (nan == nan passes assert_array_equal, so a
-    silent nan state can hide behind a green test)."""
+def test_supplied_state_with_restart_raises(toy_ds, tmp_path):
+    """One source of starting state: supplied state + restart_read
+    raises (before the restart is read)."""
     process_dict = {
         "upper": {
             "class": Upper,
             "forcing_up": toy_ds["forcing_up"],
+            "flow": toy_ds["flow_initial"],
             "parameters": toy_ds[PARAM_NAMES],
         },
     }
-    with pytest.raises(ValueError, match="initial='flow_initial'"):
-        Model(process_dict, {})
+    with pytest.raises(ValueError, match="use one source"):
+        Model(process_dict, {"restart_read": tmp_path})
+
+
+class _DefaultsToZero(Process):
+    """A restart variable whose initialize() default is zero."""
+
+    level = DataArrayMeta(
+        kind="variable", dims=("space",), dtype=np.float64, restart=True
+    )
+
+    def initialize(self) -> None:
+        self._refs["level"][:] = 0.0
+
+    def advance(self) -> None:
+        pass
+
+    def calculate(self, dt, time) -> None:
+        pass
+
+
+def test_supplied_state_overrides_initialize(toy_ds):
+    """Supplied state is written AFTER initialize(): it wins over the
+    default, as a restart does."""
+    n_space = toy_ds.sizes["space"]
+    supplied = xr.DataArray(np.arange(n_space, dtype=float), dims="space")
+    process_dict = {
+        # FIRST: its forcing and parameters give the grid its time axis
+        # and "space" size before _DefaultsToZero allocates `level`
+        "upper": {
+            "class": Upper,
+            "forcing_up": toy_ds["forcing_up"],
+            "flow": toy_ds["flow_initial"],
+            "parameters": toy_ds[PARAM_NAMES],
+        },
+        "proc": {"class": _DefaultsToZero, "level": supplied},
+    }
+    with Model(process_dict, {}) as model:
+        level = model.model_dict["proc"]["level"].values
+        np.testing.assert_array_equal(level, supplied.values)
+        assert level is not supplied.values  # copied in (state), not shared
+
+
+class _TwoLevels(Process):
+    """initialize() computes `level_b` from `level_a`'s default, so
+    the two are one state group."""
+
+    level_a = DataArrayMeta(
+        kind="variable", dims=("space",), dtype=np.float64, restart=True
+    )
+    level_b = DataArrayMeta(
+        kind="variable", dims=("space",), dtype=np.float64, restart=True
+    )
+    state_groups = (("level_a", "level_b"),)
+
+    def initialize(self) -> None:
+        self._refs["level_a"][:] = 1.0
+        self._refs["level_b"][:] = 2.0 * self._refs["level_a"]
+
+    def advance(self) -> None:
+        pass
+
+    def calculate(self, dt, time) -> None:
+        pass
+
+
+def _two_levels_model(toy_ds, **state):
+    process_dict = {
+        # FIRST: gives the grid its time axis and "space" size
+        "upper": {
+            "class": Upper,
+            "forcing_up": toy_ds["forcing_up"],
+            "flow": toy_ds["flow_initial"],
+            "parameters": toy_ds[PARAM_NAMES],
+        },
+        "proc": {"class": _TwoLevels, **state},
+    }
+    return Model(process_dict, {})
+
+
+def test_partial_state_group_raises(toy_ds):
+    """Part of a state group raises, naming what is missing; the whole
+    group, or none of it, is accepted."""
+    n_space = toy_ds.sizes["space"]
+    level_a = xr.DataArray(np.full(n_space, 5.0), dims="space")
+    level_b = xr.DataArray(np.full(n_space, 7.0), dims="space")
+
+    with pytest.raises(ValueError, match=r"without \['level_b'\]"):
+        _two_levels_model(toy_ds, level_a=level_a)
+
+    with _two_levels_model(toy_ds) as model:
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level_b"].values, 2.0
+        )
+    with _two_levels_model(toy_ds, level_a=level_a, level_b=level_b) as model:
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level_a"].values, 5.0
+        )
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level_b"].values, 7.0
+        )
+
+
+class _NoDefault(Process):
+    """`level` has no default (required state); a negative starting
+    level is reported by check_initial_state()."""
+
+    level = DataArrayMeta(
+        kind="variable", dims=("space",), dtype=np.float64, restart=True
+    )
+    required_initial_state = ("level",)
+
+    def check_initial_state(self) -> list[str]:
+        n_bad = int((self._refs["level"] < 0.0).sum())
+        return [f"{n_bad} negative level(s)"] if n_bad else []
+
+    def advance(self) -> None:
+        pass
+
+    def calculate(self, dt, time) -> None:
+        pass
+
+
+def _no_default_process_dict(toy_ds, control=None, **state):
+    return {
+        # FIRST: gives the grid its time axis and "space" size
+        "upper": {
+            "class": Upper,
+            "forcing_up": toy_ds["forcing_up"],
+            **cold_start_state(control or {}, flow=toy_ds["flow_initial"]),
+            "parameters": toy_ds[PARAM_NAMES],
+        },
+        "proc": {"class": _NoDefault, **state},
+    }
+
+
+def test_required_initial_state_missing_raises(toy_ds):
+    """Required state not supplied raises at assembly; supplied, it is
+    accepted and is what the model starts from."""
+    with pytest.raises(ValueError, match=r"\['level'\] has no default"):
+        Model(_no_default_process_dict(toy_ds), {})
+
+    n_space = toy_ds.sizes["space"]
+    level = xr.DataArray(np.full(n_space, 3.0), dims="space")
+    with Model(_no_default_process_dict(toy_ds, level=level), {}) as model:
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level"].values, 3.0
+        )
+
+
+def test_required_initial_state_from_restart(toy_ds, tmp_path):
+    """A restart satisfies required state: nothing is supplied on the
+    warm start."""
+    n_space = toy_ds.sizes["space"]
+    level = xr.DataArray(np.full(n_space, 3.0), dims="space")
+    restart_dir = tmp_path / "restarts"
+    with Model(_no_default_process_dict(toy_ds, level=level), {}) as model:
+        model.run(DT, np.int32(2))
+        model.write_restart(restart_dir)
+    control = {"restart_read": restart_dir}
+    process_dict = _no_default_process_dict(toy_ds, control=control)
+    with Model(process_dict, control) as model:
+        np.testing.assert_array_equal(
+            model.model_dict["proc"]["level"].values, 3.0
+        )
+
+
+def test_check_initial_state_raises(toy_ds):
+    """A problem a process reports about the starting state in place
+    (here: supplied) makes the Model raise, naming the process."""
+    n_space = toy_ds.sizes["space"]
+    level = xr.DataArray(np.full(n_space, -1.0), dims="space")
+    with pytest.raises(
+        ValueError, match=rf"process 'proc': {n_space} negative level"
+    ):
+        Model(_no_default_process_dict(toy_ds, level=level), {})
+
+
+def test_state_groups_are_restart_variables():
+    """Guard: every name in a declared state group, and every required
+    state name, is one of that class's restart variables."""
+    # importing registers the classes that declare groups
+    from pws_phoenix.hydrology import (  # noqa: F401
+        prms_runoff,
+        prms_soilzone,
+        prms_soilzone_ag,
+    )
+
+    declaring = [cc for cc in Process._registry.values() if cc.state_groups]
+    assert {"PRMSSoilzone", "PRMSSoilzoneAg", "PRMSRunoffAg"} <= {
+        cc.__name__ for cc in declaring
+    }
+    for name, cls in Process._registry.items():
+        restart = set(cls.get_restart_variables())
+        for group in cls.state_groups:
+            assert set(group) <= restart, f"{name}: {group}"
+        assert set(cls.required_initial_state) <= restart, f"{name}: required"
 
 
 def test_flags_are_variables_only():

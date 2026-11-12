@@ -105,7 +105,8 @@ class TestSynthetic:
             StarfitFlowNode,
             flows_to=pt_below,
             node_id=901,
-            parameters={"GRanD_CAP_MCM": 100.0, "initial_storage": 40.0},
+            parameters={"GRanD_CAP_MCM": 100.0},
+            initial_state={"lake_storage_sub": 40.0},
         )
         pt_above = NewNode(PassThroughFlowNode, flows_to=sf, node_id=902)
         nodes = [pt_above, sf, pt_below]  # worst case: deps come later
@@ -124,7 +125,12 @@ class TestSynthetic:
         cap = kit.parameters["GRanD_CAP_MCM"].values
         assert cap[row] == 100.0
         assert np.isnan(np.delete(cap, row)).all()
-        assert kit.parameters["initial_storage"].values[row] == 40.0
+        # its initial state: one (nnodes,) array, nan off its row
+        assert set(kit.initial_state) == {"lake_storage_sub"}
+        storage = kit.initial_state["lake_storage_sub"]
+        assert storage.dims == ("nnodes",)
+        assert storage.values[row] == 40.0
+        assert np.isnan(np.delete(storage.values, row)).all()
         # a declared STARFIT parameter not supplied stays nan
         assert np.isnan(kit.parameters["NORhi_mu"].values).all()
         # types numbered by first appearance in the collated list
@@ -184,6 +190,20 @@ class TestSynthetic:
                         flows_to=30,
                         node_id=1,
                         parameters={"flow_min": 0.0, "flow_max": 1.0},
+                    )
+                ],
+            )
+        with pytest.raises(ValueError, match="unknown initial state"):
+            splice_flow_graph(
+                toy_dis_seg,
+                toy_channel_params,
+                [
+                    NewNode(
+                        StarfitFlowNode,
+                        flows_to=30,
+                        node_id=1,
+                        # a variable, but not a restart variable
+                        initial_state={"lake_release": 1.0},
                     )
                 ],
             )

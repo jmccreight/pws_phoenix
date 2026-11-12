@@ -80,8 +80,8 @@ def test_stream_temp_standalone_externals():
         "external_inputs",
         "parameters",
         "derivable_parameters",
-        "initial_values",
         "initial_state",
+        "required_initial_state",
     }
     # derivable: required, with a stated derivation (NOT the same as
     # internal parameters, which are never supplied)
@@ -213,14 +213,15 @@ def test_full_chain_contract():
     ):
         assert seg_opt["internal_inputs"][name]["producer"] == producer
 
-    # the initial= seams surface (the *_init PARAMETERS -- soilzone's
-    # soil_moist_init_frac etc. -- are ordinary supplied parameters
-    # and ride the "parameters" list)
-    assert seg["initial_values"]["segment_flow_init"] == {
-        "variable": "seg_outflow",
-        "process": "prms_channel",
-    }
-    assert "gwstor_init" in hru["initial_values"]
+    # starting state = the restart variables under their own names
+    # (the old initial= seams and their PRMS names are gone); the
+    # PRMS *_init PARAMETERS initialize() still consumes -- soilzone's
+    # soil_moist_init_frac etc. -- ride the "parameters" list
+    assert "seg_inflow" in seg["initial_state"]["prms_channel"]
+    assert "gwres_stor" in hru["initial_state"]["prms_groundwater"]
+    for gg in (seg, hru):
+        assert "segment_flow_init" not in gg["parameters"]
+        assert "gwstor_init" not in gg["parameters"]
     assert "soil_moist_init_frac" in hru["parameters"]
 
     # derivable parameters: the solar tables (factory), hru_in_to_cf

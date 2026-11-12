@@ -701,6 +701,11 @@ class PRMSSoilzoneAg(Process):
     }
     budgets = {"mass": _MASS_BUDGET}
 
+    # initialize() computes soil_lower = soil_moist - soil_rechr and
+    # clamps soil_rechr <= soil_moist from the DEFAULTS (see
+    # Process.state_groups)
+    state_groups = (("soil_moist", "soil_rechr", "soil_lower"),)
+
     _ZERO_VARS = (
         "hru_area_perv",
         "hru_frac_perv",

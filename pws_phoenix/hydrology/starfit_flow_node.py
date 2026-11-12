@@ -46,11 +46,17 @@ Numerics notes (pywatershed semantics, kept verbatim):
 - Data-prep moved OUT of the node (parameters freeze at assembly,
   before the initialize hooks): nan `Obs_MEANFLOW_CUMECS` must be
   filled with `inflow_mean` upstream (pywatershed does this in node
-  __init__); nan `initial_storage` (pywatershed's NOR-midpoint
-  fallback) is the caller's: `nor_midpoint_initial_storage(params,
-  date)` gives the value, the start/end active-window gating is NOT
-  ported. initialize_type RAISES on either, scoped to this type's
-  own rows.
+  __init__); initialize_type RAISES on it, scoped to this type's own
+  rows.
+- Starting storage is STATE, not a parameter: pywatershed's
+  `initial_storage` parameter is NOT declared. `lake_storage_sub`
+  [MCM, in a cfs graph too -- the unit it is stored and restarted
+  in] is REQUIRED initial state (`required_initial_state`): supplied
+  under its own name, or from a restart. nan on this type's own rows
+  is reported by `check_initial_state_type`. pywatershed's
+  NOR-midpoint fallback for a nan initial_storage is the caller's:
+  `nor_midpoint_initial_storage(params, date)` gives the value; the
+  start/end active-window gating is NOT ported.
 
 NOT ported (recorded): compute_daily (pywatershed itself flags it for
 deletion), Budget/mass_budget (sink_source is harvested as zero --
@@ -357,9 +363,9 @@ def starfit_finalize(inode, n_sub, state):
 def initialize_starfit_type(
     dataset, n_substeps, io_in_cfs, type_name, compute_daily=False
 ) -> None:
-    """Shared numpy build hook for the STARFIT family: data checks,
-    the m3ps_to_MCM and io-unit factors, and the initial marching
-    storage -- all scoped to `type_name`'s OWN rows (family types can
+    """Shared numpy build hook for the STARFIT family: data checks
+    and the m3ps_to_MCM and io-unit factors -- all scoped to
+    `type_name`'s OWN rows (family types can
     hold DIFFERENT m3ps_to_MCM values in one graph: the daily node's
     basis is the full day regardless of the graph n_substeps)."""
     # scope to the type's rows (other types' rows hold nan pad);
@@ -377,15 +383,6 @@ def initialize_starfit_type(
             "data-prep here: fill nans with inflow_mean when building "
             "the parameter dataset."
         )
-    init_stor = dataset["initial_storage"].values
-    if np.isnan(init_stor[mine]).any():
-        raise NotImplementedError(
-            f"{type_name}: nan initial_storage -- parameters freeze "
-            "at assembly, so pywatershed's in-node NOR-midpoint "
-            "fallback is data-prep here: supply initial_storage (io "
-            "units), e.g. nor_midpoint_initial_storage(params, date) "
-            "converted to the graph's units."
-        )
 
     # flow -> volume basis (pywatershed nhrs_substep * 3600 / 1e6),
     # per-node so the njit code reads it from state: hourly types use
@@ -401,13 +398,26 @@ def initialize_starfit_type(
     dataset["io_to_cms"].values[mine] = cfs_to_cms if io_in_cfs else 1.0
     dataset["cms_to_io"].values[mine] = cms_to_cfs if io_in_cfs else 1.0
 
-    # pywatershed node __init__: the marching storage state starts
-    # at initial_storage (supplied in io units; cf_to_cm when cfs --
-    # identity when cms). Other state stays nan (pywatershed nan1d)
-    # until first computed.
-    dataset["lake_storage_sub"].values[mine] = (
-        init_stor[mine] * dataset["io_to_cms"].values[mine]
-    )
+    # No state is set here: the marching storage lake_storage_sub is
+    # REQUIRED initial state (supplied, or from a restart); the rest
+    # stays nan (pywatershed nan1d) until first computed.
+
+
+def starfit_check_initial_state(dataset, type_name) -> list[str]:
+    """Shared starting-state check for the STARFIT family: the
+    marching storage `lake_storage_sub` [MCM] has no default, so nan
+    on `type_name`'s OWN rows is a problem (other types' rows hold
+    nan legitimately)."""
+    names = list(dataset["node_type"].attrs["node_type_names"])
+    mine = dataset["node_type"].values == names.index(type_name)
+    n_bad = int(np.isnan(dataset["lake_storage_sub"].values[mine]).sum())
+    if n_bad:
+        return [
+            f"{type_name}: nan lake_storage_sub on {n_bad} of its "
+            "node(s) -- supply the starting storage [MCM], e.g. "
+            "nor_midpoint_initial_storage(params, date)."
+        ]
+    return []
 
 
 def starfit_advance_type(dataset) -> None:
@@ -424,7 +434,8 @@ def starfit_advance_type(dataset) -> None:
 
 
 def nor_midpoint_initial_storage(params, init_date) -> float:
-    """pywatershed's fallback for a nan ``initial_storage``: the
+    """A starting ``lake_storage_sub`` when none is known --
+    pywatershed's fallback for a nan ``initial_storage``: the
     midpoint of the normal operating range (NOR) at ``init_date``'s
     epiweek (the raw week, no 53 -> 52 fold -- pywatershed's node
     __init__ uses the raw week), as a fraction of capacity, in MCM.
@@ -436,8 +447,8 @@ def nor_midpoint_initial_storage(params, init_date) -> float:
             a one-reservoir xarray Dataset; values are ``float()``-ed).
         init_date: a ``datetime.date`` / ``datetime.datetime``.
 
-    Returns: storage in MCM; multiply by ``cms_to_cfs`` (== cm_to_cf)
-    for a cfs graph.
+    Returns: storage in MCM, the unit of ``lake_storage_sub`` (in a
+    cfs graph too).
     """
     import epiweeks
 
@@ -479,14 +490,6 @@ class StarfitFlowNode:
         # -- parameters (starfit_original_parameters.nc names,
         # verbatim; NOR bounds in % capacity, Release_* standardized,
         # capacities/storages MCM, flows m^3/s) --
-        "initial_storage": DataArrayMeta(
-            kind="parameter",
-            dims=("space",),
-            dtype=np.float64,
-            units="io storage units",
-            description="Initial lake storage [MCM] (nan = pywatershed"
-            " NOR-midpoint fallback, NOT ported -- raises)",
-        ),
         "GRanD_CAP_MCM": DataArrayMeta(
             kind="parameter",
             dims=("space",),
@@ -789,7 +792,7 @@ class StarfitFlowNode:
             dtype=np.float64,
             units="MCM",
             description="Lake storage, current substep [MCM] (the "
-            "marching state; = initial_storage at init)",
+            "marching state; REQUIRED initial state)",
             restart=True,
         ),
         "lake_storage_old": DataArrayMeta(
@@ -843,6 +846,9 @@ class StarfitFlowNode:
         ),
     }
 
+    # the marching storage has no default: supplied, or from a restart
+    required_initial_state = ("lake_storage_sub",)
+
     # njit node contract (Dispatchers; dispatched by the graph kernel)
     prepare = starfit_prepare
     substep = _substep
@@ -853,6 +859,10 @@ class StarfitFlowNode:
         initialize_starfit_type(
             dataset, n_substeps, io_in_cfs, StarfitFlowNode.type_name
         )
+
+    @staticmethod
+    def check_initial_state_type(dataset) -> list[str]:
+        return starfit_check_initial_state(dataset, StarfitFlowNode.type_name)
 
     @staticmethod
     def advance_type(dataset) -> None:
