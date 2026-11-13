@@ -51,11 +51,12 @@ Conventions/seams:
 - ``_seg_slope`` / ``seg_length_km`` are derived copies (upstream
   edits the parameters in place: slope clamp to 1e-7, m -> km).
 - never-has-flow segments (no HRU area anywhere upstream, walked via
-  tosegment) get seg_tave_water = NaN once at init_from_params; the
+  tosegment) are found once at init_from_params (the mask
+  ``_never_has_flow``) and get seg_tave_water = NaN at init_state; the
   ``hru_segment``/``hru_area`` ('nhru',)-dim parameters exist ONLY
   for that walk (foreign named dim, like nmonth/ndoy).
 - gw/ss silos ((nsegment, 366) circular buffers, init -99.9),
-  indices/sums, svi and the shade scratch are PYTHON-ATTR state
+  indices, svi and the shade scratch are PYTHON-ATTR state
   (upstream privates, not variables).
 - tolerance: the stream-temp family standard is 5e-3 (upstream's own
   comment: iteration-loop and trig noise "just above 32-bit
@@ -483,12 +484,10 @@ def _update_running_avg_temp(
     gw_tau,
     gw_index,
     gw_silo,
-    gw_sum,
     seg_tave_gw,
     ss_tau,
     ss_index,
     ss_silo,
-    ss_sum,
     seg_tave_ss,
 ):
     """Update running average temperatures for groundwater and subsurface.
@@ -505,12 +504,10 @@ def _update_running_avg_temp(
         gw_tau: Groundwater tau values (immutable)
         gw_index: Groundwater circular buffer indices (MUTATED)
         gw_silo: Groundwater circular buffer (MUTATED)
-        gw_sum: Groundwater running sums (MUTATED)
         seg_tave_gw: Groundwater temperatures (MUTATED - output)
         ss_tau: Subsurface tau values (immutable)
         ss_index: Subsurface circular buffer indices (MUTATED)
         ss_silo: Subsurface circular buffer (MUTATED)
-        ss_sum: Subsurface running sums (MUTATED)
         seg_tave_ss: Subsurface temperatures (MUTATED - output)
     """
     for jj in segment_order:
@@ -1162,19 +1159,36 @@ class PRMSStreamTempBase(Process):
     # Initialization
     # ------------------------------------------------------------------
 
+    def allocate(self) -> None:
+        nsegment = self._refs["seg_length"].shape[0]
+
+        # parameter-derived, filled by init_from_params
+        self._segment_hruarea = np.zeros(nsegment, dtype=np.float64)
+        self._upstream_count = np.zeros(nsegment, dtype=np.int32)
+        self._upstream_idx = np.zeros((nsegment, 10), dtype=np.int32)
+        # True = no HRU on the segment or anywhere upstream of it:
+        # the segment can never have flow (seg_tave_water = nan)
+        self._never_has_flow = np.zeros(nsegment, dtype=np.bool_)
+        self._declination = np.empty(MAX_DAYS_PER_YEAR, dtype=np.float64)
+
+        # circular-buffer state (upstream privates), filled by
+        # init_state
+        silo_shape = (nsegment, MAX_DAYS_PER_YEAR)
+        self._gw_silo = np.empty(silo_shape, dtype=np.float64)
+        self._ss_silo = np.empty(silo_shape, dtype=np.float64)
+        self._gw_index = np.zeros(nsegment, dtype=np.int32)
+        self._ss_index = np.zeros(nsegment, dtype=np.int32)
+
+        # per-step scratch: _seg_inflow is written before it is read
+        # on every segment each step; _seg_svi is rewritten each step
+        # by the dynamic shade and stays zero under constant shade
+        self._seg_inflow = np.zeros(nsegment, dtype=np.float64)
+        self._seg_svi = np.zeros(nsegment, dtype=np.float64)
+        self._dummy1 = np.zeros(1, dtype=np.float64)
+
     def init_from_params(self) -> None:
         refs = self._refs
         nsegment = refs["seg_length"].shape[0]
-
-        for name in (
-            "seg_tave_gw",
-            "seg_tave_ss",
-            "seg_tave_lat",
-            "seg_shade",
-        ):
-            refs[name][:] = 0.0
-        refs["seg_tave_water"][:] = -99.9
-        refs["seg_tave_upstream"][:] = np.nan
 
         # seg_length validation + m -> km (upstream edits the param)
         seg_length = refs["seg_length"]
@@ -1199,20 +1213,19 @@ class PRMSStreamTempBase(Process):
         self._melt_temp = float(refs["melt_temp"][0])
         self._maxiter = int(refs["maxiter_sntemp"][0])
 
-        # segment HRU areas (never-flow walk only in this class)
+        # segment HRU areas (never-has-flow walk only in this class)
         hru_segment = refs["hru_segment"]
         hru_area = refs["hru_area"]
-        segment_hruarea = np.zeros(nsegment, dtype=np.float64)
+        segment_hruarea = self._segment_hruarea
+        segment_hruarea[:] = 0.0
         for jhru in range(hru_segment.shape[0]):
             seg_idx = hru_segment[jhru]
             if seg_idx > 0:
                 segment_hruarea[seg_idx - 1] += hru_area[jhru]
-        self._segment_hruarea = segment_hruarea
 
         # upstream segment info (tosegment 1-based scan; max 10)
         tosegment = refs["tosegment"]
-        self._upstream_count = np.zeros(nsegment, dtype=np.int32)
-        self._upstream_idx = np.zeros((nsegment, 10), dtype=np.int32)
+        self._upstream_idx[:] = 0
         for jseg in range(nsegment):
             count = 0
             for iseg in range(nsegment):
@@ -1221,9 +1234,12 @@ class PRMSStreamTempBase(Process):
                     count += 1
             self._upstream_count[jseg] = count
 
-        # never-has-flow marking (upstream init, verbatim walk): a
-        # segment without HRUs anywhere upstream can never have flow
-        seg_tave_water = refs["seg_tave_water"]
+        # never-has-flow mask (upstream init, verbatim walk): a
+        # segment without HRUs anywhere upstream can never have flow.
+        # Upstream writes nan to seg_tave_water here; init_state does
+        # that from the mask.
+        never_has_flow = self._never_has_flow
+        never_has_flow[:] = False
         for iseg in range(nsegment):
             if segment_hruarea[iseg] <= NEARZERO:
                 has_upstream_hrus = False
@@ -1246,28 +1262,32 @@ class PRMSStreamTempBase(Process):
                     if has_upstream_hrus or not found_upstream:
                         break
                 if not has_upstream_hrus:
-                    seg_tave_water[iseg] = np.nan
+                    never_has_flow[iseg] = True
 
         # solar declination table (upstream _precompute_solar_geometry)
-        k = np.arange(MAX_DAYS_PER_YEAR) + 1.0
-        self._declination = 0.40928 * np.cos(
-            ((2.0 * PI) / DAYS_YR) * (172.0 - k)
+        day_number = np.arange(MAX_DAYS_PER_YEAR) + 1.0
+        self._declination[:] = 0.40928 * np.cos(
+            ((2.0 * PI) / DAYS_YR) * (172.0 - day_number)
         )
 
-        # circular-buffer state + scratch (upstream privates)
-        self._gw_silo = np.full(
-            (nsegment, MAX_DAYS_PER_YEAR), -99.9, dtype=np.float64
-        )
-        self._ss_silo = np.full(
-            (nsegment, MAX_DAYS_PER_YEAR), -99.9, dtype=np.float64
-        )
-        self._gw_index = np.zeros(nsegment, dtype=np.int32)
-        self._ss_index = np.zeros(nsegment, dtype=np.int32)
-        self._gw_sum = np.zeros(nsegment, dtype=np.float64)
-        self._ss_sum = np.zeros(nsegment, dtype=np.float64)
-        self._seg_inflow = np.zeros(nsegment, dtype=np.float64)
-        self._seg_svi = np.zeros(nsegment, dtype=np.float64)
-        self._dummy1 = np.zeros(1, dtype=np.float64)
+    def init_state(self, time: Time) -> None:
+        refs = self._refs
+        for name in (
+            "seg_tave_gw",
+            "seg_tave_ss",
+            "seg_tave_lat",
+            "seg_shade",
+        ):
+            refs[name][:] = 0.0
+        refs["seg_tave_water"][:] = -99.9
+        refs["seg_tave_water"][self._never_has_flow] = np.nan
+        refs["seg_tave_upstream"][:] = np.nan
+
+        # empty silos (-99.9 = no entry), indices at the start
+        self._gw_silo[:] = -99.9
+        self._ss_silo[:] = -99.9
+        self._gw_index[:] = 0
+        self._ss_index[:] = 0
 
     # ------------------------------------------------------------------
     # Computation
@@ -1290,12 +1310,10 @@ class PRMSStreamTempBase(Process):
             refs["gw_tau"],
             self._gw_index,
             self._gw_silo,
-            self._gw_sum,
             refs["seg_tave_gw"],
             refs["ss_tau"],
             self._ss_index,
             self._ss_silo,
-            self._ss_sum,
             refs["seg_tave_ss"],
         )
 
@@ -1373,7 +1391,7 @@ class PRMSStreamTempBase(Process):
 
     # -- restart hooks: the gw/ss running-average silos and their
     # circular-buffer indices are EVOLVING python-attr state (the
-    # statics -- topology, declination table -- are rebuilt by
+    # statics -- topology, declination table -- are refilled by
     # init_from_params(); the other attrs are per-step scratch) --
 
     def get_restart_state(self) -> dict[str, np.ndarray]:
@@ -1432,20 +1450,24 @@ class PRMSStreamTemp(PRMSStreamTempBase):
         "parameter", "Min west bank vegetation density [-]", units="fraction"
     )
 
-    def init_from_params(self) -> None:
-        super().init_from_params()
+    def allocate(self) -> None:
+        super().allocate()
         # the seg_width-independent shade geometry per (day of year,
         # segment): 5 x (366, nsegment) float64 = 6.7 MB on drb, the
-        # same order as the gw/ss silos above; rebuilt by init_from_params
-        # like the other statics (not restart state)
-        refs = self._refs
-        nsegment = refs["seg_length"].shape[0]
+        # same order as the gw/ss silos above; filled by
+        # init_from_params like the other statics (not restart state)
+        nsegment = self._refs["seg_length"].shape[0]
         shape = (MAX_DAYS_PER_YEAR, nsegment)
         self._sh_hrsr = np.zeros(shape, dtype=np.float64)
         self._sh_hrrh = np.zeros(shape, dtype=np.float64)
         self._sh_hrss = np.zeros(shape, dtype=np.float64)
         self._sh_sti = np.zeros(shape, dtype=np.float64)
         self._sh_totsh = np.zeros(shape, dtype=np.float64)
+
+    def init_from_params(self) -> None:
+        super().init_from_params()
+        refs = self._refs
+        # every element of the five tables is written
         _shade_statics_table(
             self._sh_hrsr,
             self._sh_hrrh,
@@ -1497,7 +1519,7 @@ class PRMSStreamTempConstantShade(PRMSStreamTempBase):
     = segshade_sum on summer days (doy 121-273) and segshade_win
     otherwise; the vegetation shade index svi is 0.0 (so the hv
     longwave term in _equilb vanishes) -- _seg_svi stays at its
-    init_from_params() zeros and is never written."""
+    allocate() zeros and is never written."""
 
     segshade_sum = _meta(
         "parameter",
