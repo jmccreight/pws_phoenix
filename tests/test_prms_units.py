@@ -6,16 +6,14 @@ carries a vocabulary key the declaration agrees with."""
 import pytest
 import xarray as xr
 
-pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
-
-from conftest import PWS_TEST_DATA  # noqa: E402
-from pws_phoenix.prms_translate import (  # noqa: E402
+from conftest import PWS_TEST_DATA
+from pws_phoenix.prms_translate import (
     assemble_from_control,
     load_parameters,
 )
-from pws_phoenix.prms_translate import prms_units  # noqa: E402
-from pws_phoenix.process import _dict_of_kind  # noqa: E402
-from pws_phoenix.units import VOCABULARY  # noqa: E402
+from pws_phoenix.prms_translate import prms_units
+from pws_phoenix.process import _dict_of_kind
+from pws_phoenix.units import VOCABULARY
 
 DRB_DIR = PWS_TEST_DATA / "drb_2yr"
 _drb_needed = [

@@ -31,10 +31,8 @@ import numpy as np
 import pytest
 from mpi4py import MPI
 
-pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
-
 from conftest import PWS_TEST_DATA
-from pws_phoenix.prms_translate import (  # noqa: E402
+from pws_phoenix.prms_translate import (
     assemble_from_control,
     model_from_control,
     mpi_model_from_control,

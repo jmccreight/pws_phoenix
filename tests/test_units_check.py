@@ -21,7 +21,12 @@ UNITS = {
     "param_low_0": "fraction",
     "forcing_up": "inches",
     "forcing_low": "inches",
+    # supplied initial state (restart variables)
+    "flow": "inches",
+    "storage": "inches",
 }
+# toy key -> the state variable it supplies
+STATE_KEYS = {"up_flow_initial": "flow", "low_storage_initial": "storage"}
 
 
 def _stamp(toy: dict) -> dict:
@@ -36,26 +41,34 @@ def _stamp(toy: dict) -> dict:
         da = toy[key].copy(deep=False)
         da.attrs["units"] = UNITS[key]
         out[key] = da
+    for key, name in STATE_KEYS.items():
+        da = toy[key].copy(deep=False)
+        da.attrs["units"] = UNITS[name]
+        out[key] = da
     return out
 
 
-def _process_dict(toy: dict) -> dict:
-    return {
+def _process_dict(toy: dict, *, state: bool = True) -> dict:
+    """`state=False` omits the supplied initial state (a warm start
+    takes it from the restart files)."""
+    process_dict = {
         "upper": {
             "class": Upper,
             "discretization": "hru",
             "parameters": toy["up_params"],
             "forcing_up": toy["forcing_up"],
-            "flow": toy["up_flow_initial"],
         },
         "lower": {
             "class": Lower,
             "discretization": "segment",
             "parameters": toy["low_params"],
             "forcing_low": toy["forcing_low"],
-            "storage": toy["low_storage_initial"],
         },
     }
+    if state:
+        process_dict["upper"]["flow"] = toy["up_flow_initial"]
+        process_dict["lower"]["storage"] = toy["low_storage_initial"]
+    return process_dict
 
 
 def _maps(weights) -> dict:
@@ -250,6 +263,123 @@ def test_convert_file_input(toy, two_grid_weights, n_time, tmp_path: pl.Path):
         )
     got = _run(stamped, two_grid_weights, {"units": "convert"}, n_time)
     np.testing.assert_allclose(got["flow"], answers["flow"], rtol=1e-12)
+
+
+# ----------------------------------------------------------------------
+# supplied initial state + restart files: judged like parameters, but
+# COPIED into the model's buffer, so "convert" converts the model's copy
+# ----------------------------------------------------------------------
+
+
+def test_check_requires_units_on_supplied_state(toy, two_grid_weights):
+    stamped = _stamp(toy)
+    stamped["up_flow_initial"] = toy["up_flow_initial"]  # no attrs
+    with pytest.raises(ValueError, match="initial state: 'flow'.*no units"):
+        Model(
+            _process_dict(stamped),
+            {"units": "check"},
+            maps=_maps(two_grid_weights),
+        )
+    # a bare ndarray carries no attrs at all: the same error ...
+    stamped["up_flow_initial"] = toy["up_flow_initial"].values
+    with pytest.raises(ValueError, match="initial state: 'flow'.*no units"):
+        Model(
+            _process_dict(stamped),
+            {"units": "check"},
+            maps=_maps(two_grid_weights),
+        )
+    # ... and the patch is the way to say what it is
+    Model(
+        _process_dict(stamped),
+        {"units": "check", "units_patch": {"flow": "inches"}},
+        maps=_maps(two_grid_weights),
+    ).finalize()
+
+
+def test_check_rejects_supplied_state_mismatch(toy, two_grid_weights):
+    stamped = _stamp(toy)
+    stamped["low_storage_initial"].attrs["units"] = "feet"
+    with pytest.raises(ValueError, match="initial state: 'storage'.*'feet'"):
+        Model(
+            _process_dict(stamped),
+            {"units": "check"},
+            maps=_maps(two_grid_weights),
+        )
+
+
+def test_convert_supplied_state_leaves_callers_array(
+    toy, two_grid_weights, n_time
+):
+    """flow and storage supplied in feet (/12): 'convert' converts the
+    MODEL's copy -- the declared-units answers -- and the caller's
+    arrays stay as supplied (they are not the working buffers)."""
+    answers = _run(_stamp(toy), two_grid_weights, {"units": "check"}, n_time)
+    other = _stamp(toy)
+    for key in STATE_KEYS:
+        other[key] = (other[key] / 12.0).assign_attrs(units="feet")
+    supplied = {key: other[key].values.copy() for key in STATE_KEYS}
+    got = _run(other, two_grid_weights, {"units": "convert"}, n_time)
+    np.testing.assert_allclose(got["flow"], answers["flow"], rtol=1e-12)
+    np.testing.assert_allclose(got["storage"], answers["storage"], rtol=1e-12)
+    for key in STATE_KEYS:
+        assert other[key].attrs["units"] == "feet"
+        np.testing.assert_array_equal(other[key].values, supplied[key])
+
+
+def test_restart_file_units(toy, two_grid_weights, n_time, tmp_path: pl.Path):
+    """A restart file is a netCDF file anyone can write: its declared
+    variables are judged like supplied state."""
+    stamped = _stamp(toy)
+    maps = _maps(two_grid_weights)
+    n_first = n_time // 2
+    dt = np.float64(1.0)
+    answers = _run(stamped, two_grid_weights, {"units": "check"}, n_time)
+    restart_dir = tmp_path / "restarts"
+    with Model(_process_dict(stamped), {"units": "check"}, maps=maps) as mm:
+        mm.run(dt, np.int32(n_first))
+        mm.write_restart(restart_dir)
+
+    def warm(directory: pl.Path, control: dict) -> dict:
+        control = control | {"restart_read": directory}
+        with Model(
+            _process_dict(stamped, state=False), control, maps=maps
+        ) as model:
+            model.run(dt, np.int32(n_time - n_first))
+            return {
+                "flow": model.model_dict["upper"]["flow"].values.copy(),
+                "storage": model.model_dict["lower"]["storage"].values.copy(),
+            }
+
+    # the model's own files carry the declared units
+    got = warm(restart_dir, {"units": "check"})
+    np.testing.assert_array_equal(got["flow"], answers["flow"])
+    np.testing.assert_array_equal(got["storage"], answers["storage"])
+
+    def rewrite(tag: str, units: str | None, scale: float) -> pl.Path:
+        """The restart files with segment `storage` rescaled/restamped."""
+        directory = tmp_path / tag
+        directory.mkdir()
+        for path in restart_dir.glob("*.nc"):
+            ds = xr.load_dataset(path)
+            if "storage" in ds:
+                # arithmetic keeps attrs: set or remove units outright
+                ds["storage"] = ds["storage"] * scale
+                ds["storage"].attrs.pop("units", None)
+                if units is not None:
+                    ds["storage"].attrs["units"] = units
+            ds.to_netcdf(directory / path.name)
+        return directory
+
+    with pytest.raises(ValueError, match="restart file.*'storage'.*no units"):
+        warm(rewrite("no_units", None, 1.0), {"units": "check"})
+    feet_dir = rewrite("feet", "feet", 1.0 / 12.0)
+    with pytest.raises(ValueError, match="restart file.*'storage'.*'feet'"):
+        warm(feet_dir, {"units": "check"})
+    got = warm(feet_dir, {"units": "convert"})
+    np.testing.assert_allclose(got["flow"], answers["flow"], rtol=1e-12)
+    np.testing.assert_allclose(got["storage"], answers["storage"], rtol=1e-12)
+    # the default mode never looks
+    warm(rewrite("default", None, 1.0), {})
 
 
 class LowerFeet(Lower):

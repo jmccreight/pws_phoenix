@@ -35,41 +35,40 @@ Synthetic data, CI-able.
 
 import numba
 import numpy as np
+import pint
 import pytest
 
-pint = pytest.importorskip("pint")
-
-from kernel_units import (  # noqa: E402
+from kernel_units import (
     PER_DAY,
     assert_kernel_dimensionally_consistent,
     inches,
     run_compiled,
     run_quantified,
 )
-from pws_phoenix.hydrology import (  # noqa: E402
+from pws_phoenix.hydrology import (
     prms_canopy,
     prms_channel,
     prms_runoff,
     prms_soilzone,
     prms_soilzone_ag,
 )
-from pws_phoenix.hydrology.prms_canopy import PRMSCanopy  # noqa: E402
-from pws_phoenix.hydrology.prms_channel import PRMSChannel  # noqa: E402
-from pws_phoenix.hydrology.prms_runoff import (  # noqa: E402
+from pws_phoenix.hydrology.prms_canopy import PRMSCanopy
+from pws_phoenix.hydrology.prms_channel import PRMSChannel
+from pws_phoenix.hydrology.prms_runoff import (
     PRMSRunoff,
     PRMSRunoffAg,
     PRMSRunoffNoDprst,
 )
-from pws_phoenix.hydrology.prms_soilzone import (  # noqa: E402
+from pws_phoenix.hydrology.prms_soilzone import (
     PRMSSoilzone,
     PRMSSoilzoneNoDprst,
 )
-from pws_phoenix.hydrology.prms_soilzone_ag import (  # noqa: E402
+from pws_phoenix.hydrology.prms_soilzone_ag import (
     PRMSSoilzoneAg,
     PRMSSoilzoneAgObsET,
 )
-from pws_phoenix.units import quantity, registry  # noqa: E402
-from pws_phoenix.hydrology.prms_groundwater import (  # noqa: E402
+from pws_phoenix.units import quantity, registry
+from pws_phoenix.hydrology.prms_groundwater import (
     PRMSGroundwater,
     PRMSGroundwaterNoDprst,
 )

@@ -117,6 +117,11 @@ class Model:
         # (grid, name) -> the caller's supplied initial-state array
         # (a reference, not a copy)
         self._supplied_state: Dict[tuple[str, str], Any] = {}
+        # (scale, offset) for supplied state in compatible units under
+        # control["units"] = "convert" (see _record_supplied_state)
+        self._supplied_state_affine: Dict[
+            tuple[str, str], tuple[float, float]
+        ] = {}
         self._initialize_inputs_and_proceses()
         del self._process_dict
 
@@ -479,10 +484,14 @@ class Model:
         name the declared quantity; Map source/target declarations must
         agree), or "convert" (as check, but a RESIDENT array in
         compatible units is converted in place at build; a streamed/lazy
-        one raises). control["units_patch"] = {name: vocabulary key}
-        overrides a supplied array's attrs["units"] (a file without the
-        attribute, or with a spelling outside the vocabulary). Build-time
-        only: no per-step cost. See pws_phoenix/units.py."""
+        one raises). Supplied initial state and the declared variables
+        of a restart_read file are judged the same way; they are copied
+        into the model's buffers, so "convert" converts the model's copy
+        and never the supplied array. control["units_patch"] = {name:
+        vocabulary key} overrides a supplied array's attrs["units"] (a
+        file without the attribute, or with a spelling outside the
+        vocabulary). Build-time only: no per-step cost. See
+        pws_phoenix/units.py."""
         mode = control.get("units")
         if mode not in units_mod.MODES:
             raise ValueError(
@@ -557,8 +566,34 @@ class Model:
         process_dict under their own names) over init_from_params()'s
         defaults. FULL-extent arrays; _restore_grid_var writes this
         rank's block (the restart restore path)."""
-        for (grid, name), values in self._supplied_state.items():
-            self._restore_grid_var(grid, name, np.asarray(values))
+        for key, values in self._supplied_state.items():
+            self._restore_grid_var(
+                *key,
+                np.asarray(values),
+                affine=self._supplied_state_affine.get(key),
+            )
+
+    def _record_supplied_state(
+        self, proc_name: str, cls: Any, grid: str, name: str, values: Any
+    ) -> None:
+        """Record one supplied initial-state array (written later by
+        _apply_supplied_state) and judge its units per control["units"]:
+        as for a parameter, its attrs["units"] (or the units_patch entry)
+        must name the declared quantity -- a bare ndarray has none and
+        raises. Supplied state is COPIED into the model's buffer, so
+        under "convert" the model's copy is converted after the write
+        and the caller's array is left as supplied."""
+        self._supplied_state[(grid, name)] = values
+        conv = units_mod.conversion(
+            name,
+            getattr(values, "attrs", {}),
+            _resolved_fields(cls)[name].units,
+            self._units_mode,
+            self._units_patch,
+            context=f"process '{proc_name}' initial state",
+        )
+        if conv is not None:
+            self._supplied_state_affine[(grid, name)] = conv
 
     def _raise_if_supplied_state_with_restart(self) -> None:
         """One source of initial state: a restart and supplied state
@@ -774,7 +809,9 @@ class Model:
             # here, written AFTER init_from_params() (_apply_supplied_state)
             # so it overrides init_from_params()'s defaults, as a restart does.
             if meta.restart and name in init_dict:
-                self._supplied_state[(grid, name)] = init_dict[name]
+                self._record_supplied_state(
+                    proc_name, cls, grid, name, init_dict[name]
+                )
             grid_ds[name] = da
 
     def _resolve_maps(
@@ -1007,11 +1044,15 @@ class Model:
         state_times = set()
         for grid in self.discretizations:
             expected: set = set()
+            declared_units: Dict[str, Union[str, None]] = {}
             hook_procs = []
             for proc_name, proc in self.model_dict.items():
                 if self._proc_grid[proc_name] != grid:
                     continue
-                expected |= set(type(proc).get_restart_variables())
+                fields = _resolved_fields(type(proc))
+                for name in type(proc).get_restart_variables():
+                    expected.add(name)
+                    declared_units.setdefault(name, fields[name].units)
                 hook_procs.append(proc_name)
             found = sorted(directory.glob(f"*_restart_{grid}.nc"))
             if not expected and not found:
@@ -1033,8 +1074,22 @@ class Model:
                     f"{sorted(expected)} (flags changed since the file "
                     "was written?)."
                 )
-            for name in file_vars:
-                self._restore_grid_var(grid, name, ds_in[name].values)
+            # units per control["units"]: a restart file is a netCDF
+            # file anyone can write, so it is judged like supplied state
+            # (the python-attr hook state below has no declaration and
+            # is NOT checked)
+            for name in sorted(file_vars):
+                conv = units_mod.conversion(
+                    name,
+                    ds_in[name].attrs,
+                    declared_units[name],
+                    self._units_mode,
+                    self._units_patch,
+                    context=f"restart file {found[0].name}",
+                )
+                self._restore_grid_var(
+                    grid, name, ds_in[name].values, affine=conv
+                )
             for proc_name in hook_procs:
                 prefix = f"{proc_name}__"
                 state = {
@@ -1072,14 +1127,23 @@ class Model:
             inp.set_index(self._start_index)
 
     def _restore_grid_var(
-        self, grid: str, name: str, values: np.ndarray
+        self,
+        grid: str,
+        name: str,
+        values: np.ndarray,
+        affine: Union[tuple[float, float], None] = None,
     ) -> None:
         """Restore one restart variable into its grid dataset (the
         subclass seam: restart files are FULL-extent, and ModelMPI
-        restores only its rank's block of the distributed grid)."""
+        restores only its rank's block of the distributed grid).
+        `affine` = (scale, offset) converts the model's buffer in place
+        after the write (control["units"] = "convert")."""
         grid_ds = self.discretizations[grid].dataset
         assert grid_ds is not None
-        grid_ds[name].values[:] = values
+        buffer = grid_ds[name].values
+        buffer[:] = values
+        if affine is not None:
+            units_mod.apply_affine(buffer, *affine, where=f"state '{name}'")
 
     def finalize(self) -> None:
         """Close all file handles opened during initialization."""
@@ -1199,6 +1263,11 @@ class ModelMPI(Model):
         self.inputs_dict: Dict[str, Input] = {}
         # (grid, name) -> the caller's supplied initial-state array
         self._supplied_state: Dict[tuple[str, str], Any] = {}
+        # (scale, offset) for supplied state in compatible units under
+        # control["units"] = "convert" (see _record_supplied_state)
+        self._supplied_state_affine: Dict[
+            tuple[str, str], tuple[float, float]
+        ] = {}
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._load_all = True  # serial-grid data are small; keep in memory
         self._set_budget_options(control)
@@ -1525,7 +1594,9 @@ class ModelMPI(Model):
             self._raise_if_required_initial_state_missing(kk, cls, entry)
             for name in cls.get_restart_variables():
                 if name in entry:
-                    self._supplied_state[(mpi_grid, name)] = entry[name]
+                    self._record_supplied_state(
+                        kk, cls, mpi_grid, name, entry[name]
+                    )
 
         self._validate_inputs_resolved()
         # ---- Bind in process_dict (author) order; distributed-grid
@@ -1758,7 +1829,15 @@ class ModelMPI(Model):
                         parts = comm.allgather(
                             self._ds_mpi_stream[name].values.copy()
                         )
-                        ds_out[name] = ((grid,), np.concatenate(parts))
+                        # units from the declaration: the gathered
+                        # array has no attrs, and restart_read judges
+                        # them under control["units"]
+                        units = _resolved_fields(type(proc))[name].units
+                        ds_out[name] = (
+                            (grid,),
+                            np.concatenate(parts),
+                            {} if units is None else {"units": units},
+                        )
                     else:
                         assert disc.dataset is not None
                         ds_out[name] = disc.dataset[name]
@@ -1784,16 +1863,25 @@ class ModelMPI(Model):
         comm.Barrier()
 
     def _restore_grid_var(
-        self, grid: str, name: str, values: np.ndarray
+        self,
+        grid: str,
+        name: str,
+        values: np.ndarray,
+        affine: Union[tuple[float, float], None] = None,
     ) -> None:
         """Distributed grid: restore this rank's contiguous block of
         the full-extent restart variable; serial grids restore whole
         (replicated), as in the base."""
         if grid == self._mpi_grid:
             aa, bb = self._decomp_slice
-            self._ds_mpi_stream[name].values[:] = values[aa:bb]
+            buffer = self._ds_mpi_stream[name].values
+            buffer[:] = values[aa:bb]
+            if affine is not None:
+                units_mod.apply_affine(
+                    buffer, *affine, where=f"state '{name}'"
+                )
         else:
-            super()._restore_grid_var(grid, name, values)
+            super()._restore_grid_var(grid, name, values, affine)
 
     # -- finalize -------------------------------------------------------
 

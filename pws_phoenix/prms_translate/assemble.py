@@ -142,7 +142,11 @@ def seg_inflow_from_segment_flow_init(
         if jseg < 0:
             continue
         seg_inflow[jseg] = segment_flow_init.values[iseg]
-    return xr.DataArray(seg_inflow, dims=segment_flow_init.dims)
+    # a flow in the same units as segment_flow_init
+    attrs = {
+        kk: vv for kk, vv in segment_flow_init.attrs.items() if kk == "units"
+    }
+    return xr.DataArray(seg_inflow, dims=segment_flow_init.dims, attrs=attrs)
 
 
 def prms_initial_state(params: xr.Dataset) -> dict[str, xr.DataArray]:
@@ -500,7 +504,16 @@ def insert_flow_graph(
                 if name in entry:
                     padded = np.zeros(fg.n_nodes, dtype=np.float64)
                     padded[: fg.n_seg] = entry[name].values
-                    graph_entry[name] = xr.DataArray(padded, dims="nnodes")
+                    # the channel state's own units ride along
+                    graph_entry[name] = xr.DataArray(
+                        padded,
+                        dims="nnodes",
+                        attrs={
+                            kk: vv
+                            for kk, vv in entry[name].attrs.items()
+                            if kk == "units"
+                        },
+                    )
             # the new nodes' initial state (NewNode.initial_state); on
             # a name the channel also supplied, a new node's value
             # wins on its own row

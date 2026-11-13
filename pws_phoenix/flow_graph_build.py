@@ -9,7 +9,7 @@ This is the pws_phoenix counterpart of pywatershed's
 ``_build_flow_graph_inputs`` (hydrology/prms_channel_flow_graph.py) --
 the graph-building arithmetic that lived test-side in
 tests/test_mixed_channel_starfit.py and tests/test_flow_graph.py until
-it stabilized (CLAUDE.md "FlowGraph port"). The splice SEMANTICS are
+it stabilized (CLAUDE.md "FlowGraph"). The splice SEMANTICS are
 pywatershed's, verbatim:
 
 - the ``nsegment`` channel rows come first; new node ``ii`` is graph
@@ -56,6 +56,7 @@ import xarray as xr
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.flow_graph import FlowGraphBase, make_flow_graph
 from pws_phoenix.hydrology.prms_channel_flow_node import PRMSChannelFlowNode
+from pws_phoenix.process import _resolved_fields
 
 # the segment dis variables that are TOPOLOGY, not per-node properties
 # (rebuilt for the graph rather than padded)
@@ -202,6 +203,17 @@ def _resolve_topology(
     return to_graph_index
 
 
+def _units_attrs(units: str | None) -> dict[str, str]:
+    return {} if units is None else {"units": units}
+
+
+def _carried_units(var: xr.DataArray) -> dict[str, str]:
+    """A padded array keeps the units its source was SUPPLIED in, so
+    control["units"] judges the caller's data, not a label written
+    here."""
+    return _units_attrs(var.attrs.get("units"))
+
+
 def splice_flow_graph(
     dis_seg: xr.Dataset,
     channel_params: xr.Dataset,
@@ -286,7 +298,11 @@ def splice_flow_graph(
             continue
         if var.dims != (seg_dim,):
             continue
-        dis_vars[name] = ("nnodes", _pad(var.values, n_new))
+        dis_vars[name] = (
+            "nnodes",
+            _pad(var.values, n_new),
+            _carried_units(var),
+        )
     discretization = Discretization(
         ["nnodes"],
         parameters=xr.Dataset(dis_vars, coords={"nnodes": node_id}),
@@ -300,15 +316,29 @@ def splice_flow_graph(
         for name, meta in tt.fields.items():
             if meta.kind == "parameter":
                 declared.setdefault(name, meta.dtype)
+    # Units (control["units"] reads attrs): padded channel values carry
+    # the units they were supplied in; a parameter filled here is
+    # stamped with the DECLARED units -- NewNode.parameters values are
+    # bare floats given in declared units by contract, so for those the
+    # label is a statement, not a check.
+    graph_fields = _resolved_fields(graph_class)
     params: dict[str, tuple] = {}
     for name, dtype in declared.items():
         if name in dis_vars:
             continue  # dis-owned (sourced dis-first by the Model)
         if name in channel_params and channel_params[name].dims == (seg_dim,):
-            params[name] = ("nnodes", _pad(channel_params[name].values, n_new))
+            params[name] = (
+                "nnodes",
+                _pad(channel_params[name].values, n_new),
+                _carried_units(channel_params[name]),
+            )
         else:
             fill = np.nan if np.issubdtype(dtype, np.floating) else 0
-            params[name] = ("nnodes", np.full(n_nodes, fill, dtype=dtype))
+            params[name] = (
+                "nnodes",
+                np.full(n_nodes, fill, dtype=dtype),
+                _units_attrs(graph_fields[name].units),
+            )
     for ii, node in enumerate(new_nodes):
         own = {
             name
@@ -353,8 +383,15 @@ def splice_flow_graph(
         n_seg=n_seg,
         n_nodes=n_nodes,
         new_node_rows=[n_seg + ii for ii in range(n_new)],
+        # NewNode.initial_state is given in the declared units (the
+        # contract of that argument), so the declaration is stamped:
+        # control["units"] judges supplied state by its attrs
         initial_state={
-            name: xr.DataArray(values, dims="nnodes")
+            name: xr.DataArray(
+                values,
+                dims="nnodes",
+                attrs=_units_attrs(graph_fields[name].units),
+            )
             for name, values in state.items()
         },
     )
