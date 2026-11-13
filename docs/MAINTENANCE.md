@@ -153,6 +153,36 @@ of the LAST one in index order, not their sum.
   one-character fix once upstream agrees.
 - **Status:** not yet reported.
 
+## Report upstream (mpixarray): the NetCDF writer re-emits a `_FillValue` inherited on a coordinate
+
+The chain: pywatershed stores `time` as float32; xarray's `to_netcdf`
+adds `_FillValue = nan` to any float-encoded variable, the `time`
+coordinate included; `mpixarray.open_dataset` hoists it into
+`time.attrs`. Then in
+`mpixarray/file_io/netcdf/nc_DataArray.py:241-246`
+`packing.encoded_fill_value` returns it, which bypasses the
+coordinate / datetime exclusion (that exclusion guards only the
+DEFAULT fill):
+
+```python
+np.asarray(nan, dtype=int64)   # "invalid value encountered in cast"
+```
+
+a RuntimeWarning at write on every rank, and `cf_pack_attrs` (about
+line 287) stamps `time:_FillValue = NaNf` on the int64 time variable,
+so xarray warns at read-back ("non-conforming '_FillValue' ...
+dropping", rank 0 only).
+
+- **Effect:** warnings only; results are unaffected.
+- **Fix belongs in mpixarray:** apply the coordinate / datetime
+  exclusion to inherited values too (CF forbids a fill value on a
+  coordinate, and xarray drops it anyway).
+- **Not worked around here** (decided Oct 16, 2026): a guard in
+  `ModelMPI._build`, or `encoding={"time": {"_FillValue": None}}` at
+  every `to_netcdf`, would hide it.
+- **Status:** diagnosed with a verified reproducer Oct 16, 2026; not
+  yet reported.
+
 ## A Model that raises during construction leaves its input files open
 
 `Model.__init__` opens files before assembly finishes: file-backed

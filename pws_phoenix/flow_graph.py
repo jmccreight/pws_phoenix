@@ -4,7 +4,8 @@ flow_graph.py
 FlowGraph: heterogeneous flow-node TYPES composed on one DAG (e.g.
 insert a reservoir or pass-through into a Muskingum network). Ported
 from pywatershed base/flow_graph.py -- a REDESIGN, not a verbatim port
-(design record: pws_phoenix/CLAUDE.md "FlowGraph port: agreed design").
+(design record: docs/design_description.md "FlowGraph"; rules:
+CLAUDE.md "FlowGraph").
 
 pywatershed uses one Python object per node (scalar properties,
 polymorphic dispatch) -- structurally incompatible with numba and the

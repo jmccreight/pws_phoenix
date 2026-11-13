@@ -154,1167 +154,59 @@ Keep the memory footprint lean and OBVIOUS. Concretely:
 
 # pws_phoenix package design notes
 
-The package `pws_phoenix/pws_phoenix/` (docs in `docs/`; it began life as
-`incarnations/mpixarray/`) blends the serial xr Process framework (developed in
-`incarnations/xr/`, since retired -- see git history; its design summary is
-distilled in "Prior art" below) with mpixarray's streaming MPI IO. The code is
-split into `clock.py` (`Time`; formerly `globals.py`), `data_io.py` (serial
-IO primitives), `discretization.py` (`Discretization`), `maps.py` (`Map` +
-`MapMPI`; formerly `map.py`),
-`process.py` (`DataArrayMeta` + the `Process` ABC), `model.py` (`Model`
-serial + `ModelMPI` streaming), `config.py` (minimal yaml ->
-`(process_dict, control, maps, discretizations)`; a probe for the `Options` design),
-`processes_concrete.py` (the toy Upper/Lower processes), and
-`hydrology/` (REAL pywatershed process ports, mirroring pywatershed's
-`hydrology/` module structure -- one process per module; see "Porting
-pywatershed processes" below).
-`model.py` is the top of the import stack (it imports `data_io`,
-`discretization`, `clock`, `process`); `config.py` sits beside it (atop
-`maps` + `process`); `maps.py` is foundational (numpy/xarray only; `Map`
-objects are passed into the Model); `process.py` imports only
-`clock.py`. `Process.new()` and the `PWS` accessor were
-retired (July 2026 -- see git history) when the Model took over per-grid
-dataset assembly. Phase 1 is implemented and tested (serial via pytest; MPI
-via pytest-mpi).
+These notes hold the RULES and the current mechanics. The reasons
+behind each design are in `docs/design_description.md` (one entry per
+design, with a table of them at the top). Port detail is in
+`docs/PORTS.md`, known hazards in `docs/MAINTENANCE.md`, performance
+rules in `DEVELOPER.md`.
 
-## Core decision: discretization = the unit of decomposition
+The package `pws_phoenix/pws_phoenix/`:
 
-The unit of MPI decomposition (and of barriers / the shared dataset) is the
-**discretization** (the grid). "One shared decomposed dataset" really means
-"one dataset per discretization." The single-grid toy has exactly one
-(`space`); the serial two-grid toy (Step A, `tests/test_two_grid.py`) has
-two; mixed MPI/serial grids are Step B.
+- `clock.py`: `Time`.
+- `data_io.py`: serial IO (`Input`, `Output`).
+- `discretization.py`: `Discretization`.
+- `maps.py`: `Map`, `MapMPI`.
+- `process.py`: `DataArrayMeta` and the `Process` ABC.
+- `model.py`: `Model` (serial) and `ModelMPI` (streaming).
+- `config.py`: a minimal yaml -> `(process_dict, control, maps,
+  discretizations)` loader.
+- `budget.py`, `units.py`, `flow_graph.py`, `flow_graph_build.py`,
+  `model_contract_graph.py`.
+- `processes_concrete.py`: the toy Upper / Lower processes.
+- `hydrology/`, `atmosphere/`: the pywatershed process ports, one
+  process per module.
+- `prms_translate/`: PRMS files -> model inputs. The core never
+  imports it.
 
-## Variable taxonomy: parameters vs inputs (by relationship to model time)
+Import order: `model.py` is the top (it imports `data_io`,
+`discretization`, `clock`, `process`); `config.py` sits beside it;
+`maps.py` is foundational (numpy and xarray only); `process.py`
+imports only `clock.py`.
 
-A field's `kind` (`DataArrayMeta.kind`) and its time axis decide how the
-framework treats it. The discriminator is the variable's time coordinate vs
-**model time** (daily, fixed, known at init):
+## Object model
 
-- **Static parameter** (`kind="parameter"`, no time axis) -- a fixed property /
-  calibration. Loaded once, resident, read-only. (`param_up_0`,
-  `param_shared_name`)
-- **Time-varying parameter** (`kind="parameter"`, a time axis whose coordinates
-  are **not** model time) -- varies in time but is indexed by a _derived_
-  coordinate. Common forms:
-  - _cyclic_ -- repeats on a calendar cycle (`month` 1-12, `season`); indexed by
-    `f(model_time)`, e.g. `param_up_1[time.month - 1]`.
-  - _coarse linear_ -- monotonic but coarser than model time (per-year,
-    per-(year,month)); indexed by flooring model time.
-    Resident (its own small axis kept whole; space-decomposed in MPI), read-only;
-    the current slice is looked up each step. The toy's `param_up_1` is
-    cyclic-monthly `(month, space)`, indexed in `Upper.calculate` via `time.month`.
-- **Input / time-varying input** (`kind="input"` / `"mutable_input"`, time axis
-  **==** model time) -- external forcing/boundary data, one model-time slice
-  served per step in lockstep. (`forcing_up`, `forcing_low`)
+Reasons: `docs/design_description.md` "One shared dataset per grid,
+the same structure in serial and MPI".
 
-**Rule (enforced in `ModelMPI._build`):** a `parameter` declared on the model
-`time` axis is a misdeclaration -- a variable on model time is an _input_, so a
-time-varying parameter must use a non-`time` axis. This also corrects the old
-"time-varying params are neither static nor streaming" framing: a cyclic param
-is **resident + indexed**, distinct from a _streamed_ input.
-
-To the _Process_, the current slice looks like an input -- a `(space,)` array.
-The process holds `time` and does the lookup; `_calculate` receives raw numpy
-(the `(space,)` slice), never the `Time` object (numba boundary).
-
-## Serial path (`Model` in `model.py`)
-
-- The Model assembles ONE shared `xr.Dataset` per grid from its processes'
-  field declarations (`Model._add_process_fields`) and binds each process to
-  it directly (`cls(grid_ds)`). Same-named vars are added once, so
-  cross-process buffer sharing (`param_shared_name`,
-  `Upper.flow → Lower.flow`) is _structural_ -- the same named variable --
-  exactly as in MPI. The old `Process.new()` per-process datasets and the
-  `PWS` accessor are retired (July 2026; see git history); the
-  `a.values is b.values` checks survive only as near-tautological test
-  asserts.
-- The Model copies `process_dict` STRUCTURE only (a two-level dict copy; NO
-  deepcopy): the caller's in-memory arrays ARE the model's working buffers
-  (zero-copy, per the memory prime directive), and the model's read-only
-  flags (parameters, read-only inputs) therefore apply to them
-  (`test_zero_copy_inputs`).
-- The selective in-place `parameters[pp].load()` before wiring a parameter
-  into the grid dataset is still load-bearing for file-backed parameters
-  (see `tests/test_ref_behaviors.py`).
-- `Process._registry` (`__init_subclass__`) is used by
-  `config.load_model_yaml` to resolve process classes named as strings in a
-  yaml configuration (import the defining module first). The other
-  anticipated consumer is restart/checkpoint rehydration.
-- Output: `data_io.Output` — a buffered, time-chunked **zarr** writer (adapted
-  from pywatershed `base/output.py`): one store at
-  `control["output_serial_zarr"]` (a `.zarr` path, used verbatim -- what
-  you write in the control dict is what appears on disk), all output vars
-  as data_vars. The store is created ONCE at init, pre-sized along `time`
-  (coords via xarray, arrays declared with zarr -- a chunk exists on disk
-  only once written, so nothing is materialized; peak memory = the chunk
-  buffers); each full buffer is a **region write** `arr[start:end] =
-  buffer` + a partial tail at `finalize`. Replaced `to_zarr(
-  append_dim="time")` Oct 30, 2026: each append cost ~2 s of store
-  re-validation regardless of data size (ucb_2yr: 12 extra appends = 26 s
-  of a 32.6 s run). (netCDF4 was dropped.)
-
-## MPI path (`ModelMPI` in `model.py`) — single-decomposition streaming
-
-Uses the mpixarray **1.0.0** streaming API (`comm=` passed explicitly to
-every call; no `initialize_mpi` block -- its exit would also build a prng
-and write `seed.json` on rank 0):
-`open_dataset → parallelize(dims=["space"]) → as_iterable("time") →
-open_writer → declare buffers → create → iterate → write`.
-
-- ONE decomposed dataset (`ds_mpi`) carries every process's state, parameters,
-  per-step input buffers, and streaming outputs. Because there is one dataset,
-  cross-process buffer sharing is **structural** (the same named variable) --
-  not emulated by hand and asserted.
-- Processes bind directly (`cls(ds_mpi)`) and are rebound to each `step` in the
-  loop. (`Process.new()` is retired entirely; the serial path also binds
-  directly to its grid's shared dataset.)
-- Inputs: time-dimensioned file vars are windowed to one step by
-  `as_iterable` and shadowed by `(hru,)` buffers refilled each step from
-  `step.mpi.src`; static space-only params stay whole on `ds_mpi`
-  (loaded into memory so their buffers are shared by reference).
-- Initial state is NOT in the input file (Nov 2026): it is supplied
-  FULL-extent in process_dict under the state variable's own name,
-  and each rank writes its `_decomp_slice` block after the init hooks
-  (`_restore_grid_var`, the restart restore path). See "Initial
-  state" below.
-- `control["progress"]` (default False) turns on mpixarray's rank-0
-  progress bar over the time loop.
-- `parallelize()` now lives in **`Discretization`** (`discretization.py`):
-  `disc.decompose(ds)` does the space split (MPI) or identity (serial,
-  `comm=None`). `as_iterable` (time) stays in `ModelMPI`. The datasets:
-  `ds_mpi` (decomposed) -> `ds_mpi_stream` (streaming). Model/ModelMPI hold
-  `self.discretizations` (a `dict[str, Discretization]` keyed by grid name)
-  -- a 2nd grid is just another key. Step B (done): an MPI run hosts ONE
-  distributed grid (`control["mpi_grid"]`) plus any number of serial grids
-  replicated on every rank (their `Discretization` is the serial degenerate
-  one; their data never enter the mpixarray dataset).
-
-## Known mpixarray limits (Phase 1)
-
-- (RESOLVED Oct 28, 2026) Multiple `to_file=True` streaming-output vars:
-  pre-1.0.0 a 2nd one tripped a deepcopy; in 1.0.0 a 2nd `(time, grid)`
-  declaration replaced the `time` coord with a copy lacking
-  `__mpi_parent` (`MPI_Dataset.__setitem__` let the incoming array's
-  coords win; fixed in the mpixarray clone with a `drop_vars` of shared
-  coords, reported upstream). `tests/test_prms_groundwater_mpi.py`
-  streams two; `mpi_model_from_control` now injects the PRMS control's
-  output request per destination.
-- `as_iterable` requires the streaming dim to be a real dim-coordinate.
-- A non-`time` extra dim on a resident var (e.g. a `(month, space)` cyclic
-  time-varying parameter) is assumed to survive `as_iterable` untouched (it is
-  not the streaming dim) and stay space-decomposed -- the toy exercises this.
-
-## IO is intentionally NOT apples-to-apples
-
-Serial → zarr; MPI → mpixarray's NetCDF stream. The best IO backend differs by
-context, so the two ends are deliberately divergent -- do **not** homogenize
-them via a shared writer. (Only matters when isolating compute-vs-IO time in a
-scaling study.) Under MPI, serial (replicated) grids also write **zarr** via
-a rank-0 `Output` -- the backend follows the grid's context, consistent with
-this decision.
-
-## Global state: `Time` + `Options` (the "Global" split)
-
-The "Global" item is split into two objects with different lifetimes and reach
-(rather than one bundled pywatershed-style `Control`):
-
-- **`Time`** (`clock.py`, implemented) -- the model clock: runtime state,
-  passed **all the way down** to a process's `calculate(dt, time)` and
-  transparent for debugging. Daily, fixed, known at init. Exposes `.current` (a
-  `datetime64`), `.month`, `.year`; `set_index(i)` points it at a timestep.
-  - _Serial:_ the Model drives the loop and calls `time.set_index(tt)`.
-  - _MPI:_ mpixarray owns the time _loop_, so `Time` is **synced from** each
-    streaming `step` (`enumerate(iterate())`). A Process reads it identically
-    either way -- this keeps the serial/MPI fork from deepening.
-- **`Options`** (not yet a class) -- construction-time run config, consumed at
-  _build_ and baked into processes; a Process never needs it at runtime. The
-  Model `control` dict plays this role today. (`config.load_model_yaml` --
-  a minimal yaml -> `(process_dict, control, maps, discretizations)`
-  loader, July 2026; serial `discretizations:` section Nov 2026 -- is
-  a first serialization probe for this design; classes resolve by name via
-  `Process._registry`, paths resolve relative to the yaml.)
-
-Mechanism notes:
-
-- `Time` is **passed as an argument** to `calculate`, not stashed on the dataset
-  (the serial `pws` accessor is built lazily, so passing is cleaner and uniform
-  with MPI). `advance()` stays **time-free** -- pure `*_previous` bookkeeping.
-- numba boundary: the `Time` object reaches `calculate()`; into a
-  `@staticmethod _calculate` pass raw scalars (e.g. a month index), since numba
-  can't take the object.
-- `time.month` is what a time-varying parameter indexes on (`Upper.calculate`).
-
-**Calendar helpers (ported from pywatershed `utils/time_utils.py`).**
-`Time` exposes `year`, `month`, `day_of_month`, `doy` (day-of-year), and `dowy`
-(day-of-water-year, Oct 1) -- all matching pywatershed's formulas. All fields
-are **1-based** (calendar-natural, = pywatershed's `zero_based=False` default);
-positional time-varying-parameter lookup therefore indexes with `field - 1`
-(convention (A); see `Upper.calculate` and `tests/test_time.py`). Still in
-pywatershed if needed: `jsol` (days since solstice, niche) and `epiweek` (needs
-the `epiweeks` dep).
-
-## Units mode (Nov 2026; stages 1 + 2 built, stage 3 piloted)
-
-Every float `DataArrayMeta` declares `units=` from the CLOSED vocabulary
-in `units.py` (`VOCABULARY`: pywatershed-natural key -> pint
-expression, `None` for the few pint cannot express, e.g. the
-exponent-dependent `m per cms^exp`). pint sits BEHIND the table and
-touches strings only -- arrays stay plain numpy (`_refs`, numba,
-zero-copy untouched); pint-xarray's `quantify()` is rejected for
-runtime. `fraction` = a proportion, `none` = a dimensionless flag
-stored as float (both pint `dimensionless`); temperature differences
-are `delta_degF`/`delta_degC`; rate coefficients keep their physical
-`1/day` though the daily kernels apply them per step. FlowGraph fields
-in the graph's io units declare the placeholders `io flow units` /
-`io flow units x s` / `io storage units`, resolved over the whole field
-union at composition (`IO_PLACEHOLDERS`). `tests/test_units.py`
-enforces: every expression parses, every declared string is a key,
-every float field has units, no placeholder survives composition --
-BOTH by a source scan of literal `DataArrayMeta(` calls AND over the
-resolved fields of every registered package class (Nov 11, 2026: the
-`_meta` helpers of prms_soilzone_ag.py and prms_stream_temp.py had
-hidden ~150 unit-less float fields from the scan; `units` is now a
-required argument of both helpers; `lat_temp_adj` is `delta_degC`,
-PRMS says degrees Celsius -- it is ADDED to a temperature).
-
-Two boundaries, deliberately separate:
-
-- **PRMS boundary** (`prms_translate/prms_units.py`): PRMS's metadata
-  words (pyPRMS's bundled XML -- not pywatershed, not the oracle) ->
-  vocabulary keys: a by-name table for PRMS strings that are wrong or
-  vague (`hru_in_to_cf: "cubic feet"`, `gwflow_coef: "fraction/day"`,
-  `width_alpha: "unknown"`), flag resolution for `temp_units` /
-  `precip_units` / `elev_units` from the file's own values (metric
-  precip raises NotImplementedError: the kernels are imperial), a
-  spelling table incl. pyPRMS's own CBH strings. `load_parameters`
-  (`translate_units`), `load_cbh`, dynamic parameters,
-  `derive_hru_in_to_cf` and `compute_soltabs` stamp keys;
-  `package_parameters` RAISES on a declared-vs-translated disagreement
-  (a table or declaration bug, never data -- nothing to patch).
-- **Model boundary** (`control["units"]`, build-time only, no per-step
-  cost): `None` (default; pint never imported) | `"check"` (every
-  supplied parameter/input's `attrs["units"]` must be a key naming the
-  declared quantity, `units.same`; Map owner vs consumer declarations
-  must agree) | `"convert"` (a RESIDENT array in compatible units is
-  converted in place at build via `units.affine`, attrs updated -- the
-  caller's arrays ARE the buffers; a streamed/lazy input that would
-  need converting RAISES: conversion is never a per-step edit,
-  pre-process the file). `control["units_patch"] = {name: key}`
-  overrides a supplied array's attrs (missing attr = error; the patch
-  is the escape hatch). STATE (Nov 12, 2026): supplied initial state
-  and the declared variables of a `restart_read` file are judged the
-  same way (`units.conversion`, attrs only -- a bare ndarray has no
-  units and raises; a restart file is a netCDF file anyone can
-  write), but they are COPIED into the model's buffer, so "convert"
-  converts the MODEL's copy after the write (`_restore_grid_var(...,
-  affine=)`) and leaves the caller's array as supplied.
-  `ModelMPI.write_restart` stamps the declared units on the gathered
-  distributed-grid variables. NOT checked: python-attr restart state
-  (`get_restart_state`; stream temp's silos -- no declaration, no
-  units). Hooks: `_add_process_fields` (params before
-  the read-only flag; `Input.data`), `ModelMPI._build` (resident
-  params per rank; streamed inputs check-only, every rank raises
-  together), `_resolve_maps`. Budget units stay string-equality: exact
-  with a closed vocabulary. Tests: `test_units_check{,_mpi}.py`,
-  `test_prms_units.py` (the drb kit builds under "check", no patches).
-
-Stage 3 (kernels; pilot BUILT Nov 5, 2026, sweep pending):
-`tests/test_kernel_units.py` runs a kernel's undecorated body
-(`Cls._calculate.py_func`) on pint Quantity arrays built from the
-declarations (kernel argument names == field names), so every `+`,
-`-`, comparison and element assignment is dimension-checked, and
-compares the magnitudes BIT FOR BIT to the compiled run (pint
-silently converts a compatible-but-wrong-scale assignment, e.g. cubic
-feet into an acre-inches array -- the magnitude comparison is what
-catches that). Convention (JLM): `1/day` coefficients keep their
-declaration; the harness multiplies the `PER_DAY` set by `1 day`
-before the call (dropping it fails at `stor - flow`). Harness:
-`tests/kernel_units.py` (`patches=` swaps module attributes for the
-Quantity run). Done: the groundwater family (no literals), PRMSCanopy
-(Nov 9, 2026), PRMSChannel (Nov 9, 2026: `ts` is declared hours but
-the kernel divides an hourly-sample sum by it as a COUNT ->
-`ts / _ROUTING_STEP_HOURS`; integer fields pass plain even when they
-declare units -- `tsi`; non-field kernel args take units from
-`NON_FIELD_UNITS`, e.g. `s_per_time` seconds) + its init derivation
-`muskingum_mann_coefficients` (plain numpy via the harness's
-`func=`; the bare `* 60.0 * 60.0` left velocity in m/s, which pint
-alone cannot see -- kcoef in seconds converts silently into hours; the
-magnitude comparison catches it). A `UnitStrippedWarning` is an error
-in the Quantity run (`np.full` and plain-array assignment drop units
-silently). PRMSSoilzone{NoDprst,} (Nov 11, 2026; 4 helpers): the
-CORRECTED declaration -- `fastcoef_sq`/`slowcoef_sq` are `1/(inch
-day)`, not dimensionless as PRMS and pywatershed say
-(`1.0 + coef_sq * storage`; PRMS by-name entry); `ssr2gw_rate` is
-truly inch^(1-ssr2gw_exp)/day, its `1/day` exact only at exp = 1 (the
-fixture's value; a test pins the failure at 0.5); kernel arguments
-receiving a derived `_`-field (`sat_threshold` <- `_sat_threshold`)
-map through the harness's explicit `ARG_FIELDS` (also needed by the Ag
-and stream-temp kernels); compute_interflow's `c3 = sqrt(...)` is nan
-for `ssres_in < -coef_lin**2/(4 coef_sq)`, reachable only from a state
-initialize() never produces (slow_stor above pref_flow_thrsh). Init
-derivations of the other ports are not yet checked. PRMSRunoff{NoDprst,}
-(Nov 11, 2026; 5 helpers): no declaration errors; pywatershed's ONE
-`_NEARZERO` is compared against inches, acres and dimensionless ratios
--> `_NEARZERO_INCHES`/`_NEARZERO_ACRES` beside it (same value); zeros
-in three units (`_ZERO_INCHES`/`_ZERO_ACRES`/`_ZERO_ACRE_INCHES`);
-the bool option `intcp_changeover_in_net_rain` runs both ways with
-coverage accumulated (`fired=`); a patched helper the kernel never
-calls fails coverage (NoDprst omits `dprst_comp`). A must-fail test
-that unexpectedly PASSES marks a path statement coverage missed
-(`_ZERO_ACRES` needed an empty-depression hru).
-PRMSSoilzoneAg{,ObsET} (Nov 11, 2026; 7 code objects: the family
-kernel under both bool options x both, `_update_areas`/`_pre`/`_post`
-and ObsET's three iteration kernels via `func=`, each run per
-`soil_iter` value with `fired=`): the shared soilzone helpers are
-imported BY NAME, so they and `_ZERO_INCHES` are patched in the Ag
-module while the helpers' own bodies read prms_soilzone's floats;
-`_update_areas`'s pervious-area isclose added a bare 1e-8 to acres ->
-`_ISCLOSE_ATOL_ACRES`; ObsET's missing-value sentinel is in inches
-(`_AET_MISSING_INCHES`) and pint's `==`/`!=` with a bare number is
-False/True, NEVER an error -- only the magnitude comparison catches a
-bare sentinel; no marker needed; no declaration errors. PRMSRunoffAg
-(Nov 11, 2026; the kernel under both bool options + `_post_areas` via
-`func=`; four ag helpers beside the base ones, `dprst_comp_ag`
-replacing `dprst_comp`): no declaration errors; the same per-unit
-zero/near-zero names as the base kernel; `dprst_comp_ag`'s explicit
-`else: ... = 0.0` branches for a zero maximum volume are reachable
-for open-only or closed-only depressions (two fixture hrus) but not
-for both (initialize() rejects `dprst_depth_avg == 0`) -> one marker,
-plus the two never-true evap clamps mirrored from `dprst_comp`. THE
-AG FAMILY IS DONE. pint accepts a bare zero in `+` and comparisons but NOT
-assigned into a dimensional array or after scaling (`0.0 * cov >
-potet`), so a kernel's zeros of a working unit are a named module
-float (`_ZERO_INCHES = 0.0`; numba freezes it, compiled code
-unchanged), as are thresholds (`_NEARZERO`); helper njit Dispatchers
-are patched to their `.py_func`; each patch has a must-fail test.
-pint checks only what executes, so the harness REQUIRES every line of
-the kernel and patched helpers to run (`sys.settrace` vs the code
-object's line table); a line no input can reach carries
-`# units-test: unreachable (<reason>)` in the kernel source, reviewed
-by eye. Statement coverage, not paths (canopy: 0 marked lines; 8
-untaken false-branch arcs, coverage.py `--cov-branch`).
-Sweep: one kernel per PR; also hoist `32.0`, 5/9; settle STARFIT
-`lake_release_sub`/`lake_spill_sub` (cms hourly but io units in daily
-mode; declared cms).
-
-## Phase 2 backlog (separable, layered on top)
-
-- `Options` class -- the construction-time half of the old "Global" item
-  (`Time` is implemented; see "Global state: `Time` + `Options`" above). The
-  Model `control` dict serves as `Options` for now.
-- The full `Discretization` class: physical/topology role + multiple
-  discretizations (incl. whether `as_iterable` aligns across ≥2 of them).
-- `ModelInputs` / `input_spec()` / `resolve_inputs()` / `init_run_phase()` lazy
-  lifecycle (`get_inputs()` is already classmethod-level; streaming's `create()`
-  is a latent `init_run_phase`).
-- Coarse-linear (e.g. per-(year,month)) time-varying params remain
-  (cyclic-monthly ones are implemented -- see "Variable taxonomy";
-  multi-output-var streaming is resolved -- see Known limits).
-- Deferred review minors (July 2026): generalize `Output` beyond 1-D
-  spatial vars (only when a real multi-dim output var exists -- it fails
-  loudly today). (The `map.py`/`globals.py` builtin-shadowing rename is
-  done: `maps.py`/`clock.py`.)
-- **Budgets (IMPLEMENTED Oct 2026; `budget.py` + `Process.budgets`)**
-  -- pywatershed's Budget/ConservativeProcess re-expressed as DATA: a
-  process declares `budgets = {"mass": {"inputs": (...), "outputs":
-  (...), "storage_changes": (...), ["exchanges": (...)]}}` (any number
-  of NAMED quantities -- mass and energy are separate checks, never
-  combined); every term must carry `DataArrayMeta.units` and one
-  budget's units must agree (checked at first introspection).
-  `_resolved_fields` GENERATES `{Class}_{budget}_{inputs_sum,
-  outputs_sum,storage_changes_sum,[exchanges_sum],residual,
-  residual_accum}` as `kind="budget_variable"` fields -- allocated,
-  written and restarted like variables, but reported by
-  `get_budget_variables()`/`get_budget_var_names()`, NOT by
-  `get_variables()` unless `include_budget=True` (Nov 5, 2026; the
-  framework's allocation/stream/output sites pass it) (class-name
-  prefix: the flat
-  grid dataset would otherwise share two budgets' `residual`;
-  `residual_accum` is `restart=True`; a variant REDECLARES the whole
-  dict, nothing inherited twice). One njit pass, zero per-step
-  allocation; balance = pywatershed's `inputs + exchanges == outputs +
-  storage_changes`, `|res| <= atol + rtol*|rhs|` (nan counts as
-  imbalanced). OWNERSHIP SPLIT (JLM): the process owns declaration,
-  fields, kernel and `check_budgets()` (local count); the Model owns
-  WHEN (right after each `calculate`) and `control["budget"]` = None
-  (computed + written, never judged) | "warn" (per-rank) | "error"
-  (`_raise_if_imbalanced`; ModelMPI first `allreduce(MAX)` of the
-  local count so every rank raises together -- a lone raise hangs the
-  others at the next collective). Tolerances `budget_rtol/atol`
-  default 1e-10 (Nov 2026 limbo: every port closes at 1e-12; the
-  STARFIT family's storage term is a difference of reservoir
-  storages (MCM), floor max|res|/(1+|rhs|) = 1.4e-12 cms / 1.0e-11
-  cfs; pywatershed's is 1e-5). NOT ported: `global` basis (sum the
-  written per-unit residual offline), per-term accumulations, the
-  netCDF writer, `__repr__`, `ignore_nans`. Declared:
-  PRMSGroundwater{,NoDprst} (`gwres_sink` as an OUTPUT --
-  pywatershed's own term list omits it; its drb answers only close
-  with it, `test_answers_close_with_sink`); PRMSSoilzone{,NoDprst} and
-  PRMSSoilzoneAg{,ObsET} (Oct 21, 2026: pywatershed's lists plus
-  `swale_actet` as an output -- the swale branch does `slow_stor[hh]
-  -= swale_actet[hh]`; zero on LAND hrus, so invisible on the
-  swale-free test domains: a kernel-read future-proofing, not a
-  data-caught fix; ObsET adds `ag_irrigation_hru_source` to inputs
-  as upstream does); PRMSRunoff{,NoDprst,Ag} (Oct 21, 2026:
-  pywatershed's lists verbatim, swale path kernel-checked;
-  `intcp_changeover_budget` ported for the Ag class -- zero when
-  `_intcp_changeover_in_net_rain`, so the static declaration holds
-  for either flag value); PRMSSnow (Oct 22, 2026: pywatershed's list
-  verbatim; the budget CAUGHT a real leak -- `freeh2o = net_rain -
-  pndz` in `calc_ppt_to_pack` 1.1.3 dropped a cold pack's trace free
-  water from `pk_ice + freeh2o` while `pkwater_equiv` kept it; FIXED
-  to accumulate = the ONE deliberate departure from PRMS/pywatershed,
-  9 drb hrus excluded from the bit-identical A/B by a data-located
-  trigger; floor 1.1e-7 -> 8e-15, pinned 1e-12; the `avail_et < 0`
-  tail of `calc_snowevap` is a like hazard kept verbatim, dead under
-  valid params, logged in `docs/MAINTENANCE.md`); PRMSCanopy (Oct 22,
-  2026: pywatershed's list verbatim, kernel-checked at HRU scale
-  (store * cov), closes to roundoff; upstream's "?? always zero" on
-  `intcp_changeover` is wrong -- nonzero on season-flip days; the
-  BARESOIL `extra_water = intcp_stor[ii]` (per-canopy, not * cov)
-  and LAKE store-zeroing branches would open it but are dead on nhm,
-  logged in `docs/MAINTENANCE.md`); PRMSChannel NOT declared (Oct 23,
-  2026: pywatershed's is `basis="global"`; muskingum has no storage
-  state, `seg_stor_change` is DEFINED as the imbalance, so the
-  per-segment form is an identity and the global content (routing
-  telescopes) is covered by `topological_order` + parity -- the
-  would-be declaration with its `exchanges` term and the algebra are
-  in the module docstring); every composed FlowGraph (Oct 23, 2026:
-  pywatershed's global list PER NODE -- `node_sink_source` is the
-  first real `exchanges` term; units "cfs"/"cms" stamped from
-  `io_in_cfs` at composition; content on the hourly STARFIT family
-  whose storage term is pywatershed's own STATE delta; the budget
-  CAUGHT departure #2 -- SourceSinkFlowNode harvested the LAST
-  substep's outflow beside mean inputs, now the substep mean,
-  routing untouched; obsin kept verbatim, constant within a day).
-  DECLARATION SWEEP COMPLETE. The ObsET run under
-  dynamic `ag_frac` with
-  "error" is the validation of the five redistribution-corrected
-  change variables (they are the budget's storage-change terms).
-  Error mode ALSO warns per rank (date, max |residual|, indices)
-  before the collective raise. USER RULE: budgets are checked only by
-  the Model -- drive a lone process as a one-process Model, never by
-  hand (the pywatershed habit computes no budget here). Tests:
-  `tests/test_budget.py` (synthetic, CI-able) + budget asserts in
-  `test_prms_{groundwater,soilzone,soilzone_ag,soilzone_ag_obs_et,
-  runoff,runoff_ag,snow,canopy}{,_mpi}.py` + error mode in the
-  five FlowGraph tests (residual pins in test_starfit_flow_node /
-  test_mixed_channel_starfit).
-- **Dis-owned parameters (IMPLEMENTED July 2026)**: pywatershed's
-  `utils/separate_nhm_params.py` splits parameters into per-process
-  files and DIS files (`dis_hru_vars`: hru_area, hru_in_to_cf, ...;
-  `dis_seg_vars`: seg_length, tosegment, ...). Now:
-  `Discretization(dims, parameters=<dis dataset or Path>)`;
-  `Model`/`ModelMPI` take an optional `discretizations=` dict (MPI:
-  serial grids only -- the distributed grid's dis vars ride in
-  input_file); assembly sources declared parameters **dis-first**, then
-  the process `parameters` dataset. A process still DECLARES the dis
-  vars it reads (`kind="parameter"` -- the declaration states the
-  need). `Discretization.topological_order(to_index)` = generic derived
-  topology (networkx, replicating pywatershed's construction EXACTLY --
-  a different valid order changes float accumulation downstream; a
-  dependency-free ordering is a later step with a tolerance decision).
-  `config.load_model_yaml` builds serial Discretizations from its
-  `discretizations:` section (Nov 2026); a future `Model.from_yaml()`
-  classmethod is its evolution.
-- **Initial state (Nov 2026; `DataArrayMeta.initial` REMOVED)**:
-  starting state = the `restart=True` variables, ONE rule in both
-  paths: allocate -> `initialize()` sets each one's DEFAULT ->
-  supplied state (an array in the process_dict entry under the
-  variable's OWN name; recorded in `_supplied_state`, written by
-  `_apply_supplied_state` via `_restore_grid_var`) overrides it |
-  `control["restart_read"]` overrides it. Supplied state +
-  `restart_read` raises ("use one source"). No nan check: nan is a
-  legitimate state value (stream temp's never-has-flow marker,
-  FlowGraph union rows, STARFIT `lake_storage`). A process never
-  consumes state from a parameter: PRMS's `gwstor_init` /
-  `segment_flow_init` are translated only in
-  `prms_translate.prms_initial_state` (-> `gwres_stor`, and
-  `seg_inflow` by one-segment-downstream propagation).
-  PRMSGroundwater's default is PRMS's declared 2.0 inches.
-  `Process.state_groups` (tuples of restart variables): the Model
-  raises when only PART of a group is supplied, because
-  `initialize()` computes some members from the others' defaults
-  and supplied state lands after the hook. Declared on
-  PRMSSoilzone{NoDprst,Ag} (`soil_moist`, `soil_rechr`,
-  `soil_lower`) and PRMSRunoff (the two dprst volumes, two areas,
-  `dprst_stor_hru`). Supplying EVERY restart variable is the restart
-  case, policed by the perfect-restart tests. Every `initialize()`
-  was read for this (Nov 11, 2026): no other hook computes one
-  restart variable from another. `Process.required_initial_state`
-  (restart variables with NO default): the Model raises at assembly
-  when one
-  is neither supplied nor coming from a restart; reported by
-  `input_spec` as "required_initial_state". `check_initial_state()`
-  (default: no problems) runs once after the starting state is in
-  place (cold start or restart) and RETURNS messages -- the Model
-  raises, on every rank under MPI (Allreduce, as for budgets). A
-  composed FlowGraph takes the union of its node types'
-  `required_initial_state` and calls their optional
-  `check_initial_state_type(dataset)`. FIRST USER = the STARFIT
-  family (Nov 11, 2026): pywatershed's `initial_storage` PARAMETER
-  is no longer declared; `lake_storage_sub` [MCM, in a cfs graph
-  too -- the unit it is stored and restarted in] is required
-  initial state, nan on a reservoir's own row is reported by the
-  check; `NewNode(..., initial_state={...})` ->
-  `FlowGraphKit.initial_state` -> the graph's process_dict entry
-  (`insert_flow_graph` does it). WRINKLE: the requirement is by
-  CLASS composition, so a graph class that includes a STARFIT type
-  but has no reservoir rows still supplies an all-nan
-  `lake_storage_sub` (benchmarks/_flow_graph.py does). STILL
-  parameter-fed defaults (same smell, harder: the translation needs
-  maxima `initialize()` derives; and under calibration the starting
-  state must FOLLOW a calibrated maximum -- decide with the Phase 1
-  `reset` design): soil zone `soil_moist_init_frac` /
-  `soil_rechr_init_frac` / `ssstor_init_frac` (+ the ag pair),
-  runoff `dprst_frac_init`. LATER, when someone needs to set
-  e.g. soil moisture alone (data assimilation): JLM's split
-  `init_from_params() -> init_state -> init_diagnostic_state`, so
-  derived state is recomputed from whatever state is in place --
-  not uniformly clean (`dprst_area_clos` is frozen at its initial
-  value and must stay stored). KNOWN GAPS: three first-step blocks
-  overwrite supplied state on a cold start (a restart resumes past
-  them): PRMSAtmosphere `_transp_tindex` at `istep0`,
-  PRMSSoilzoneAg `_istep0_areas`, StarfitDailyFlowNode's first
-  substep. (`prms_translate.insert_flow_graph` carries the channel
-  entry's supplied state onto the graph's channel rows, zero on the
-  new nodes -- Nov 11, 2026.)
-- **Per-process init hook (IMPLEMENTED July 2026)**:
-  `Process.initialize()` (default no-op), called once by the Model
-  after binding/input-validation, before the run loop; contract =
-  LOCAL (no collectives), no `Time`. Computes
-  **`kind="parameter_internal"`** fields (parameters COMPUTED at init
-  rather than supplied -- e.g. Muskingum c0/c1/c2 from mann_n + dis
-  vars; kept in-model over offline precompute for single-source-of-
-  truth with the calibration params). Allocated like variables
-  (placeholder-dim resolution; int64 fill = iinfo.min), frozen
-  read-only after ALL hooks run. `tests/test_discretization.py`.
-  DELIBERATE later step: pywatershed channel-init *edits* `seg_slope`
-  in place (its own "bad idea" comment) -- must be addressed
-  explicitly, not silently replicated (dis vars are read-only here;
-  note velocity is computed BEFORE the clamp upstream, so the edit is
-  inconsequential within channel init itself).
-
-## Porting pywatershed processes (goal 4; started July 2026)
-
-The staged plan (agreed with JLM): (1, DONE) `hydrology/
-prms_groundwater.py` -- PRMSGroundwater on a distributed hru grid,
-validated against pywatershed's drb_2yr answers
-(`tests/test_prms_groundwater{,_mpi}.py`); (2, DONE)
-`hydrology/prms_channel.py` -- PRMSChannel on the serial segment grid
-+ the hru->segment aggregation as three explicit Maps (pywatershed
-does it internally via `hru_segment` in `_calculate`) -> a REAL
-two-grid submodel (groundwater live -> channel;
-`sroff_vol`/`ssres_flow_vol` from disk via a carrier process --
-`tests/test_prms_channel{,_mpi}.py`, serial + distributed w/ MapMPI
-x3); (3, DONE July 2026) `hydrology/prms_runoff.py` -- PRMSRunoff
-(dprst-ACTIVE path), standalone parity green first run serial
-(`tests/test_prms_runoff.py`) + 4-rank MPI (`..._mpi.py`; its
-per-element `initialize()` distributes -- a first: gw has no init
-hook, channel runs replicated). Tolerance = 1e-10, pywatershed's OWN
-runoff autotest standard (1e-13 fails on `sroff_vol` magnitudes --
-runoff is branchy/thresholdy; do not chase tighter). Port findings:
-the `_dprst_clos_flag == OFF` param-zeroing hack (hit by ALL nhm
-domains: `dprst_frac_open == 1`) is provably a no-op -> not ported
-(comment in `initialize()`); `dprst_area_clos` is STATIC after init
-(upstream never assigns dprst_comp's recomputed local back -- answer
-file confirms; preserved, do not "fix"); helper fns
-(`compute_infil`/`perv_comp`/`check_capacity`/`dprst_comp`/
-`imperv_et`) stay separate njit functions with verbatim
-signatures/keyword calls; `intcp_changeover_in_net_rain` fixed False
-(compile-time module constant). (4, DONE July 2026) PRMSRunoff wired
-LIVE into the submodel tests (`test_prms_channel{,_mpi}.py`, green
-first run): the sroff Map sources runoff's computed `sroff_vol` under
-the same name (no Map change); the carrier shrank to `ssres_flow_vol`
-only (PRMSSoilzone's stand-in); and groundwater's `dprst_seep_hru`
-input now comes LIVE from runoff by structural sharing -- the FIRST
-real same-grid inter-process flux (schedule: runoff before gw, NHM
-order; works distributed per-rank under MPI). Chain tolerance relaxed
-1e-13 -> 1e-10 (runoff's precision floor propagates;
-`seg_stor_change` carve-out unchanged). (5, DONE July 2026) `hydrology/prms_soilzone.py` -- PRMSSoilzone,
-standalone parity green first run serial + 4-rank MPI
-(`tests/test_prms_soilzone{,_mpi}.py`), AND the submodel tests are now
-the FULL live chain (carrier DELETED): runoff -> soilzone -> gw on one
-shared hru dataset -> MapMPI x3 -> channel, green first run serial +
-MPI. Port findings: `sroff`/`sroff_vol` = the first
-`kind="mutable_input"` (soilzone adds dunnian IN PLACE -- zero on nhm
-domains, the sat_threshold>=999 guard behind pywatershed's own runoff
-autotest skip); the `soil_lower_prev`/`soil_rechr_prev` back-edge to
-runoff is PRIOR-step-correct because Model/ModelMPI run ALL advance()
-hooks before any calculate(); shared disk forcings (potet etc.) are
-fed ONCE and shared; overlapping params across the three param files
-merge (identical NHM values); tolerance pinned at the OBSERVED 1e-10
-(upstream's own soilzone standard is a loose 5e-6 -- its fastmath
-path; relax if other platforms' libm ulps bite); soil_moist_max<1e-5
-is the one true-param edit -> NotImplementedError guard; derived-param
-clamps applied silently pre-freeze; `soil_zone_max`/`_swale_limit`
-computed upstream but never read by its kernel -> not ported;
-upstream underscore names (`_sat_threshold`, `_pref_flow_den`, flags)
-kept verbatim as parameter_internal; np.bool_ added to process.py
-`_FILL_VALUE`. (6, DONE July 2026) `hydrology/prms_canopy.py` -- PRMSCanopy,
-standalone parity green first run serial + 4-rank MPI
-(`tests/test_prms_canopy{,_mpi}.py`) at upstream's own 1e-12, AND
-wired into the chain tests (now canopy -> runoff -> soilzone -> gw ->
-channel; canopy's net_rain/net_ppt/net_snow/intcp_changeover/
-hru_intcpevap live; disk forcings reduced to atmosphere+snow
-products). Port findings: `pptmix` = second `mutable_input` (canopy
-ZEROES it where intercepted trace snow becomes rain but never READS
-it -> feeding the post-edit answer file is exact); upstream hardwires
-hru_type all-LAND (ignores the dis) -> module constant, LAKE branches
-kept verbatim/dead; intcp_form recomputed each step (declared int64
-var, no per-step alloc); epan_coef hardwired 1.0; upstream fastmath
-again, strict IEEE here holds 1e-12. (7, DONE July 2026) `hydrology/prms_snow.py` -- PRMSSnow (~3300
-upstream lines), standalone serial + 4-rank MPI green + wired into
-the chain tests (now canopy -> snow -> runoff -> soilzone -> gw ->
-channel serial + MPI; runoff has NO disk forcings left; canopy's
-pk_ice_prev/freeh2o_prev = prior-step back-edge from snow). THE
-headline finding: the port is **BIT-IDENTICAL to pywatershed's own
-strict-IEEE numpy path** (`tests/test_prms_snow_ab_numpy.py`, exact
-equality over a 120-day A/B, all 14 compared states) -- but the
-GENERATED answers come from pywatershed's fastmath numba path, which
-drifts ~1e-8-relative from ITS OWN numpy path all season and flips
-pack-survival knife edges on ~0.02% of hru-days (tcal excursions of
-O(400) cal/cm^2 -- pywatershed's own numpy run shows the same vs its
-own answers). Hence the layered test strategy:
-`test_prms_snow.py` = upstream's own 5-var/1e-3 list with
-tcal+through_rain on an outlier-FRACTION criterion; the A/B carries
-the precision guarantee; and `test_prms_channel.py` grew TWO modes --
-"snow_disk" (5-process chain, STRICT 1e-10 plumbing canary) and
-"snow_live" (full chain vs the fastmath answers at (1e-2, 1e-2) +
-outlier fraction; measured 15%/1.6%/0.015% of seg-days outside
-1e-10/1e-8/1e-2 -- muskingum smears the seasonal 1e-8 noise). MPI
-chain test = snow_live mode. Port details: soltab_horad_potsw =
-STATIC (ndoy, space) PARAMETER indexed by current_doy (pyws netcdf
-reader semantics); (nmonth, space) params indexed by current_month-1
-in-kernel; scalar params (albset_*, den_init/den_max/settle_const)
-extracted as kernel floats; tmax_allsnow F->C conversion folded
-per-element (mpixarray CANNOT declare multi-dim derived buffers: its
-buffer creation decomposes EVERY dim -- model.py (a2) now resolves
-declared dims but only "space" is safely decomposable); nonzero
-snowpack_init -> NotImplementedError (upstream's init block is buggy:
-transposed curve indexing + where-tuple misuse; nhm ships zeros);
-pptmix_nopack = float64 0/1 (runoff consumes it as float);
-dnearzero is HARDCODED 2.23e-16 upstream (NOT finfo eps; fixed in
-runoff/canopy too); tiny_snowpack/`set_snow_zero`/verbose = dead
-upstream. ALSO: tests now use `xr.load_dataset`/`load_dataarray` (open, load,
-CLOSE) instead of `open_*` everywhere EXCEPT test_ref_behaviors.py
-(which deliberately pins lazy-open semantics) -- the grown suite
-accumulated >128 open netCDF handles and the xarray file-manager LRU
-churned reopen/evict on every access (a de-facto hang at 255% CPU,
-stack pinned in file_manager._acquire_with_cache_info; bisect:
-test_flow_graph + test_prms_channel reproduced it minimally).
-(8, DONE July 2026 -- **ARC COMPLETE**) PRMSSolarGeometry +
-PRMSAtmosphere (transp_on is IN atmosphere -- no separate Transp
-process). Solar geometry = a parameter FACTORY, not a Process
-(`atmosphere/prms_solar_geometry.py` `compute_soltabs(dis_hru)` ->
-(ndoy, nhru) tables; its true nature is parameter derivation, and it
-sidesteps the mpixarray multi-dim buffer limit); validated vs
-generated tables at 1e-10 (sunhrs carries ~5e-11 noise). Atmosphere
-(`atmosphere/prms_atmosphere.py`) = the PER-STEP port of upstream's
-all-time-vectorized preprocessing (its own docstring anticipates
-this); transp_tindex = per-step state (transp_on/tmax_sum/
-transp_check) with the time-zero block run in-kernel at istep0;
-pptmix = atmosphere VARIABLE that canopy edits in place downstream;
-validated at upstream's own 1e-5 (fails 1e-6; answers are f64 but
-upstream only achieves 1e-5 with the same files). Chain tests now:
-snow_live mode = THE FULL 7-PROCESS MODEL FROM RAW CBH (prcp/tmax/
-tmin) + live compute_soltabs, serial + 4-rank MPI green; snow_disk
-canary unchanged (no atmosphere -- its 1e-5 would break the 1e-10
-canary). **Full port inventory, conventions, the snow/fastmath story,
-and domain facts: `docs/PORTS.md`.**
-
-(9) NoDprst variants BY ADDITION (July 2026, DONE): the hierarchy
-inversion fix -- `PRMS{Groundwater,Runoff,Soilzone}NoDprst` are the
-minimal BASE classes (same modules); the full classes EXTEND them by
-adding the dprst declarations and overriding initialize/advance/
-kernel (full kernel bodies untouched; soilzone init varies only
-through the `_set_hru_frac_perv` hook). Pinned bit-for-bit against
-the full classes with dprst disabled by data
-(`tests/test_prms_no_dprst.py`); answer parity
-(`tests/test_prms_no_dprst_parity.py`) runs against the nhm_no_dprst
-answers in `test_data/drb_2yr/output_no_dprst/` (generated Oct 2026
-with pywatershed's `generate_test_data.py --domain=drb_2yr
---control_pattern=nhm_no_dprst`; green at each process's tolerance).
-Full story: PORTS.md "Realized for NoDprst".
-
-(10) Ag variants (July 2026, DONE): PRMSRunoffAg = additive extension
-of PRMSRunoff (declaration override turns the frozen pervious
-geometry into per-step variables under TIME-VARYING ag_frac;
-intcp_changeover_in_net_rain became a runtime kernel arg -- fgr is
-GSFLOW); PRMSSoilzoneAg = SIBLING dual-area family core (superset
-rule; rationale in its module docstring) with one shared kernel;
-PRMSSoilzoneAgObsET = additive obs-AET iteration (It0 loop +
-extracted irrigation-adjust kernel). Validated vs fgr_ag_2yr GSFLOW
-Fortran answers (spinup + analysis w/ dynamic ag_frac) serial +
-4-rank MPI + live RunoffAg->SoilzoneAg chain. The change-variables
-carve-out and remaining ag caveats: PORTS.md "The agricultural (Ag)
-ports".
-
-(11) Stream-temperature arc (July 2026; all but the chain stage DONE):
-PRMSHydraulicGeometry{WidthOnly,Full} (1e-5, all 5 vars); shade
-physics verbatim-extracted to `hydrology/prms_stream_shade.py` (5e-3
-= upstream's own family standard); `hydrology/prms_stream_temp.py` =
-abstract `PRMSStreamTempBase` (physics; `_compute_shade` hook) with
-leaves PRMSStreamTemp (dynamic shade; 5e-3, 6 vars, drb
-nhm_stream_temp), PRMSStreamTempConstantShade (segshade_sum/win --
-behavioral pin only, pywatershed generates no answers for that mode),
-PRMSStreamTempSegHumidity (seg_humid input->variable override;
-matrix + scalar configs, one parametrized test); the hru->segment
-aggregation kernels + `resolve_aggregation_topology` ported and
-pinned A/B at 1e-5 standalone; MPI = replicated segment grid running
-HydraulicGeometry -> StreamTemp with LIVE seg_flow_width beside a
-distributed gw grid (`tests/test_prms_stream_temp_mpi.py`).
-CHAIN DONE (July 2026) -- the governing principle (JLM): Maps NEVER
-originate variables -> ccov relocated to PRMSAtmosphereBase
-(`ccov_hru`, verbatim block, exact pin), every aggregate then exactly
-linear-static -> ten plain static-weights Maps, weights derived by
-basis-vector PROBING of the pinned kernels
-(`derive_aggregation_weights` + `AGGREGATION_MAP_SPEC`; weights ==
-kernels at 1e-12; -99.9 marker raises, drb marker-free; CBH-humidity
-config = core class + Map, no leaf). Live tests: Maps chain
-(atmosphere + carrier -> 10 Maps -> HG -> StreamTemp; aggregates
-1e-5, temps 5e-3) and the COMPLETE NHM from raw CBH through stream
-temperature, serial + 4-rank MPI (13 Maps; 5e-3 with outlier
-fraction <= 5e-3 -- the two pywatershed answer generations differ
-from EACH OTHER via snow knife-edge flips; bit-identical cross-rank
-replication). THE ARC IS COMPLETE. Full record: PORTS.md "The
-stream-temperature chain".
-
-Stage-2 findings: the map-then-sum float-order deviation proved BENIGN
-(all flow vars match at 1e-13); the one tolerance carve-out is
-`seg_stor_change` = (seg_inflow - seg_outflow)*s_per_time -- a
-difference of near-equal numbers, cancellation amplifies the residue
-(1e-7/1e-4; both operands validated at 1e-13). dt is SECONDS
-(86400.0) for real models -- s_per_time = dt in the channel;
-groundwater never reads dt.
-
-Port conventions (established by the groundwater port):
-
-- Names verbatim (params/inputs/variables) -- the pathway back to
-  pywatershed domains and answer files.
-- What is NOT ported: adapters, `calc_method` switch (numba is THE
-  path), `verbose`, unused declared params (e.g. `gwstor_min`).
-  (Budget and restart WERE later ported, in pws_phoenix form -- see
-  the Phase-2 entries above.)
-- Kernels: rewrite pywatershed's allocate-and-return-tuple
-  `_calculate_numpy` to the in-place out-first convention as an
-  EXPLICIT element loop with scalar temporaries -- numba's expression
-  fusion does NOT eliminate NAMED intermediate arrays, so pywatershed's
-  staged array style would allocate every step. Keep the per-element
-  operation order identical to pywatershed's.
-- Validation: pywatershed's own autotest tolerance (rtol=atol=1e-13)
-  against its generated answer files (`test_data/<domain>/output/`,
-  produced by the autotest data-generation workflow -- not checked in).
-  Each data-dependent module carries a skipif naming the missing
-  files, but **NO SKIPS is the policy**: `tests/run_tests.sh` passes
-  `--error-for-skips` to every pytest invocation (and ignores the
-  `*_mpi.py` files in the serial run, which pytest-mpi would otherwise
-  skip wholesale), so absent data FAILS the sweep rather than quietly
-  shrinking it. In-test `pytest.skip` for a non-applicable
-  parametrization is likewise disallowed -- assert something true of
-  that case instead. The pywatershed repo lives at the mpix meta-repo
-  root.
-- **Dim-name gotcha:** pywatershed's generated output files put
-  variables on the `nhm_id` dim; its parameter files use `nhru`.
-  Rename to the grid dim when assembling model inputs (`.rename()`).
-  The framework now REJECTS mismatched input dims at build (serial
-  assembly + `ModelMPI._build`) -- without the check, serial silently
-  "worked" by size coincidence and MPI broadcast-errored
-  mid-collective (July 2026).
-- mpixarray handles UNEVEN decomposition (drb_2yr's 765 HRUs over 4
-  ranks -> 192/191/191/191) -- the toy tests' even sizes were never
-  load-bearing.
-- **Upstream issue to report (mpixarray; diagnosed with a verified
-  reproducer Oct 16, 2026):** the NetCDF writer re-emits a `_FillValue`
-  INHERITED on a coordinate. Chain: pywatershed stores `time` as
-  float32 -> xarray's `to_netcdf` adds `_FillValue = nan` to any
-  float-encoded variable, the `time` coord included -> `mpixarray.
-  open_dataset` hoists it into `time.attrs` -> in
-  `mpixarray/file_io/netcdf/nc_DataArray.py:241-246`
-  `packing.encoded_fill_value` returns it, so the coord/datetime
-  exclusion (which only guards the DEFAULT fill) is bypassed:
-  `np.asarray(nan, dtype=int64)` -> "invalid value encountered in
-  cast" RuntimeWarning at write (every rank), and `cf_pack_attrs`
-  (~L287) stamps `time:_FillValue = NaNf` on the int64 time var ->
-  xarray SerializationWarning ("non-conforming '_FillValue' ...
-  dropping") at read-back (rank 0 only -- the validating reader).
-  Benign for results. Fix belongs in mpixarray: apply the
-  coord/datetime exclusion to inherited values too (CF forbids a fill
-  on coordinates; xarray drops it anyway). DECIDED Oct 16, 2026: NOT
-  worked around in pws_phoenix (a guard in `ModelMPI._build` or
-  `encoding={"time": {"_FillValue": None}}` at every `to_netcdf`
-  would do it; the fixtures all inherit it the same way).
-- Stage-2 framework part (a) is DONE (dis-owned params + init hook +
-  `parameter_internal`; see the Phase-2 backlog entries above).
-  Decisions taken with JLM: `segment_order` is DIS-owned (topology);
-  Kcoef/c0/c1/c2/ts/tsi are PROCESS-owned (`parameter_internal`,
-  computed in `initialize()` from mann_n/x_coef + dis vars); the three
-  lateral-inflow fluxes are mapped to segments SEPARATELY (three Maps,
-  same weights by reference) and summed in the channel kernel
-  (`seg_lateral_inflow` IS channel physics; a 2nd segment process can
-  consume any subset; a multi-variable single-weights Map = flagged
-  efficiency extension, one batched matmul+Allreduce). Mapped-flux
-  names on the segment grid (e.g. `seg_sroff_vol`) are NEW names --
-  the first deliberate departure from names-verbatim.
-
-## FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)
-
-**Status:** Stage 1 + Stage 2 Rounds A-D implemented and validated
-(July 2026) -- ALL pywatershed flow-node types are ported.
-`flow_graph.py` (make_flow_graph factory + njit kernel); node types
-`hydrology/prms_channel_flow_node.py`, `pass_through_flow_node.py`,
-`starfit_flow_node.py`, `obsin_flow_node.py`,
-`source_sink_flow_node.py`, `starfit_source_sink_flow_node.py`.
-`tests/test_flow_graph.py` -- pure-channel plus three insertion
-scenarios (pass-through / neutral source_sink splice / neutral obsin
-headwater, all above nhm_seg 1829) match the drb seg_outflow answers
-at 1e-10 (pywatershed's own scalar-node standard);
-`tests/test_starfit_flow_node.py` matches the STARFIT reference means
-at 1e-7 (Round B below); `tests/test_obsin_source_sink_nodes.py` =
-synthetic hand-computed branch coverage (Round C below).
-
-**Stage 2 Round A DONE (registry dispatch):** the Stage-1 hand-coded
-2-branch switch is GONE. Each node type now supplies the njit contract
-`prepare(inode, state)` / `substep(istep, inode, state)` /
-`finalize(inode, n_sub, state)` (uniform sigs; `state` = the
-composition's graph-state NAMEDTUPLE of all union arrays, built once in
-initialize() -- refs, no per-step alloc) alongside numpy
-`initialize_type`/`advance_type` + `fields`. The kernel
-(`_build_graph_kernel`) dispatches each via `literal_unroll` over the
-per-type function tuples; graph-level work (lateral sum, routing,
-outlet) stays in the kernel. `_KERNEL_TYPE_NAMES` gate + `_UNUSED`
-stand-ins DELETED; a node-type-contract check replaces them. Adding a
-type = write the 5 methods + declare fields, NO kernel edit. Tests
-byte-identical green at 1e-10. Rides `NumbaExperimentalFeatureWarning`
-(literal_unroll, ~21/run). STARFIT = FlowGraph Stage 2 Round B (first
-real new type through the registry). The spike finding below is the
-record of WHY this shape.
-
-**Stage 2 Round B DONE (STARFIT, July 2026):**
-`hydrology/starfit_flow_node.py` -- StarfitFlowNode, the first real
-new type through the registry: NO kernel edit was needed, the contract
-held. Scope (agreed): the HOURLY path only, cms-NATIVE units.
-Framework half (B-1): graph-level `n_substeps` on `make_flow_graph`
-(ALL nodes share it; substep length = 24/n_substeps hours; 24 =
-channel muskingum, 1 = STARFIT-only -- channel/pass-through take and
-ignore the new `initialize_type(dataset, n_substeps)` param); per-step
-`tctx` time-context namedtuple threaded to every `substep` (union of
-the types' optional `time_context` decls; only NEEDED fields computed);
-`Time.current_epiweek` (CDC epiweek 1-53, lazy `epiweeks` import;
-conda-forge package = `epiweeks4cf`, added to environment.yaml).
-Node half (B-2): numerics verbatim from pywatershed
-`_calc_istarf_release` + hourly pre/post-release, scalars at [inode] --
-incl. the ORDER-SENSITIVE `7.0*flow*24.0*60.0*60.0` weekly volumes
-(pywatershed's own warning); `m3ps_to_MCM` =
-(24/n_substeps)*3600/1e6 is a `parameter_internal` per-node broadcast
-so the njit substep reads it from `state`; epiweek 53 folds to 52 in
-`substep`. Parameters FREEZE at assembly => pywatershed's in-node
-data-prep moved OUT of the node: nan `Obs_MEANFLOW_CUMECS` <-
-`inflow_mean` is caller data-prep, nan `initial_storage` [Nov 2026:
-no longer a parameter -- see "Initial state" in the Phase 2 backlog]
-(NOR-midpoint + start/end active-window gating) is NOT ported --
-`initialize_type` RAISES on both, scoped to its OWN rows via
-`node_type_names` attrs now stamped BEFORE the type hooks (small
-`flow_graph.initialize` reorder). Also NOT ported: `io_in_cfs` (THE
-next STARFIT step -- required to compose STARFIT into a cfs channel
-graph), `compute_daily` (pywatershed flags it for deletion), Budget.
-Validation `tests/test_starfit_flow_node.py` = the pywatershed
-autotest recipe (cms case): 115 reservoirs as isolated outlet nodes
-(`to_graph_index=-1`), n_substeps=1, `lake_inflow.nc` fed as a volume
-input (x 86400; kernel divides by s_per_time), TIME-MEANS of
-lake_storage/lake_release/lake_spill vs
-`starfit_mean_output_1995-2001.nc` at 1e-7 (pywatershed's own
-tolerance) -- green on the first run; full serial + 4-rank MPI sweep
-green.
-
-**Stage 2 Round C DONE (obsin + source_sink, July 2026):**
-`hydrology/obsin_flow_node.py` (outflow = observed/specified flow;
-negative obs = pass through; NOT mass conservative) +
-`hydrology/source_sink_flow_node.py` (outflow = inflow + requested
-source/sink; sinks limited/skipped by `flow_min`) -- two more types
-through the registry, no kernel edits. Port decisions: pywatershed's
-per-node pandas-Series-by-date lookups become `kind="input"` fields
-(`node_obs_flow`, `node_source_sink`) served in lockstep
-(`missing_data_as_zero` NOT ported = data-prep); each type's
-`_seg_outflow` scalar lives directly in the graph's
-`node_outflow_substep` work buffer (own row only) -- sole state is a
-sink/source accumulator; the per-substep running mean collapses to
-one divide in `finalize` (identical value). Both harvest
-`node_sink_source` (obsin: created/discarded flow; source_sink: the
-APPLIED source/sink) = the motivating consumers for the deferred
-Budget design. **Behavioral finding (verbatim pywatershed):** an
-obsin node with obs < 0 LATCHES the first substep's inflow as its
-outflow for the whole day -- NOT pass-through-equivalent under
-sub-hourly-varying upstream muskingum flow (caught by a failing
-first version of the drb equivalence test). Tests:
-`tests/test_obsin_source_sink_nodes.py` (synthetic, hand-computed,
-every branch, no external data -- the first FlowGraph tests that run
-in CI) + two new drb scenarios in `tests/test_flow_graph.py`
-(neutral source_sink splice reproduces the pass-through answers;
-neutral obsin as a zero-inflow HEADWATER above nhm_seg 1829 -- see
-the latching finding).
-
-**Stage 2 Round D DONE (starfit_source_sink, July 2026) -- ALL
-pywatershed flow-node types now ported:**
-`hydrology/starfit_source_sink_flow_node.py` -- STARFIT whose
-sources/sinks divert STORAGE (before the release calc), min-storage
-rule for sinks. pywatershed subclasses StarfitFlowNode; here the same
-seams are SHARED njit helpers refactored out of starfit_flow_node.py
-(pre_release_calculations / istarf_release(storage as ARG) /
-post_release_calculations(applied-diversion as ARG; 0.0 for the plain
-node = IEEE identity, byte-equivalent -- Round B test stayed green
-through the refactor) + starfit_prepare/starfit_finalize/
-initialize_starfit_type(type_name)/starfit_advance_type). The
-combined substep = pre -> diversion calc -> release(from
-lake_storage_after_source_sink) -> post(+applied diversion in the
-storage change); finalize overwrites node_sink_source with the
-applied-diversion running mean. `node_source_sink` input META is
-SHARED with SourceSinkFlowNode (same object -- one array serves both
-in a mixed graph). Names adopt pywatershed's own "very confusing"
-TODO: `lake_sink_source_sub`/`lake_sink_source`/
-`lake_sink_source_accum` (= its _source_sink/_sink_source/
-_sink_source_sum). NOT ported: `_negative_sink_source`
-(Budget-only). Validation mirrors pywatershed's OWN combined-node
-autotest (cms): tiny constant sink (-28e-17), storage_min=0, same
-115-reservoir reference means at 1e-7 -- parametrized into
-tests/test_starfit_flow_node.py; plus an applied-diversion check
-(one reservoir drains to empty and exercises the min-storage
-limiting branch for free). Family caveat: a both-starfit-types graph
-runs the shared advance twice -- safe (idempotent march; see
-starfit_advance_type docstring).
-
-**io_in_cfs DONE (July 2026) -- STARFIT composes into cfs graphs:**
-`make_flow_graph(..., io_in_cfs=True)` (GRAPH-level flow units;
-default True = the pywatershed/NHM convention), threaded to the
-hooks: `initialize_type(dataset, n_substeps, io_in_cfs)` (contract
-grew again; the 4 unit-agnostic types ignore it -- muskingum/
-pass-through/obsin/source_sink are linear in flow). DESIGN: no
-branches in njit code -- the STARFIT family gets two
-parameter_internal per-node broadcasts `io_to_cms` / `cms_to_io` set
-to the pywatershed constants (cms_to_cfs = 35.314666721489, module
-constants in starfit_flow_node.py; its cm_to_cf == cms_to_cfs so one
-pair serves flows AND storages) in a cfs graph and to **1.0 in a cms
-graph -- multiplying by 1.0 is an IEEE identity, so the validated
-cms path is byte-identical**. Conversion points (pywatershed
-hourly-path verbatim): inflows in at pre_release; the routed
-lake_outflow_sub out at the end of post_release; the 7 harvested
-outputs (incl. storages -> millions of cubic feet) in
-starfit_finalize BEFORE harvest -- incl. the verbatim
-lake_storage_old double-conversion (harmless: rewritten in advance;
-corrupts only the transient advance-computed change) -- ; combined
-node: request converted AT READ (input buffer is read-only;
-pywatershed converts in prepare) and lake_sink_source leaves in io
-units per substep. QUIRK kept: `source_sink_storage_min` is ALWAYS
-internal MCM even in cfs (pywatershed never converts it).
-Validation: test_starfit_flow_node.py parametrized node class x
-{cms, cfs} = the full pywatershed autotest matrix, all at 1e-7
-(cfs = inflows/initial_storage/answers x the constants, as the
-autotest does). Next natural step: a real mixed channel+STARFIT drb
-graph (n_substeps conflict: channel wants 24, STARFIT reference is
-1 substep/day -- needs a decision).
-
-**STARFIT daily mode DONE (July 2026; parity green first run):**
-`hydrology/starfit_daily_flow_node.py` = pywatershed
-compute_daily=True, verbatim -- daily physics inside a sub-daily
-graph: constant outflow through each day's substeps, computed at the
-PREVIOUS day's end from that day's mean inflow (ONE-DAY LAG, a
-forecast structure; first day seeded from the first substep's
-inflow); spill computed WITHOUT capping storage (verbatim).
-**The "fake daily" trick, now documented in 3 places** (daily module
-= the full story; hourly module + test point there): the daily
-reference is CONCURRENT (release from the same day's inflow +
-current storage); the hourly node with n_substeps=1 (one 24-h
-substep) reproduces exactly that, hence the 1e-7 reference matches.
-Daily mode can NEVER match that reference tightly (the lag) -- do
-not "fix" it to. JLM's old can't-match-answers memory = this
-structural lag, most likely. **pywatershed has NO value-level
-validation of daily mode** (node autotest = hourly only; mixed-graph
-autotest pastes actuals as answers for new nodes) -- so validation
-here = A/B PARITY vs pywatershed's own compute_daily node driven
-identically (tests/test_starfit_daily_parity.py; 15 reservoirs x 365
-d x 24 substeps, cms, 1e-10) -- validates the PORT, not the physics.
-Parity needs pywatershed IMPORTABLE: mpix-root clone via sys.path +
-deps pyPRMS (pip) / tqdm / contextily (conda) in environment.yaml;
-the skipif fails the sweep otherwise (no-skips policy). Framework: substep contract grew to
-`substep(istep, inode, state, tctx, n_sub)` (symmetric w/ finalize;
-daily needs the last-substep test); `tctx` gained `itime_step`
-(free, always served); `initialize_starfit_type` now writes OWN-ROWS
-so family types hold DIFFERENT m3ps_to_MCM in one graph (daily =
-full-day basis regardless of graph n_substeps) + `compute_daily=`
-kwarg; `istarf_release` takes lake_inflow as an ARG (hourly:
-_sub; daily: day mean). Daily requires n_substeps >= 2
-(initialize_type raises; 1-substep first day never reaches the
-last-substep bookkeeping -- latent pywatershed edge, it hardcodes
-24). pywatershed's unused-for-daily `*_sub_next` allocations (except
-lake_outflow_sub_next) NOT ported; no daily source/sink variant
-(pywatershed hardcodes compute_daily=False there).
-
-**Mixed channel+STARFIT graph GREEN (July 2026; both reservoir modes
-passed FIRST RUN once ucb_2yr data were generated):**
-`tests/test_mixed_channel_starfit.py` mirrors pywatershed
-test_starfit_flow_graph.py -- **domain = ucb_2yr, NOT drb** (Big
-Sandy, grand_id 419 in starfit/istarf_conus_grand.nc, at its real
-location; the pywatershed test skips all other domains). First
-3-type composition (channel + pass_through + starfit|starfit_daily,
-parametrized over reservoir mode), n_substeps=24, io_in_cfs=True.
-Geometry = the pywatershed helpers' INTERCEPTION semantics (the
-target's upstreams are redirected into the chain): [44426's ups] ->
-PT2 -> STARFIT -> PT3 -> seg 44426, and [44409's ups] -> PT1 ->
-44409 (its disconnected-node wrinkle not replicated). Big Sandy's
-nan initial_storage + NaT start_time -> the NOR-midpoint seed is
-replicated TEST-SIDE (epiweek of time0 - 1 day = the pywatershed
-control-init time; raw week; supplied in Mcf). Checks (pywatershed's
-own rigor -- it has no reference for the reservoir): segments not
-downstream of 44426 match seg_outflow at 1e-10 (the transparent
-44409 chain is NOT ignored); PT transparency + outflow ==
-release+spill at 1e-12. A full pywatershed-FlowGraph A/B is
-deferred (~8M pure-python node-substep calls). conftest gained the
-session `pyws_domain(domain)` factory + `pyws_domain_files()` skip
-helper (test_flow_graph.py now consumes "drb_2yr" through it).
-
-**Numba dispatch spike DONE (July 2026, numba 0.65.1) -- registry
-mechanism now DECIDED (supersedes the "closure-binding" hope in the
-design notes below):**
-- Captured (freevar/global) arrays are `readonly` under `@njit` --
-  writing to one is a TypingError ("Cannot modify readonly array").
-  So the closure-binding signature (`substep(istep, inode)` closing
-  over its own field arrays) is DEAD.
-- Numba rule: writable state must be an ARGUMENT. VERIFIED working
-  registry pattern: per-type `@njit substep(istep, inode, state)`
-  where `state` is a NAMEDTUPLE of the union arrays (array fields of a
-  namedtuple ARGUMENT are writable), dispatched by `literal_unroll`
-  over the function tuple (compiler-generated switch, kernel closes
-  over the tuple, recompiles per composition). Adding a type = add its
-  `substep` fn + its arrays to the state namedtuple; NO kernel edit.
-- Rides `NumbaExperimentalFeatureWarning` (first-class function
-  types) -- experimental but functional in 0.65.1.
-- First-class-function-types + `typed.List` (fully dynamic, no
-  per-composition recompile) also failed only on the readonly-capture
-  issue; would work with the same namedtuple-argument state if that
-  path is ever preferred over literal_unroll.
-
-Stage 3 direction (JLM's call): port pywatershed FlowGraph
-(`base/flow_graph.py`) -- heterogeneous flow-node types composed on one
-DAG (e.g. insert a reservoir into a muskingum network). SERIAL-only
-target, which costs nothing: the graph grid sits exactly where the
-segment grid sits (serial in serial, REPLICATED + MapMPI-fed under MPI
--- the Step B pattern; no FlowGraph MPI code ever).
-
-Core redesign (a design project, NOT a names-verbatim port): pywatershed
-uses one Python object per node (scalar properties, polymorphic
-dispatch) -- structurally incompatible with numba and our memory
-directive. The phoenix version keeps the CONCEPT, re-expressed as data:
-
-- **FlowGraph = a Process on its own `nnodes` discretization.** The dis
-  owns `to_graph_index` (+ `node_order` via `topo_order=`;
-  `topological_order` gains `one_based=` -- PRMS-legacy connectivity
-  [tosegment, legacy files] is 1-based/0=outlet, native FlowGraph
-  [to_graph_index] is 0-based/-1=outlet; default stays legacy).
-- **Node types dissolve into data**: union-of-fields (all types'
-  params/state as (nnodes,) declarations, nan where not applicable --
-  the flat-pool decision at node granularity; pywatershed's ragged
-  `_addtl_output_vars` dissolves into ordinary variables); `node_type`
-  int codes INTERNAL ONLY -- builders speak names via the composed
-  class (`kind_code(name)` + `{code: name}` map, mapping also stamped
-  into `node_type.attrs` for self-describing datasets). Makers
-  dissolve: data-prep -> initialize() (SHARING the muskingum
-  coefficient derivation refactored out of PRMSChannel.initialize into
-  a module function); instantiation -> nothing (no per-node objects).
-- **`make_flow_graph(kinds=(...))` class FACTORY** -- the class's
-  declarations are the union of its node types' fields, so the class
-  is composed per model; kind codes = position in `kinds`.
-  Model.__init__ itself is UNCHANGED (a FlowGraph is just another
-  process_dict entry; see the mockup in session notes / git history).
-- **Compute = switch-kernel (IMPLEMENTED via registry dispatch, Round
-  A)**: per-type scalar `@njit` substep functions (pywatershed's own
-  `_calculate_subtimestep` numerics) called from ONE njit graph kernel
-  walking `node_order` x 24 substeps; order-exact, zero per-step
-  allocation. The registry dispatch uses `numba.literal_unroll` over
-  the per-type function tuples (compiler-generated switch, recompile
-  per composition). The uniform per-type signature was the design crux
-  -- RESOLVED by the spike (see the status box above): per-type `@njit
-  substep(istep, inode, state)` with `state` a NAMEDTUPLE of the union
-  arrays (closure-binding is dead -- captured arrays are readonly under
-  njit; namedtuple-argument
-  array fields are writable).
-- **Inflows**: three Map-fed volume inputs on nnodes + in-kernel sum
-  (the channel map-then-sum decision carried over); inserted nodes =
-  zero ROWS in the weights.
-- **Terminology**: keep names `FlowGraph` / `PRMSChannelFlowNode` /
-  `PassThroughFlowNode` (continuity with pywatershed); say "node
-  TYPE" internally, never "kind" (collides with DataArrayMeta.kind).
-- **Module homes**: `flow_graph.py` at the package root (framework
-  infra, beside maps.py); node types in `hydrology/`
-  (prms_channel_flow_node.py, pass_through_flow_node.py).
-- **Stage-1 scope + validation**: channel + pass-through types only.
-  Test 1 = pure-channel graph (456 nodes) vs drb seg_outflow answers;
-  test 2 = pywatershed's doctest scenario (insert one pass-through
-  above nhm_seg 1829, 457 nodes) vs same answers on non-inserted
-  nodes. Tolerance **1e-10 = pywatershed's OWN standard** for
-  scalar-node-vs-array muskingum. Graph-building arithmetic
-  (splice/pad) is now a library helper (Nov 2026):
-  `flow_graph_build.splice_flow_graph(dis_seg, channel_params,
-  [NewNode(...)])` -> `FlowGraphKit` (composed class, `nnodes`
-  Discretization whose dim COORDINATE is `nhm_seg` + the new nodes'
-  `node_id`, union parameters, `pad_weights`), pywatershed's
-  `_build_flow_graph_inputs` semantics verbatim (intercept by
-  nhm_seg; in-series via `flows_to=<NewNode>`); and
-  `prms_translate.assemble.insert_flow_graph(kit, new_nodes)` swaps
-  a PRMS-control kit's channel for the graph (Maps padded +
-  re-targeted to `node_*_vol`; stream-temp kits raise
-  NotImplementedError). Tests: `tests/test_flow_graph_build.py`
-  (synthetic + pins vs the hand-built graphs),
-  `tests/test_prms_translate_flow_graph.py` (ucb Big Sandy kit,
-  self-consistent 1e-10 pin vs the plain channel kit).
-- **NOT ported** (recorded): Budget + `sink_source` (the motivating
-  case for the deferred Budget design -- reservoirs source/sink mass),
-  plot()/pyvis, initialize_netcdf, InflowExchange factory (revisit
-  with composition), type_check_nodes, allow_disconnected_nodes knob
-  (our topological_order does the permissive prepend; strict/warn =
-  Options item). STARFIT = FlowGraph Stage 2 (the payoff + the
-  registry-dispatch forcing function).
-- **Feeds back to the composition open topic**: heterogeneous
-  sub-units compose as DATA (type codes + union fields + per-type
-  kernel functions), not contained objects.
-
-Build order (agreed): round 1 = framework touches (`one_based=`,
-coefficient-derivation refactor; suite green before proceeding);
-round 2 = flow_graph.py + node types + the two tests + numba spike.
-
-## Container-model unification (implemented)
-
-Serial and MPI share ONE container model: one shared dataset _per
-discretization_, with serial as the _degenerate_ case (one rank, full extent,
-plain-xr backend instead of mpixarray). A `Process` only touches
-`self._obj[name].values` and is agnostic to whether `_obj` is a serial grid
-dataset or a view into the decomposed `ds_mpi`. Buffer sharing is _structural
-in both_ (a same-named var is added to the grid dataset once), which deleted
-the fragile serial wiring and its `a.values is b.values` asserts (they
-survive only as near-tautological test checks) -- serial = "MPI with one
-rank, no MPI."
-
-Still holds:
-
-- The `finalize` contract is "**releases external resources**," NOT "deletes
-  data": serial `finalize()` only closes I/O handles (its in-memory grid
-  datasets survive -- _wanted_, for interactive/post-run inspection), while
-  MPI `finalize()` closes `ds_mpi`. Do not make serial delete its data.
-- **Namespacing:** one shared dataset per grid flattens process namespaces --
-  two same-grid processes cannot each have a private `flow`. Per the
-  flat-layout decision under "Forward design," collisions are to be detected
-  at assembly; NOTE that check is not yet implemented (same-named vars
-  silently share today).
-
-## Object model & serial vs MPI
-
-**All five classes and their relationships.** Serial and MPI share **one object
-graph** -- the only differences live _inside_ the Discretization and the Model's
-run loop; everything a modeler writes (Processes) and the clock (Time) are
-identical across the two. The single-grid toy is the _degenerate_ case: one
-`Discretization "space"` hosting Upper/Lower, no Map; the two-grid toy
-(`tests/test_two_grid.py`) exercises the general shape serially (hru +
-segment + a Map).
+- The discretization (grid) is the unit of MPI decomposition. It owns
+  ONE shared `xr.Dataset` holding every variable of its processes.
+- Buffer sharing is STRUCTURAL: a same-named variable is added to a
+  grid's dataset once, so processes that name it share it
+  (`param_shared_name`, `Upper.flow -> Lower.flow`).
+- The dataset is flat, not a DataTree. Two processes on one grid
+  cannot each have a private variable of the same name: same names
+  share, silently (a collision check is on the backlog).
+- A process binds directly to its grid's dataset (`cls(grid_ds)`). It
+  cannot tell a serial dataset from one rank's block.
+- A serial run uses no MPI and no mpixarray. The two paths differ
+  only inside `Discretization` and in the Model's run loop (the table
+  below).
+- `Discretization` is one uniform class, with no subclasses and no
+  registry. Its identity is its key in the Model's `discretizations`
+  dict.
+- `finalize` RELEASES EXTERNAL RESOURCES; it does not delete data.
+  Serial keeps its in-memory datasets for inspection; MPI closes
+  `ds_mpi`. Do not make serial delete its data.
 
 ```mermaid
 graph TD
@@ -1338,27 +230,9 @@ graph TD
     Map -.->|couples| D2
 ```
 
-- **"hosts"** = the discretization owns the process's _data_ (its vars live in
-  the disc's dataset) **and** holds the process object (tree containment). The
-  Model keeps the _schedule_ (cross-grid execution order) as a separate ordering.
-- **Processes compute directly** on the disc dataset (`self._obj[name].values`)
-  -- no per-process variable views. (In MPI the per-step _streaming window_ is a
-  transparent time-slice, not a variable subset.) Shared vars
-  (`param_shared_name`,
-  `flow` Upper->Lower) are the same variable in the one dataset -> structural
-  sharing, no `a.values is b.values`. The per-grid dataset is **flat** (named
-  vars in one `Dataset`), not a DataTree -- see the "Data model" decision under
-  Forward design.
-- **Discretization is a uniform object** -- the same methods for every grid, no
-  subclass / registry / `process_name`-style dispatch (unlike Process). Its
-  identity is the Model's dict key (`discretizations["space"]`); it carries no
-  `name`. (If grid _types_ ever diverge in topology, subclassing could return --
-  not now.)
-
-**Invariant (identical in both):** Model role, Time, Process + its interface, the
-object-graph shape, disc-owns-data, and structural buffer sharing.
-
-**What differs -- localized to the Discretization + the Model's run loop:**
+"hosts" = the grid owns the process's data and holds the process
+object. The Model keeps the schedule (execution order across grids)
+separately.
 
 |                       | serial                      | MPI                                 |
 | --------------------- | --------------------------- | ----------------------------------- |
@@ -1370,218 +244,452 @@ object-graph shape, disc-owns-data, and structural buffer sharing.
 | input feed            | `Input` objects → dataset   | streaming `src` refill              |
 | output / `finalize`   | zarr; keeps its data        | mpixarray NetCDF; releases the ds   |
 
-**One wrinkle -- assembly interleaves at MPI build time.** The "Disc = space,
-Model = time" split is conceptually clean but mechanically interleaved in MPI:
-mpixarray requires `as_iterable` _before_ declaring buffers, so MPI assembly is
-`decompose` (disc/space, → `ds_mpi`) → `as_iterable` (Model/time, → `ds_mpi_stream`)
-→ declare buffers on the streamed result. Serial assembly is **disc-only** (one
-plain dataset, no time-layer). So in MPI the disc and Model collaborate to build
-the dataset; in serial the disc builds it alone.
+Under MPI, assembly interleaves the grid and the Model, because
+mpixarray requires `as_iterable` before buffers are declared:
+`decompose` (grid, -> `ds_mpi`) -> `as_iterable` (Model, ->
+`ds_mpi_stream`) -> declare buffers. Serial assembly is the grid's
+alone.
 
-**Status:** implemented in both paths -- each grid's Discretization owns one
-shared dataset (serial: assembled in `Model._add_process_fields`; MPI: the
-decomposed input dataset), and processes bind to it directly.
+## Variable taxonomy: parameters vs inputs
 
-## Forward design (June 2026 discussion): structure, schedule, open topics
+A field's `kind` and its time axis, set against MODEL TIME (daily,
+fixed, known at init), decide how the framework treats it:
 
-A working model from design discussion -- **partially implemented** (Step A
-landed the two-grid structure: co-registration, per-grid datasets, a one-way
-Map; July 2026 added the implied-map schedule semantics -- apply once per
-step, before the first consumer -- and the one-pass order validation. Not
-yet built: the default known process order + subsetting). It frames the
-move from the single-discretization toy to multi-grid pws. Expands on the
-container-model topic above.
+- Static parameter (`kind="parameter"`, no time axis): loaded once,
+  resident, read-only.
+- Time-varying parameter (`kind="parameter"`, a time axis that is NOT
+  model time, such as `month` or day of year): resident, read-only.
+  The process looks up the current slice, for example
+  `param_up_1[time.month - 1]`.
+- Input (`kind="input"`, or `"mutable_input"` when a process edits it
+  in place; time axis == model time): one model-time slice is served
+  per step.
+- Internal parameter (`kind="parameter_internal"`): computed at init,
+  never supplied.
 
-Target structure -- a tree (conceptually a DataTree; see the data-model caveat):
-`Model (root) → {discretizations, maps} → {processes, transforms}`.
+Rules:
 
-- **Model (root):** time, config/options ("Global"), and the run schedule.
-- **Discretization:** a grid -- coords + topology + grid-shared data (inherited
-  by its processes). One discretization can back several processes.
-- **Process:** lives on one discretization; private state + params; `advance` /
-  `calculate` operate on its view.
-- **Map:** couples two discretizations; **bidirectional**, holding a fwd and a
-  rev transform (e.g. disaggregate `dis0→dis1`, aggregate `dis1→dis0`), usually
-  parameterized by cross-grid weights. Maps are also where cross-discretization
-  MPI partitioning/comm will live (internal, never user-facing).
-  **Principle (decided July 2026, stream-temp chain):** a Map is a
-  per-variable grid-to-grid CORRESPONDENCE — one variable in, one out,
-  the same quantity (renaming and static factors are part of the
-  correspondence) — and never ORIGINATES a quantity; calculations
-  belong to processes on the grid where their inputs live. A
-  "computed Map" was considered and rejected (it would be a second
-  cross-grid concept with its own MPI/time story); instead, embedded
-  computations relocate to source-grid processes (ccov_hru →
-  PRMSAtmosphere), leaving exactly-linear static-weights
-  correspondences — derivable by basis-probing a reference
-  implementation. Full discussion: `maps.py` docstring + PORTS.md
-  "The stream-temperature chain".
+- A `parameter` declared on the model `time` axis is a misdeclaration
+  and raises in `ModelMPI._build`: a variable on model time is an
+  input.
+- The process holds `time` and does the lookup. `_calculate` receives
+  raw numpy and scalars, never the `Time` object (the numba
+  boundary).
+- Calendar fields are 1-based: a positional lookup uses `field - 1`.
 
-Containment (where data/code live) -- general multi-grid example:
+## Serial path (`Model`)
 
-```
-Model (root)                       -- time, config + run schedule
-|
-+- Discretization: dis0 (hru)      -- coords, topology, grid-shared data
-|  +- Process: Runoff
-|  +- Process: ...
-|
-+- Discretization: dis1 (segment, channel network)
-|  +- Process: Routing
-|
-+- Map: dis0 <-> dis1              -- fwd dis0->dis1 (aggregate runoff -> inflow)
-                                      rev dis1->dis0 (disaggregate, if needed)
-```
+- The Model assembles ONE shared `xr.Dataset` per grid from its
+  processes' field declarations (`Model._add_process_fields`) and
+  binds each process to it.
+- The Model copies only the STRUCTURE of `process_dict` (a two-level
+  dict copy, NO deepcopy). The caller's in-memory arrays ARE the
+  model's working buffers, so the model's read-only flags
+  (parameters, read-only inputs) land on them
+  (`test_zero_copy_inputs`).
+- The selective in-place `parameters[pp].load()` before a parameter
+  is wired into the grid dataset is required for file-backed
+  parameters (`tests/test_ref_behaviors.py`).
+- An unresolved process input raises at assembly
+  (`Model._validate_inputs_resolved`). Execution order is the order
+  of `process_dict`.
+- `Process._registry` (filled by `__init_subclass__`) resolves a
+  process class named as a string; `config.load_model_yaml` uses it
+  (import the defining module first).
+- Output: `data_io.Output`, a buffered, time-chunked ZARR writer. One
+  store at `control["output_serial_zarr"]` (a `.zarr` path, used
+  verbatim), created once at init and pre-sized along `time`. Each
+  full buffer is a region write, with the partial tail at
+  `finalize`. Peak memory = the chunk buffers.
 
-(Rendered object-graph diagram: see "Object model & serial vs MPI" above.)
+## MPI path (`ModelMPI`)
 
-The current toy model is the degenerate single-grid case:
+Uses the mpixarray 1.0.0 streaming API, with `comm=` passed
+explicitly to every call and no `initialize_mpi` block (its exit
+would build a prng and write `seed.json` on rank 0):
+`open_dataset -> parallelize(dims=[mpi_grid]) -> as_iterable("time")
+-> open_writer -> declare buffers -> create -> iterate -> write`.
 
-```
-Model
-+- Discretization: space
-   +- Process: Upper
-   +- Process: Lower            (Upper.flow -> Lower.flow shared within grid)
-```
+- ONE distributed grid (`control["mpi_grid"]`, default `"space"`).
+  One decomposed dataset (`ds_mpi`) carries every process's state,
+  parameters, per-step input buffers and streaming outputs.
+  `disc.decompose(ds)` does the space split; `as_iterable` (time)
+  stays in `ModelMPI` (`ds_mpi` -> `ds_mpi_stream`).
+- Any number of SERIAL grids, each replicated on every rank; their
+  data never enter the mpixarray dataset. A Map from the distributed
+  grid to a serial grid is a `MapMPI`: each rank's partial product,
+  then `Allreduce(SUM)`. A Map from a serial grid to the distributed
+  grid is not implemented.
+- Processes bind directly (`cls(ds_mpi)`) and are rebound to each
+  `step` in the loop.
+- Inputs: a time-dimensioned file variable is windowed to one step by
+  `as_iterable` and shadowed by a `(grid,)` buffer refilled each step
+  from `step.mpi.src`. Static parameters stay whole on `ds_mpi`,
+  loaded into memory so their buffers are shared by reference.
+- Initial state is NOT in the input file (see "Initial state").
+- Output is routed by OWNING grid. Distributed-grid variables stream
+  through the mpixarray NetCDF writer
+  (`control["output_parallel_netcdf"]`); serial-grid variables go to
+  a rank-0 zarr `Output` (`control["output_serial_zarr"]`). The
+  rank-0 branch holds no collectives, so it cannot hang.
+- Do NOT unify the serial zarr writer and the MPI NetCDF stream
+  behind one writer: the difference is intended.
+- A raise must be collective: the ranks agree first (Allreduce), then
+  all raise. One rank raising alone hangs the others at the next
+  collective.
+- `control["progress"]` (default False) turns on mpixarray's rank-0
+  progress bar.
 
-**Schedule (sub-timestep graph).** Keep two graphs separate: _containment_
-(above) vs _execution order_ (what runs).
+Known mpixarray limits:
 
-- **Process order is optional** -- defaults to a known order, subsetted to the
-  active processes. **Grid correspondences (maps) are required** (defined once;
-  never placed in the order).
-- **Maps are implied,** not scheduled -- inserted at each grid boundary in the
-  order. The order says _when_ to cross; each process's declared I/O says _what_
-  the map carries (the consumer's inputs last produced on another grid).
-  (Implemented July 2026 as apply-once-per-step before the map's first
-  consumer; see Step A in the build plan.)
-- **Validation:** error if any process input is not found (forcing / prior
-  output / mappable via a registered map). (Implemented, incl. the
-  writer-before-first-consumer and weights-shape checks.)
-- **Scope: explicit (one-pass) solutions only.** Iterative cross-grid coupling
-  (fixed-point loops) is deliberately out of scope for now (it would need a loop,
-  not a flat order).
+- `as_iterable` requires the streaming dim to be a real
+  dim-coordinate.
+- A derived buffer with a second dimension cannot be declared: buffer
+  creation decomposes EVERY dim, and only the grid dim is safely
+  decomposable.
+- A non-`time` extra dim on a resident variable (a `(month, space)`
+  parameter) survives `as_iterable` untouched and stays
+  space-decomposed.
+- More than one streamed `(time, grid)` output variable works only
+  with a fix to `MPI_Dataset.__setitem__` (without it a second
+  declaration replaces the `time` coordinate with a copy lacking
+  `__mpi_parent`). The fix is a patch in the local mpixarray clone;
+  it is reported upstream and not yet released (Nov 2026).
+  `tests/test_prms_groundwater_mpi.py` streams two.
+- Uneven decomposition works (765 hrus over 4 ranks).
 
-Execution example -- author writes only the order; the Model inserts the map
-steps where consecutive processes change grid:
+## Global state: `Time` and options
 
-```
-author: [ Snow.dis0, Shading.dis1, SnowMelt.dis0 ]
+- `Time` (`clock.py`) is the model clock: daily, fixed, known at
+  init. It is PASSED to `calculate(dt, time)`; `advance()` takes no
+  time.
+- It exposes `.current` (a `datetime64`), `set_index(i)`, and the
+  calendar fields `year`, `month`, `day_of_month`, `doy`, `dowy`
+  (day of water year, from Oct 1), `jsol`, `current_epiweek`. All are
+  1-based and match pywatershed's formulas.
+- Serial: the Model drives the loop and calls `time.set_index(tt)`.
+  MPI: mpixarray owns the loop, and `Time` is set from each streaming
+  `step`. A process reads it identically either way.
+- Into a `@staticmethod _calculate` pass raw scalars (a month index):
+  numba cannot take the `Time` object.
+- Options are construction-time configuration, consumed at build and
+  never needed by a process at run time. The Model's `control` dict
+  plays this role; there is no `Options` class yet.
+  `config.load_model_yaml` is a first probe of reading it from a
+  file.
 
-Model expands to:
-   Snow      (dis0)
-     | map dis0->dis1   (carries Snow outputs Shading needs)
-   Shading   (dis1)
-     | map dis1->dis0   (carries Shading outputs SnowMelt needs)
-   SnowMelt  (dis0)
-```
+## Units mode
 
-**Open topics (not yet decided):**
+Reasons: `docs/design_description.md` "Units mode: closed vocabulary,
+two boundaries, kernel tests". How the kernel-test harness works:
+the docstring of `tests/kernel_units.py`.
 
-- **Data model (the hard one).** Be skeptical of hierarchy/DataTree as the
-  _physical_ layout: the data model's #1 job is zero-copy buffer sharing, which a
-  tree does not give (DataTree inherits coords, not data vars; shared vars are
-  cross-cutting and fight the tree). DataTree is also serial-only today
-  (mpixarray lacks it), so adopting it re-forks serial vs MPI. Reframe: separate
-  the _conceptual_ hierarchy (a view/API: namespacing, output groups) from the
-  _physical_ layout (a flat pool of shared buffers). The question is "same
-  structure or decoupled?", not "DataTree y/n." (See container-model unification.)
+Declaring:
 
-  **Decided (June 2026):** keep the **physical layout flat** -- a
-  per-discretization `xr.Dataset` (the `discretizations` dict is already the
-  multi-grid container), _not_ a DataTree, even if mpixarray gained one.
-  "Coords all the way down" is already free inside a flat Dataset; shared data
-  vars are cross-cutting (trees inherit coords, not data) so a tree fights the #1
-  job; and namespacing -- the tree's main draw -- isn't a concern (flat matches
-  pywatershed's flat var/param namespace). Name **collisions are detected at
-  assembly** (a cheap check when the Discretization gathers process field specs),
-  not prevented structurally. A DataTree could still earn a place later only as a
-  _conceptual/output view_ (output groups, multi-grid packaging) over the flat
-  pool -- storage sugar, never the runtime/MPI container.
+- Every float `DataArrayMeta` declares `units=` from the CLOSED
+  vocabulary `units.VOCABULARY` (key -> pint expression, `None` where
+  pint cannot express it). A new unit = a new key. pint touches
+  strings only; arrays stay plain numpy.
+- `fraction` = a proportion; `none` = a dimensionless flag stored as
+  float. A temperature difference is `delta_degF` / `delta_degC`. A
+  rate coefficient keeps its physical `1/day` though a daily kernel
+  applies it per step.
+- A FlowGraph field in the graph's io units declares a placeholder
+  (`io flow units`, `io flow units x s`, `io storage units`),
+  resolved at composition.
+- `tests/test_units.py` enforces all of this twice: by a source scan
+  of literal `DataArrayMeta(` calls, and over the resolved fields of
+  every registered class. A `_meta` helper takes `units` as a
+  REQUIRED argument.
 
-- **Process composition** (a Process _has_ a sub-Process; in the pywatershed dev
-  branch): a second, orthogonal hierarchy (process-containment vs
-  discretization-containment). Decide encapsulated (outer declares the union I/O;
-  inner hidden from the scheduler) vs transparent.
-- **FlowGraph** (pywatershed; a `Process` subclass that is itself a graph of
-  heterogeneous node units, with `_addtl_output_vars`): REVISIT when the code is
-  shared -- stress-tests composition + the data model.
-- **Also:** a buffer-ownership rule (one owner, others view -- the zero-copy
-  invariant made explicit); restart/checkpoint (serialize full state incl.
-  `*_previous`); process-instance multiplicity (can a type appear >1x? keys /
-  identity); the single-rate-time assumption (one dt for all).
+Two boundaries, deliberately separate:
 
-## Build plan: multi-grid, incremental (June 2026)
+- PRMS boundary (`prms_translate/prms_units.py`): PRMS's metadata
+  words -> vocabulary keys, with a by-name table for PRMS strings
+  that are wrong or vague. `package_parameters` RAISES when a
+  declaration and the translation disagree: a table or declaration
+  bug, never data. Metric precipitation raises (the kernels are
+  imperial).
+- Model boundary (`control["units"]`, build time only): `None`
+  (default; pint is never imported) | `"check"` | `"convert"`.
+  "convert" converts a RESIDENT array in place at build. A streamed
+  or lazy input that would need converting RAISES: pre-process the
+  file. `control["units_patch"] = {name: key}` overrides a supplied
+  array's attrs.
+- Supplied initial state and restart files are judged the same way,
+  but converted in the MODEL's copy. Restart state held in python
+  attributes is not checked.
+- Budget units are compared as strings, which is exact with a closed
+  vocabulary.
 
-The path from the single-grid toy to the multi-grid object model, with the
-smallest/riskiest piece (cross-rank comm) last.
+Kernel units tests (`tests/test_kernel_units.py`): a kernel's
+undecorated body runs on pint Quantity arrays built from the
+declarations, and its magnitudes are compared bit for bit with the
+compiled run.
 
-- **(done) Single-grid container-unification.** The dis owns the grid's one
-  shared dataset; serial no longer builds N per-process datasets; both paths
-  bind processes directly (`cls(grid_ds)`). `.pws` dispatch and
-  `Process.new()` retired (July 2026).
-- **(done) Step A -- serial two-grid + Map + scheduler (no MPI).** Upper on
-  grid1, Lower on grid2 (different dims/sizes), a simple **Map**
-  (grid1 -> grid2, dense weights for now), run order Upper -> map -> Lower.
-  Proves the **Map** class, the multi-grid object model, and **process->grid
-  co-registration** -- all in serial, on the `discretizations` dict (no tree,
-  no mpixarray dependency). Two-grid toy + test (`tests/test_two_grid.py`);
-  the single-grid toy is untouched. Unresolved process inputs raise at
-  assembly (`Model._validate_inputs_resolved`; the MPI path likewise
-  validates file-backed inputs against the input file in `_build`).
-  **Map scheduling (July 2026):** a Map is applied exactly ONCE per
-  timestep, immediately before its FIRST consumer in the order
-  (`Model._resolve_maps` assigns; `calculate` applies); later consumers
-  re-read the target buffer. A mapped value is a per-step constant after
-  its single apply -- guaranteed statically (one variable owner + all
-  declared source-grid writers, incl. `mutable_input` declarers, validated
-  to precede the first consumer), NOT by runtime dirty-tracking (only
-  iterative coupling would need that; out of scope). `_resolve_maps` also
-  validates weights shape vs grid sizes and rejects unused maps. `Map`
-  construction is keyword-only, `{source: target}` dicts:
-  `Map(weights=..., grid={"hru": "segment"}, variable={"flow": "flow"})`.
-  Execution order = the author's `process_dict` order (assembly groups by
-  grid internally; binding and scheduling preserve author order).
-- **(done, July 2026) Step B -- mixed parallelization + comm (the real
-  target).** Upper on a distributed "hru" grid (today's mpixarray pipeline;
-  `control["mpi_grid"]` names the distributed grid, default `"space"`),
-  Lower on a serial "segment" grid **replicated on every rank** (assembled
-  by the serial machinery from deterministic inputs -- chosen over
-  single-rank for the SPMD-uniform run loop: no rank branches, no divergent
-  collectives, and the reverse-map direction stays local; single-rank
-  remains a documented later optimization). The Map crosses the parallel
-  boundary as **`MapMPI`**: local partial product with the rank's weight
-  columns + `Allreduce(SUM)` -- communicates `(n_target,)` doubles and
-  lands the mapped input on every rank, which is what replication consumes.
-  Serial->distributed maps (scatter) are NOT implemented. Output under MPI
-  is routed by OWNING grid: distributed-grid vars stream via the mpixarray
-  writer (`control["output_parallel_netcdf"]`); serial-grid vars are
-  collected by a rank-0 zarr `Output` at `control["output_serial_zarr"]`
-  (a `.zarr` path, used verbatim; everyone computes, one writes -- the
-  rank branch holds NO collectives, so it cannot hang).
-  Test: `tests/test_two_grid_mpi.py`, validated over all timesteps on both
-  grids against the same conftest ground truth as the serial two-grid
-  test.
-  Models the real pattern: distributed fine grid (HRUs) -> small serial
-  coarse grid (channel network).
+- Kernel argument names == field names. The exceptions are listed in
+  the harness: `ARG_FIELDS` (an argument fed a derived `_`-field) and
+  `NON_FIELD_UNITS`.
+- A zero or a threshold of a working unit is a named module float
+  (`_ZERO_INCHES = 0.0`, `_NEARZERO_ACRES`), never a bare literal.
+  pint rejects a bare number assigned into a dimensional array, and
+  a bare sentinel in `==` / `!=` is silently False / True.
+- Helper njit functions are patched to their `.py_func`. Every patch
+  has a must-fail test.
+- Every line of the kernel and of its patched helpers must execute in
+  the Quantity run. A line no input can reach carries
+  `# units-test: unreachable (<reason>)`.
+- The harness multiplies the `PER_DAY` coefficients by `1 day` before
+  the call. A `UnitStrippedWarning` is an error.
+- One kernel per PR. Done: groundwater, canopy, channel (and its init
+  derivation), soilzone, runoff, and the Ag families. Not yet: snow,
+  atmosphere, the stream-temperature group, the FlowGraph node types.
 
-**The mpixarray-dev question (July 2026 clarification):** the two questions
-previously listed here (co-iterate >= 2 parallelized+streamed datasets;
-heterogeneous grids + cross-grid comm) are really ONE goal -- the mpixarray
-dev's target is a **streaming DataTree**: disparate child datasets with
-different spatial dims and parallelization schemes, streamed together, with
-cross-child mapping expected to be included. Step B therefore does NOT wait
-for it: the distributed grid uses today's mpixarray, serial grids are
-replicated outside it, and the collect (`MapMPI`) is hand-rolled -- the
-INTERIM implementation and a design probe for the datatree work, which is
-expected to absorb this role at the Discretization/Map seams.
+## Budgets
+
+Conservation checks are DATA on the process (`budget.py`,
+`Process.budgets`). Reasons: `docs/design_description.md` "Budgets as
+data in the owning Process". Which process declares what:
+`docs/PORTS.md`. Hazards kept verbatim: `docs/MAINTENANCE.md`.
+
+- Declare `budgets = {"mass": {"inputs": (...), "outputs": (...),
+  "storage_changes": (...), ["exchanges": (...)]}}`. Every term
+  carries `DataArrayMeta.units`, and one budget's units must agree.
+  Mass and energy are separate named budgets.
+- A variant REDECLARES the whole dict.
+- The generated `{Class}_{budget}_*` fields are
+  `kind="budget_variable"`: reported by `get_budget_variables()`, and
+  by `get_variables()` only with `include_budget=True`.
+- Balance: `inputs + exchanges == outputs + storage_changes` within
+  `budget_rtol` / `budget_atol` (default 1e-10). nan counts as an
+  imbalance.
+- The process owns the declaration, the fields, the kernel and
+  `check_budgets()`. The Model owns when (right after each
+  `calculate`) and the reaction: `control["budget"]` = None | "warn"
+  | "error". Under MPI the ranks agree first, then all raise.
+- USER RULE: only the Model checks budgets. Drive a lone process as a
+  one-process Model, never by hand.
+- PRMSChannel declares none: per segment it would be an identity (see
+  its module docstring).
+
+## Parameters: owned by a grid, or computed at init
+
+- `Discretization(dims, parameters=<dataset or Path>)` owns grid
+  parameters (`hru_area`, `tosegment`, ...). Assembly takes a
+  declared parameter from the grid first, then from the process's
+  `parameters`. A process still DECLARES every grid parameter it
+  reads. Under MPI the distributed grid's parameters ride in the
+  input file.
+- `Discretization.topological_order` replicates pywatershed's
+  construction EXACTLY (networkx): a different valid order changes
+  float accumulation downstream.
+- `Process.initialize()` is called once, after binding and before the
+  run loop. It is LOCAL (no collectives) and takes no `Time`. It
+  computes the `kind="parameter_internal"` fields, which are
+  allocated like variables and frozen read-only after ALL hooks have
+  run.
+- pywatershed's channel init edits `seg_slope` in place. That is not
+  replicated (grid parameters are read-only); see `prms_channel.py`.
+
+## Initial state
+
+Reasons: `docs/design_description.md` "Initial state: the restart
+variables, supplied under their own names".
+
+- Starting state = the `restart=True` variables. The order in both
+  paths: allocate -> `initialize()` sets each default -> supplied
+  state (an array in the process's `process_dict` entry under the
+  variable's OWN name) or `control["restart_read"]` overrides it.
+  Both together raise.
+- A process never consumes state from a parameter. PRMS's
+  `gwstor_init` / `segment_flow_init` are translated only in
+  `prms_translate.prms_initial_state`.
+- No nan check: nan is legitimate state.
+- `Process.state_groups`: supplying only part of a group raises.
+- `Process.required_initial_state`: restart variables with no
+  default. The Model raises when one is neither supplied nor
+  restarted. `check_initial_state()` returns messages and the Model
+  raises, on every rank.
+- STARFIT's `lake_storage_sub` is required, in MCM in a cfs graph
+  too. The requirement is by class: a graph with a STARFIT type and
+  no reservoir rows supplies an all-nan array.
+- Still fed from parameters, by decision: the `*_init_frac`
+  parameters (soil zone and ag) and runoff's `dprst_frac_init`.
+- KNOWN GAPS: three first-step blocks overwrite supplied state on a
+  cold start (a restart resumes past them): PRMSAtmosphere
+  `_transp_tindex`, PRMSSoilzoneAg `_istep0_areas`,
+  StarfitDailyFlowNode's first substep.
+- Under MPI the initial state is NOT in the input file: it is
+  supplied at full extent and each rank writes its own block.
+
+## Backlog
+
+- An `Options` class (the `control` dict serves for now) and
+  `Model.from_yaml()`.
+- The full `Discretization` class: its topology role, and whether
+  `as_iterable` aligns across two or more grids.
+- A lazy input lifecycle (`ModelInputs`, `resolve_inputs()`).
+- Time-varying parameters on a coarser linear axis (per year, per
+  year and month).
+- `Output` beyond one spatial dimension (it fails loudly today).
+- A check for name collisions at assembly.
+
+## Porting pywatershed processes
+
+Every NHM process is ported (July 2026), serial and MPI: groundwater,
+channel, runoff, soilzone, canopy, snow, atmosphere (solar geometry
+is a parameter factory, not a Process), the NoDprst and Ag variants,
+hydraulic geometry and stream temperature.
+
+**Read `docs/PORTS.md` before port work**: the inventory with each
+process's tolerance, the conventions, the snow story, domain facts,
+the Ag ports, the stream-temperature chain, restart, the backlog.
+The reasons behind the designs are in `docs/design_description.md`
+("Ports and variants"). What each port kept, dropped or guarded is in
+its module docstring.
+
+Rules:
+
+- Names verbatim (parameters, inputs, variables). A flux mapped onto
+  another grid gets a new name (`seg_sroff_vol`).
+- A kernel is an explicit element loop with scalar temporaries,
+  output buffers first, written in place, in pywatershed's order of
+  operations per element. Its scalar helper functions stay separate
+  njit functions with verbatim signatures.
+- No fastmath. Not ported: adapters, `calc_method`, `verbose`, unused
+  declared parameters.
+- Frozen parameters are never edited. Where upstream edits a true
+  parameter, prove the edit a no-op and comment it, or guard with
+  `NotImplementedError`.
+- Upstream quirks are preserved and commented, not fixed. A
+  deliberate departure is logged in `docs/MAINTENANCE.md` (two so
+  far: snow `freeh2o`, SourceSinkFlowNode's harvested outflow).
+- Tolerance: pywatershed's OWN autotest standard for that process
+  (1e-13 groundwater to 1e-3 snow). Do not chase tighter than the
+  process's precision floor. Tests downstream of snow use an
+  outlier-fraction criterion, because the answers come from
+  pywatershed's fastmath path.
+- A variant extends a minimal base class only when its interface is
+  a strict superset; otherwise it is a sibling class sharing
+  module-level njit helpers.
+- NO SKIPS: `tests/run_tests.sh` passes `--error-for-skips`. A
+  parametrization that does not apply asserts something true of that
+  case.
+- Tests load and close netCDF files (`xr.load_dataset`), except
+  `tests/test_ref_behaviors.py`, which pins lazy-open behavior.
+- pywatershed's output files use the dim `nhm_id`, its parameter
+  files `nhru`: rename to the grid dim. A mismatched input dim raises
+  at build.
+- `dt` is SECONDS (86400.0) for real models.
+- The pywatershed repo lives at the mpix meta-repo root; its answers
+  are in `test_data/<domain>/output*/`.
+
+## FlowGraph
+
+`flow_graph.py` (the `make_flow_graph` class factory and the njit
+graph kernel), `flow_graph_build.py` (`splice_flow_graph`, `NewNode`,
+`FlowGraphKit`), node types in `hydrology/*_flow_node.py`. Every
+pywatershed node type is ported (July 2026): channel, pass-through,
+obsin, source_sink, starfit, starfit_source_sink, starfit_daily.
+The reasons are in `docs/design_description.md` ("FlowGraph"). Each
+node type's module docstring records what was ported verbatim and
+what was not.
+
+Rules:
+
+- A FlowGraph is a Process on its own `nnodes` grid. That grid owns
+  `to_graph_index` (0-based, -1 = outlet; PRMS's `tosegment` is
+  1-based, 0 = outlet: `topological_order(one_based=...)`).
+- Adding a node type = its `fields` plus the contract functions:
+  numpy init and advance, and njit `prepare(inode, state)`,
+  `substep(istep, inode, state, tctx, n_sub)`,
+  `finalize(inode, n_sub, state)`. NO kernel edit.
+- An njit type function writes only through `state`, the namedtuple
+  of the graph's arrays passed as an ARGUMENT: numba makes an array
+  captured by a closure read-only.
+- A type's fields are `(nnodes,)` arrays in the union of all types'
+  fields. Write OWN rows only (`node_type_names` locates them); nan
+  marks "does not apply".
+- Parameters freeze at assembly: data preparation is the caller's,
+  and a node type raises on bad values in its own rows.
+- `n_substeps` and `io_in_cfs` belong to the graph. No unit branches
+  in njit code: the STARFIT family multiplies by per-node factors
+  that are 1.0 in a cms graph.
+- Say "node TYPE", never "kind" (`DataArrayMeta.kind`).
+- No FlowGraph MPI code: under MPI the graph's grid is a replicated
+  serial grid fed by MapMPI.
+- Lateral inflows are three Map-fed inputs summed in the kernel; an
+  inserted node is a zero row in the weights.
+- Do not "fix" these: the obsin latch (a negative observation holds
+  the first substep's inflow all day), and STARFIT daily mode's
+  one-day lag (it cannot match the STARFIT reference; the hourly
+  node with `n_substeps=1` does).
+- Tolerances: 1e-10 against drb `seg_outflow` (pywatershed's own
+  scalar-node standard); 1e-7 against the STARFIT reference means;
+  daily mode by parity with pywatershed's own node, which needs
+  pywatershed importable.
+- The mixed channel + STARFIT test domain is ucb_2yr (Big Sandy), NOT
+  drb.
+
+## Schedule and Maps
+
+Reasons: `docs/design_description.md` "Maps: a per-variable
+correspondence between grids, applied once per step".
+
+- Execution order is the order of `process_dict`. Every `advance()`
+  runs before any `calculate()`, so a read of another process's
+  `*_prev` is the prior step's value.
+- A Map couples two grids for ONE variable through static weights:
+  `Map(weights=..., grid={"hru": "segment"},
+  variable={"flow": "flow"})` (keyword-only, `{source: target}`
+  dicts). A Map never ORIGINATES a quantity: a calculation belongs to
+  a process on the grid where its inputs live.
+- Maps are required, and never placed in the order. Each is applied
+  exactly ONCE per step, immediately before its FIRST consumer
+  (`Model._resolve_maps` assigns it, `calculate` applies it). Later
+  consumers re-read the target buffer.
+- A mapped value is a per-step constant after its apply. That is
+  guaranteed at build: the source variable has one owner, and every
+  declared writer on the source grid (a `mutable_input` declarer
+  included) precedes the first consumer. There is no run-time
+  tracking.
+- `_resolve_maps` also raises on a weights shape that does not fit
+  the grid sizes, an unknown grid, a missing source variable, and an
+  unused Map.
+- Explicit, one-pass coupling only. Iterative coupling between grids
+  is out of scope.
+- A mapped flux has a NEW name on the target grid (`seg_sroff_vol`).
+  Fluxes are mapped separately and summed in the consumer's kernel.
+- Weights for a pywatershed aggregation are derived by probing its
+  kernel with basis vectors (`derive_aggregation_weights`).
+
+## Open design topics
+
+- Process composition (a Process that has a sub-Process, as in
+  pywatershed's development branch): encapsulated (the outer declares
+  the union of inputs and outputs, the inner is hidden from the
+  schedule) or transparent. FlowGraph's answer for its own case:
+  sub-units compose as DATA (type codes, union fields, per-type
+  kernel functions), not as contained objects.
+- A reverse direction for a Map (disaggregation), and a Map from a
+  serial grid to the distributed grid.
+- A default process order, subsetted to the active processes.
+- A buffer-ownership rule (one owner, the others view).
+- Whether one process class can appear twice in a model.
+- The assumption of one `dt` for every process.
+- mpixarray's planned streaming DataTree (child datasets with
+  different spatial dims, streamed together, with mapping between
+  them) is expected to take over the roles of the replicated serial
+  grids and of `MapMPI`, at the `Discretization` and `Map` seams.
+  Until then a DataTree is at most an output view over the flat
+  datasets.
 
 ## Input structuring: serial vs MPI, multi-file / datatree (June 2026)
 
 Design discussion -- **not yet implemented.** Dislike of the "kitchen sink"
 all-in-one MPI input file, which gets worse as processes grow. This is the
-input-side **mirror of the data-model open topic** above (same logical-vs-
-physical split); one naming/namespacing convention should serve all three:
+input-side **mirror of the flat-dataset decision** in "Object model" (same
+logical-vs-physical split); one naming/namespacing convention should serve all three:
 input grouping <-> runtime var names <-> output groups.
 
 **The asymmetry today:**
@@ -1605,9 +713,9 @@ the mpixarray-fork problems.
 **The lever -- split static vs streamed inputs:**
 
 - _Static_ (params; space-only): trivially merged into the one `ds_mpi`
-  after `parallelize`, load-once. Multi-file here is ~free and keeps Phase 1's
+  after `parallelize`, load-once. Multi-file here is ~free and keeps the
   structural sharing. (ICs left the combined file Nov 2026 -- see "Initial
-  state" under the Phase 2 backlog. JLM, Nov 2026: the same argument
+  state". JLM, Nov 2026: the same argument
   applies to parameters -- a combined file is "baked" to one parameter
   set, and calibration swaps parameters -- so forcings, parameters and
   ICs should be SEPARATE files; only streamed forcings need the one
@@ -1624,12 +732,13 @@ the mpixarray-fork problems.
 
 **Crux question for the mpixarray dev:** can >= 2 parallelized + streamed
 datasets be co-iterated (or merged) into one streaming view? (July 2026:
-this is the streaming-DataTree goal -- see the build plan clarification.)
+this is the streaming-DataTree goal -- see "Open design topics".)
 
 **Near-term, low-risk path:** accept structured / multi-file (or a DataTree)
 input, **merge/flatten the static parts into the one `ds_mpi` before
 `parallelize`,** and defer multi-_streamed_-forcing to the dev question above.
-Keeps Phase 1 intact and makes input-authoring symmetric with serial.
+Keeps the current MPI path intact and makes input-authoring symmetric with
+serial.
 
 ## Prior art: xarray-simlab & Landlab (from the retired xr design summary, Apr 2026)
 

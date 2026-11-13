@@ -9,7 +9,7 @@ This is the pws_phoenix counterpart of pywatershed's
 ``_build_flow_graph_inputs`` (hydrology/prms_channel_flow_graph.py) --
 the graph-building arithmetic that lived test-side in
 tests/test_mixed_channel_starfit.py and tests/test_flow_graph.py until
-it stabilized (CLAUDE.md "FlowGraph port"). The splice SEMANTICS are
+it stabilized (CLAUDE.md "FlowGraph"). The splice SEMANTICS are
 pywatershed's, verbatim:
 
 - the ``nsegment`` channel rows come first; new node ``ii`` is graph

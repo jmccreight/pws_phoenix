@@ -91,8 +91,7 @@ Terms:
     the same name: same names share, silently.
   - An input's dimension must be the grid's; a mismatch raises at
     build.
-- **Where:** `CLAUDE.md` "Core decision", "Container-model
-  unification", "Object model & serial vs MPI";
+- **Where:** `CLAUDE.md` "Object model";
   `pws_phoenix/discretization.py`; `Model._add_process_fields`;
   `tests/test_two_grid.py`.
 - **Left unfinished:**
@@ -179,7 +178,7 @@ Terms:
   - `Map(weights=..., grid={"hru": "segment"},
     variable={"flow": "flow"})`. An unused Map or a weights shape
     that does not fit the grids raises at build.
-- **Where:** `CLAUDE.md` "Forward design" and "Build plan";
+- **Where:** `CLAUDE.md` "Schedule and Maps";
   `pws_phoenix/maps.py` (docstring); `Model._resolve_maps`;
   `docs/PORTS.md` "The stream-temperature chain".
 - **Left unfinished:**
@@ -215,9 +214,9 @@ Terms:
     `control["output_serial_zarr"]`.
   - Segment-grid results agree with serial to about 1e-9 (sum order);
     hru-grid results are bit for bit.
-- **Where:** `CLAUDE.md` "MPI path", "Build plan" (Step B), "Known
-  mpixarray limits"; `ModelMPI` in `pws_phoenix/model.py`; `MapMPI`
-  in `pws_phoenix/maps.py`; `tests/test_two_grid_mpi.py`.
+- **Where:** `CLAUDE.md` "MPI path"; `ModelMPI` in
+  `pws_phoenix/model.py`; `MapMPI` in `pws_phoenix/maps.py`;
+  `tests/test_two_grid_mpi.py`.
 - **Left unfinished:**
   - A derived buffer with a second dimension cannot be declared
     (mpixarray decomposes every dimension).
@@ -337,7 +336,7 @@ Terms:
     reservoir rows it is an all-nan array.
   - Coming from PRMS, `prms_translate` does the translation of
     `gwstor_init` and `segment_flow_init`.
-- **Where:** `CLAUDE.md` "Initial state" (under the Phase 2 backlog);
+- **Where:** `CLAUDE.md` "Initial state";
   `docs/PORTS.md` "IC status"; `docs/MAINTENANCE.md`;
   `pws_phoenix/model.py` (`_apply_supplied_state`,
   `_restore_grid_var`); `pws_phoenix/process.py` (`state_groups`,
@@ -623,7 +622,7 @@ Terms:
     behaviour). It is not a pass-through.
   - Say "node type", not "kind": `DataArrayMeta.kind` means something
     else.
-- **Where:** `CLAUDE.md` "FlowGraph port"; `pws_phoenix/flow_graph.py`;
+- **Where:** `CLAUDE.md` "FlowGraph"; `pws_phoenix/flow_graph.py`;
   `pws_phoenix/flow_graph_build.py`;
   `pws_phoenix/hydrology/*_flow_node.py`; `tests/test_flow_graph*.py`;
   `tests/test_obsin_source_sink_nodes.py`.
@@ -634,6 +633,11 @@ Terms:
     million pure-Python node-substep calls).
   - A kit with other segment-grid processes beside the channel
     (stream temperature) cannot take a graph yet.
+  - A second dispatch was seen to be possible and not built:
+    first-class function types held in a `numba.typed.List`, which
+    would avoid recompiling the kernel for each composition. In the
+    July 2026 spike it failed only on the read-only capture, which
+    passing state as an argument removes.
 
 ### STARFIT nodes: frozen parameters, unit factors, two time modes
 
@@ -669,9 +673,9 @@ Terms:
     of cubic meters in a cfs graph too.
   - The mixed channel and reservoir graph is tested on ucb_2yr (Big
     Sandy), not drb.
-- **Where:** `CLAUDE.md` "FlowGraph port" (Rounds B and D, io_in_cfs,
-  daily mode); `pws_phoenix/hydrology/starfit_*.py` (the daily module
-  docstring tells the lag story in full);
+- **Where:** `CLAUDE.md` "FlowGraph"; the module docstrings of
+  `pws_phoenix/hydrology/starfit_*.py` (unit factors, the family's
+  shared helpers; the daily module tells the lag story in full);
   `tests/test_starfit_flow_node.py`,
   `tests/test_starfit_daily_parity.py`,
   `tests/test_mixed_channel_starfit.py`.
@@ -697,7 +701,7 @@ Terms:
 - **For users:**
   - The difference matters only when separating compute time from
     output time in a scaling study.
-- **Where:** `CLAUDE.md` "IO is intentionally NOT apples-to-apples";
+- **Where:** `CLAUDE.md` "MPI path";
   `Output` in `pws_phoenix/data_io.py`; `ModelMPI` in
   `pws_phoenix/model.py`.
 - **Left unfinished:**
