@@ -331,7 +331,7 @@ model.model_dict[name]`, then performs exactly one call
 | benchmark          | the call                                        | what it is                                                                                                                                                                    |
 | ------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `time_init`        | `type(proc)(proc._obj)`                         | construction = binding to the grid dataset + the `_refs` capture (one `.values` lookup per declared field; `Process.__init__`)                                            |
-| `time_initialize`  | `proc.initialize()`                             | the init hook: `parameter_internal` derivation (Muskingum coefficients, soilzone/runoff derived params); a no-op for processes without one (e.g. groundwater) -- still recorded |
+| `time_initialize`  | `proc.init_from_params()`                       | the init hook: `parameter_internal` derivation (Muskingum coefficients, soilzone/runoff derived params); a no-op for processes without one (e.g. groundwater) -- still recorded |
 | `time_advance`     | `proc.advance()`                                | the `*_previous` copies                                                                                                                                                       |
 | `time_calculate`   | `proc.calculate(DT, model.time)`                | one step of physics incl. the `.values` extraction around the njit kernel                                                                                                     |
 
@@ -364,7 +364,7 @@ single-kernel processes, the three NoDprst variants,
 HydraulicGeometryFull. Not rows -- their step is several njit calls
 stitched in Python: `prms_atmosphere` (base + ccov + transpiration
 kernels), the stream-temperature family (five module kernels + the
-shade hook), `PRMSRunoffAg` (`_calculate` + `_post_areas`),
+shade hook), `PRMSRunoffAg` (`_areas` + `_calculate` + `_post`),
 `PRMSSoilzoneAg`/`AgObsET` (pre/calculate/post, the obs-ET loop in
 Python). Each could be ONE njit `_calculate` per leaf (njit-to-njit
 calls are free; the obs-ET iteration can move into numba) -- agreed

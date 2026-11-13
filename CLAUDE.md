@@ -483,11 +483,22 @@ data in the owning Process". Which process declares what:
 - `Discretization.topological_order` replicates pywatershed's
   construction EXACTLY (networkx): a different valid order changes
   float accumulation downstream.
-- `Process.initialize()` is called once, after binding and before the
-  run loop. It is LOCAL (no collectives) and takes no `Time`. It
-  computes the `kind="parameter_internal"` fields, which are
-  allocated like variables and frozen read-only after ALL hooks have
-  run.
+- Three init hooks, each run over ALL processes before the next,
+  after binding and before the run loop; all LOCAL (no collectives).
+  Reasons: `docs/design_description.md` "Three init hooks".
+  - `allocate()`: once per model. Private arrays and tuples of array
+    references. The ONLY hook that may allocate.
+  - `init_from_params()`: the `kind="parameter_internal"` fields
+    (allocated like variables, frozen read-only after ALL processes'
+    hooks have run), private parameter-derived values, parameter
+    checks that raise. Writes NO variable, takes no `Time`. Safe to
+    run again.
+  - `init_state(time)`: the cold-start default of every variable and
+    of private state, clock at index 0. Runs after the freeze: a
+    write to a `parameter_internal` raises. Reads no input (under
+    MPI inputs exist only inside the time loop). Safe to run again.
+  - `tests/test_init_replay.py` checks a process against these
+    contracts (state replay, parameter replay).
 - pywatershed's channel init edits `seg_slope` in place. That is not
   replicated (grid parameters are read-only); see `prms_channel.py`.
 
@@ -497,7 +508,7 @@ Reasons: `docs/design_description.md` "Initial state: the restart
 variables, supplied under their own names".
 
 - Starting state = the `restart=True` variables. The order in both
-  paths: allocate -> `initialize()` sets each default -> supplied
+  paths: allocate -> `init_state(time)` sets each default -> supplied
   state (an array in the process's `process_dict` entry under the
   variable's OWN name) or `control["restart_read"]` overrides it.
   Both together raise.
@@ -515,10 +526,9 @@ variables, supplied under their own names".
   no reservoir rows supplies an all-nan array.
 - Still fed from parameters, by decision: the `*_init_frac`
   parameters (soil zone and ag) and runoff's `dprst_frac_init`.
-- KNOWN GAPS: three first-step blocks overwrite supplied state on a
-  cold start (a restart resumes past them): PRMSAtmosphere
-  `_transp_tindex`, PRMSSoilzoneAg `_istep0_areas`,
-  StarfitDailyFlowNode's first substep.
+- KNOWN GAP: one first-step block overwrites supplied state on a
+  cold start (a restart resumes past it): StarfitDailyFlowNode's
+  first substep.
 - Under MPI the initial state is NOT in the input file: it is
   supplied at full extent and each rank writes its own block.
 
@@ -562,8 +572,12 @@ Rules:
   parameter, prove the edit a no-op and comment it, or guard with
   `NotImplementedError`.
 - Upstream quirks are preserved and commented, not fixed. A
-  deliberate departure is logged in `docs/MAINTENANCE.md` (two so
-  far: snow `freeh2o`, SourceSinkFlowNode's harvested outflow).
+  deliberate departure is logged in `docs/MAINTENANCE.md` (three so
+  far: snow `freeh2o`, SourceSinkFlowNode's harvested outflow,
+  PRMSRunoffAg's areas from the current step's `ag_frac`).
+- A PRMS "dynamic parameter" is an INPUT and is handled as one
+  (`ag_frac`): what a process derives from it is a result of the
+  current step, not state.
 - Tolerance: pywatershed's OWN autotest standard for that process
   (1e-13 groundwater to 1e-3 snow). Do not chase tighter than the
   process's precision floor. Tests downstream of snow use an
