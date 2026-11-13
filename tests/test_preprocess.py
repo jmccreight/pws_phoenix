@@ -9,10 +9,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
-
 from conftest import PWS_TEST_DATA
-from pws_phoenix.prms_translate import (  # noqa: E402
+from pws_phoenix.prms_translate import (
     assemble_from_control,
     load_parameters,
     verify_preprocessed,

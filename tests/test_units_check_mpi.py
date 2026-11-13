@@ -13,12 +13,10 @@ import tempfile
 import numpy as np
 import pytest
 import xarray as xr
-
-pytest.importorskip("mpi4py")
-from mpi4py import MPI  # noqa: E402
-from pws_phoenix.maps import MapMPI  # noqa: E402
-from pws_phoenix.model import ModelMPI  # noqa: E402
-from pws_phoenix.processes_concrete import Lower, Upper  # noqa: E402
+from mpi4py import MPI
+from pws_phoenix.maps import MapMPI
+from pws_phoenix.model import ModelMPI
+from pws_phoenix.processes_concrete import Lower, Upper
 
 UNITS = {
     "param_up_0": "fraction",
@@ -90,17 +88,23 @@ def _stamped_lower(toy):
     return {
         "parameters": low,
         "forcing_low": forcing_low,
-        "storage": toy["low_storage_initial"],
+        "storage": toy["low_storage_initial"].assign_attrs(units="inches"),
     }
 
 
-def _build(data_dir, toy, weights, tag, mode="convert"):
+def _build(
+    data_dir, toy, weights, tag, mode="convert", flow_in_feet=False, file=None
+):
+    # initial state: full extent, under the variable's own name, with
+    # its units (optionally /12 as 'feet': converted in the model's copy)
+    flow = toy["up_flow_initial"].assign_attrs(units="inches")
+    if flow_in_feet:
+        flow = (flow / 12.0).assign_attrs(units="feet")
     process_dict = {
         "upper": {
             "class": Upper,
             "discretization": "hru",
-            # initial state: full extent, under the variable's own name
-            "flow": toy["up_flow_initial"],
+            "flow": flow,
         },
         "lower": {
             "class": Lower,
@@ -114,7 +118,7 @@ def _build(data_dir, toy, weights, tag, mode="convert"):
         )
     }
     control = {
-        "input_file": data_dir / f"hru_input_{tag}.nc",
+        "input_file": data_dir / f"hru_input_{file or tag}.nc",
         "output_parallel_netcdf": data_dir / f"hru_output_{tag}.nc",
         "output_serial_zarr": data_dir / f"segment_output_{tag}.zarr",
         "output_var_names": ["flow", "storage"],
@@ -175,3 +179,51 @@ def test_streamed_input_mismatch_raises_everywhere(
     # ... and 'check' mode names the mismatch the same way
     with pytest.raises(ValueError, match="'forcing_up'.*'feet'"):
         _build(data_dir, two_grid_toy, two_grid_weights, "feet", mode="check")
+
+
+@pytest.mark.mpi(min_size=2)
+def test_supplied_state_units(
+    data_dir, two_grid_toy, two_grid_weights, answers
+):
+    """Distributed-grid initial state supplied in 'feet': 'check' raises
+    on every rank (the metadata is identical on every rank); 'convert'
+    converts each rank's block of the model's copy -> the declared-units
+    answers."""
+    comm = MPI.COMM_WORLD
+    path = data_dir / "hru_input_state.nc"
+    if comm.rank == 0:
+        _write_input_file(
+            path, two_grid_toy, param_up_0_percent=False, forcing_in_feet=False
+        )
+    comm.Barrier()
+    with pytest.raises(ValueError, match="initial state: 'flow'.*'feet'"):
+        _build(
+            data_dir,
+            two_grid_toy,
+            two_grid_weights,
+            "state_check",
+            mode="check",
+            flow_in_feet=True,
+            file="state",
+        )
+    raised_everywhere = comm.allgather(True)
+    assert all(raised_everywhere)
+    model, control = _build(
+        data_dir,
+        two_grid_toy,
+        two_grid_weights,
+        "state_convert",
+        flow_in_feet=True,
+        file="state",
+    )
+    model.run(np.float64(1.0))
+    storage_final = model.discretizations["segment"].dataset["storage"].values
+    np.testing.assert_allclose(
+        storage_final, answers["storage"][-1], rtol=1e-12
+    )
+    model.finalize()
+    comm.Barrier()
+    if comm.rank == 0:
+        with xr.load_dataset(control["output_parallel_netcdf"]) as ds_out:
+            flow_out = ds_out["flow_out"].values
+        np.testing.assert_allclose(flow_out, answers["flow"], rtol=1e-12)

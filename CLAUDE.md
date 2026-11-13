@@ -402,7 +402,17 @@ Two boundaries, deliberately separate:
   need converting RAISES: conversion is never a per-step edit,
   pre-process the file). `control["units_patch"] = {name: key}`
   overrides a supplied array's attrs (missing attr = error; the patch
-  is the escape hatch). Hooks: `_add_process_fields` (params before
+  is the escape hatch). STATE (Nov 12, 2026): supplied initial state
+  and the declared variables of a `restart_read` file are judged the
+  same way (`units.conversion`, attrs only -- a bare ndarray has no
+  units and raises; a restart file is a netCDF file anyone can
+  write), but they are COPIED into the model's buffer, so "convert"
+  converts the MODEL's copy after the write (`_restore_grid_var(...,
+  affine=)`) and leaves the caller's array as supplied.
+  `ModelMPI.write_restart` stamps the declared units on the gathered
+  distributed-grid variables. NOT checked: python-attr restart state
+  (`get_restart_state`; stream temp's silos -- no declaration, no
+  units). Hooks: `_add_process_fields` (params before
   the read-only flag; `Input.data`), `ModelMPI._build` (resident
   params per rank; streamed inputs check-only, every rank raises
   together), `_resolve_maps`. Budget units stay string-equality: exact
@@ -1126,7 +1136,7 @@ identically (tests/test_starfit_daily_parity.py; 15 reservoirs x 365
 d x 24 substeps, cms, 1e-10) -- validates the PORT, not the physics.
 Parity needs pywatershed IMPORTABLE: mpix-root clone via sys.path +
 deps pyPRMS (pip) / tqdm / contextily (conda) in environment.yaml;
-the importorskip fails the sweep otherwise (no-skips policy). Framework: substep contract grew to
+the skipif fails the sweep otherwise (no-skips policy). Framework: substep contract grew to
 `substep(istep, inode, state, tctx, n_sub)` (symmetric w/ finalize;
 daily needs the last-substep test); `tctx` gained `itime_step`
 (free, always served); `initialize_starfit_type` now writes OWN-ROWS

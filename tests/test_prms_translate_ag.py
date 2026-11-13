@@ -26,26 +26,24 @@ import numpy as np
 import pytest
 import xarray as xr
 
-pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
-
 from conftest import PWS_TEST_DATA
-from pws_phoenix.atmosphere.prms_atmosphere import (  # noqa: E402
+from pws_phoenix.atmosphere.prms_atmosphere import (
     PRMSAtmosphereTranspFrost,
     PRMSAtmosphereTranspFrostDyn,
 )
-from pws_phoenix.hydrology.prms_runoff import PRMSRunoffAg  # noqa: E402
-from pws_phoenix.hydrology.prms_soilzone_ag import (  # noqa: E402
+from pws_phoenix.hydrology.prms_runoff import PRMSRunoffAg
+from pws_phoenix.hydrology.prms_soilzone_ag import (
     PRMSSoilzoneAg,
     PRMSSoilzoneAgObsET,
 )
-from pws_phoenix.model import Model  # noqa: E402
-from pws_phoenix.prms_translate import (  # noqa: E402
+from pws_phoenix.model import Model
+from pws_phoenix.prms_translate import (
     assemble_from_control,
     load_parameters,
     model_from_control,
     resolve_classes,
 )
-from pws_phoenix.prms_translate.dyn_param import (  # noqa: E402
+from pws_phoenix.prms_translate.dyn_param import (
     forward_fill,
     load_dynamic_parameter,
 )
