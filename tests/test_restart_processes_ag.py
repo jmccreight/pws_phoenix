@@ -56,6 +56,14 @@ RUNOFF_DISK_INPUTS = (
     "intcp_changeover",
 )
 SOILZONE_DISK_INPUTS = ("transp_on",)
+# standalone runoff-ag also takes the soil zone's back-edges from disk
+# (test_prms_runoff_ag.py)
+RUNOFF_STANDALONE_INPUTS = RUNOFF_DISK_INPUTS + (
+    "soil_lower_prev",
+    "soil_rechr_prev",
+    "ag_soil_moist_prev",
+    "ag_soil_rechr_prev",
+)
 
 # the ObsET standalone configuration (test_prms_soilzone_ag_obs_et.py)
 OBS_DISK_INPUTS = (
@@ -87,6 +95,20 @@ chain_skipif = pytest.mark.skipif(
     reason=(
         "pywatershed fgr_ag_2yr spinup data not present/generated; "
         "missing: " + ", ".join(_chain_missing[:3])
+    ),
+)
+
+_runoff_needed = [
+    DOMAIN_DIR / "parameters_PRMSRunoffAg.nc",
+    DOMAIN_DIR / "parameters_dis_hru.nc",
+    DOMAIN_DIR / "ag_frac_static.nc",
+] + [GEN_SPINUP / f"{nn}.nc" for nn in RUNOFF_STANDALONE_INPUTS]
+_runoff_missing = [str(ff) for ff in _runoff_needed if not ff.exists()]
+runoff_skipif = pytest.mark.skipif(
+    bool(_runoff_missing),
+    reason=(
+        "pywatershed fgr_ag_2yr spinup data not present/generated; "
+        "missing: " + ", ".join(_runoff_missing[:3])
     ),
 )
 
@@ -222,6 +244,73 @@ def test_runoff_soilzone_ag_chain(tmp_path):
         )
 
     perfect_restart(make_model, np.float64(1.0), 90, tmp_path)
+
+
+@runoff_skipif
+def test_runoff_ag_supplied_state():
+    """Restart by SUPPLIED state: every restart variable is handed to
+    a cold start (clock index 0) under its own name, with inputs that
+    begin at the resume step. The time-zero area block of
+    PRMSRunoffAg.calculate must leave supplied areas alone -- run on
+    them, it carves the ag area out of hru_perv a second time and the
+    first step's kernel sees the wrong pervious area.
+
+    The resume step is chosen for pervious-area runoff on an ag hru
+    (asserted): on a step without it the wrong area changes nothing
+    (step 30 passes with the double carve in place)."""
+    n_total, idx_b = 230, 200
+    dt = np.float64(1.0)
+    name = "prms_runoff_ag"
+    forcings = _load_forcings(RUNOFF_STANDALONE_INPUTS, GEN_SPINUP)
+    forcings["ag_frac"] = _static_ag_frac(forcings["potet"])
+    parameters = xr.load_dataset(DOMAIN_DIR / "parameters_PRMSRunoffAg.nc")
+
+    def make_model(start, state):
+        process_dict = {
+            name: {
+                "class": PRMSRunoffAg,
+                "discretization": "nhru",
+                "parameters": parameters,
+                **{
+                    nn: da.isel(time=slice(start, None))
+                    for nn, da in forcings.items()
+                },
+                **state,
+            },
+        }
+        discretizations = {
+            "nhru": Discretization(
+                ["nhru"], parameters=DOMAIN_DIR / "parameters_dis_hru.nc"
+            ),
+        }
+        return Model(process_dict, {}, discretizations=discretizations)
+
+    with make_model(0, {}) as m_ac:
+        m_ac.run(dt, np.int32(idx_b + 1))
+        proc_ac = m_ac.model_dict[name]
+        assert (
+            (proc_ac["hru_sroffp"].values > 0.0)
+            & (proc_ac["ag_area"].values > 0.0)
+        ).any()
+        m_ac.run(dt, np.int32(n_total - idx_b - 1))
+    with make_model(0, {}) as m_ab:
+        m_ab.run(dt, np.int32(idx_b))
+    proc_ab = m_ab.model_dict[name]
+    state = {
+        nn: proc_ab[nn].values.copy()
+        for nn in PRMSRunoffAg.get_restart_variables()
+    }
+    with make_model(idx_b, state) as m_bc:
+        m_bc.run(dt, np.int32(n_total - idx_b))
+
+    proc_bc = m_bc.model_dict[name]
+    for nn in PRMSRunoffAg.get_var_names():
+        np.testing.assert_array_equal(
+            proc_bc[nn].values,
+            proc_ac[nn].values,
+            err_msg=f"variable '{nn}' not bit-identical after a "
+            "restart by supplied state",
+        )
 
 
 @obs_skipif
