@@ -98,13 +98,23 @@ Port notes (upstream quirks preserved verbatim)
   argument is never read under False (the core passes
   ag_irrigation_add again -- benign aliasing, neither is written).
 - ``hru_area_perv``/``hru_frac_perv``/``ag_area``/``soil_moist_tot``
-  are per-step VARIABLES (dynamic ag_frac): the upstream
-  itime_step==0 area block runs at istep0 in calculate() (ag_frac is
-  an input, not fed when the init hooks run), unless the areas were
-  supplied as initial state (``_istep0_areas``); ``_update_areas``
-  (upstream _update_ag_areas, np.isclose semantics hand-coded) runs
-  each step BEFORE the kernel and redistributes storages when ag_frac
-  changes.
+  are per-step VARIABLES, results of the input ag_frac and nothing
+  more: ``_update_areas`` (upstream _update_ag_areas, np.isclose
+  semantics hand-coded) computes the areas from the CURRENT step's
+  ag_frac each step BEFORE the kernel. They have no starting value
+  and are not restart state, so upstream's itime_step==0 area block
+  is not ported.
+- The one piece of state the areas need is ``ag_frac_prev``: the
+  ag_frac the storages are distributed for. ``_update_areas``
+  compares it with the current ag_frac, moves water between the
+  storages when they differ, then sets it to the current value.
+  Upstream keeps the previous step's ``ag_area`` and
+  ``hru_area_perv`` for this instead. That cannot work here:
+  PRMSRunoffAg declares ``ag_area`` too, two declarations of one
+  name on a shared grid are ONE array, and PRMSRunoffAg writes this
+  step's value before this class reads it. The old areas are
+  recomputed from ``ag_frac_prev`` with upstream's arithmetic, so the
+  values are upstream's.
 """
 
 import numba
@@ -415,14 +425,20 @@ class PRMSSoilzoneAg(Process):
     )
 
     # -- variables: areas (per-step under dynamic ag_frac) --
-    # per-step areas: _update_areas reads the PREVIOUS step's areas
-    # (old_ag_frac = ag_area/harea), and _istep0_areas only runs at
-    # time zero -- so a restart must restore them (restart=True is a
-    # prognostic-state marker here, not a storage)
+    # NOT restart state: _update_areas computes them from the current
+    # ag_frac before anything reads them. What a restart must restore
+    # is ag_frac_prev (restart=True is a prognostic-state marker
+    # there, not a storage).
+    ag_frac_prev = _meta(
+        "variable",
+        "ag_frac the storages are distributed for: the previous "
+        "step's when _update_areas reads it; nan = cold start [-]",
+        restart=True,
+        units="fraction",
+    )
     hru_area_perv = _meta(
         "variable",
         "Pervious HRU area [acres] (per-step)",
-        restart=True,
         units="acres",
     )
     hru_frac_perv = _meta(
@@ -433,7 +449,6 @@ class PRMSSoilzoneAg(Process):
     ag_area = _meta(
         "variable",
         "Agricultural HRU area [acres] (per-step)",
-        restart=True,
         units="acres",
     )
 
@@ -706,18 +721,13 @@ class PRMSSoilzoneAg(Process):
 
     # init_state() computes soil_lower = soil_moist - soil_rechr and
     # clamps soil_rechr <= soil_moist from the DEFAULTS (see
-    # Process.state_groups). The two areas are the previous step's
-    # values that _update_areas reads; the time-zero area block is
-    # skipped only when they were supplied (see _istep0_areas), so
-    # one without the other is an error.
-    state_groups = (
-        ("soil_moist", "soil_rechr", "soil_lower"),
-        ("ag_area", "hru_area_perv"),
-    )
+    # Process.state_groups)
+    state_groups = (("soil_moist", "soil_rechr", "soil_lower"),)
 
-    # zeroed by init_state(); hru_area_perv is NOT here: init_state()
-    # leaves it at nan (see _istep0_areas)
+    # zeroed by init_state(); ag_frac_prev is NOT here: init_state()
+    # sets it to nan (see _update_areas)
     _ZERO_VARS = (
+        "hru_area_perv",
         "hru_frac_perv",
         "ag_area",
         "cap_infil_tot",
@@ -795,7 +805,8 @@ class PRMSSoilzoneAg(Process):
 
     # ------------------------------------------------------------------
     # Initialization (_initialize_soilzone_ag_data, the parts that do
-    # NOT depend on ag_frac; area block runs at istep0 in calculate)
+    # NOT depend on ag_frac; its area block is not ported -- the areas
+    # are computed every step, see _update_areas)
     # ------------------------------------------------------------------
 
     def allocate(self) -> None:
@@ -805,6 +816,7 @@ class PRMSSoilzoneAg(Process):
         ``_pref_flow_flag``, which is derived from a parameter, so
         init_from_params() builds that one."""
         self._update_areas_args = self._hold(
+            "ag_frac_prev",
             "ag_area",
             "hru_area_perv",
             "hru_frac_perv",
@@ -993,14 +1005,15 @@ class PRMSSoilzoneAg(Process):
         """The state half of upstream ``_initialize_soilzone_ag_data``
         (the no-restart path), in its order: starting storages from
         the ``*_init_frac`` parameters and the maxima, upstream's
-        value clamps, and what follows from them. The area block needs
-        the input ``ag_frac`` and stays at time zero in calculate()
-        (see _istep0_areas)."""
+        value clamps, and what follows from them. The areas need the
+        input ``ag_frac`` and are computed in calculate(), every step
+        (see _update_areas)."""
         refs = self._refs
         for name in self._ZERO_VARS:
             refs[name][:] = 0.0
-        # not yet derived from ag_frac (see _istep0_areas)
-        refs["hru_area_perv"][:] = np.nan
+        # cold start: the storages are distributed for whatever
+        # ag_frac the first step brings (see _update_areas)
+        refs["ag_frac_prev"][:] = np.nan
 
         hru_type = refs["hru_type"]
         wh_inactive_or_lake = np.where(
@@ -1034,7 +1047,8 @@ class PRMSSoilzoneAg(Process):
         ssres_stor[:] = refs["ssstor_init_frac"] * sat_threshold
         ssres_stor[wh_inactive_or_lake] = 0.0
 
-        # no ag storage on LAKE|INACTIVE (ag_frac==0 asserted at istep0)
+        # no ag storage on LAKE|INACTIVE (ag_frac == 0 there is
+        # asserted on the first step)
         ag_soil_moist[wh_inactive_or_lake] = 0.0
         ag_soil_rechr[wh_inactive_or_lake] = 0.0
 
@@ -1116,6 +1130,7 @@ class PRMSSoilzoneAg(Process):
     @numba.njit
     def _update_areas(
         # updated in place
+        ag_frac_prev: np.ndarray,
         ag_area: np.ndarray,
         hru_area_perv: np.ndarray,
         hru_frac_perv: np.ndarray,
@@ -1132,11 +1147,25 @@ class PRMSSoilzoneAg(Process):
         hru_type: np.ndarray,
     ) -> None:
         """upstream _update_ag_areas per element (dprst ACTIVE port);
-        np.isclose semantics hand-coded: |a-b| <= 1e-8 + 1e-5*|b|."""
+        np.isclose semantics hand-coded: |a-b| <= 1e-8 + 1e-5*|b|.
+
+        The areas are written from the CURRENT ag_frac. The old areas
+        that upstream reads back from its own arrays are recomputed
+        here from ag_frac_prev, with upstream's arithmetic (so
+        old_ag_frac is (ag_frac_prev * area) / area, upstream's
+        ag_area / hru_area, not ag_frac_prev itself). nan in
+        ag_frac_prev is a cold start: the storages are taken as
+        distributed for the current ag_frac, and nothing moves."""
         for hh in range(hru_area.shape[0]):
             harea = hru_area[hh]
-            old_ag_frac = ag_area[hh] / harea
-            old_perv = hru_area_perv[hh]
+            prev_frac = ag_frac_prev[hh]
+            if np.isnan(prev_frac):
+                prev_frac = ag_frac[hh]
+            old_ag_area = prev_frac * harea
+            old_ag_frac = old_ag_area / harea
+            old_perv = harea - hru_area_imperv[hh]
+            if hru_type[hh] != _INACTIVE:
+                old_perv = old_perv - dprst_frac[hh] * harea - old_ag_area
 
             new_ag_area = ag_frac[hh] * harea
             new_perv = harea - hru_area_imperv[hh]
@@ -1188,6 +1217,7 @@ class PRMSSoilzoneAg(Process):
             hru_area_perv[hh] = new_perv
             if hru_type[hh] != _INACTIVE:
                 hru_frac_perv[hh] = new_perv / harea
+            ag_frac_prev[hh] = ag_frac[hh]
 
     @staticmethod
     @numba.njit
@@ -1886,59 +1916,25 @@ class PRMSSoilzoneAg(Process):
         )
 
     def _pre_kernel(self) -> None:
-        """istep0 areas (once) + per-step area update + pre lines."""
+        """Per-step area update + pre lines."""
         self._update_areas(*self._update_areas_args)
         self._pre(*self._pre_args)
 
-    def _istep0_areas(self) -> None:
-        """upstream _initialize_soilzone_ag_data area block: runs at
-        time zero in calculate() (ag_frac now fed); once-only numpy
-        staging.
-
-        Skipped when the areas were SUPPLIED as initial state.
-        init_state() leaves hru_area_perv at nan ("not yet derived
-        from ag_frac"); supplied state replaces the nan. The supplied
-        areas are the previous step's, which _update_areas must read
-        to see a change of ag_frac on the first step and move the
-        storages accordingly; this block would overwrite them with the
-        current step's."""
+    def _check_ag_frac(self) -> None:
+        """GSFLOW zeroes ag_frac on LAKE and INACTIVE HRUs; upstream
+        (and this port) will NOT edit inputs -- assert instead, on the
+        first step (once-only numpy staging)."""
         refs = self._refs
-        if not np.isnan(refs["hru_area_perv"]).all():
-            return
         hru_type = refs["hru_type"]
-        hru_area = refs["hru_area"]
-
         wh_no_ag = np.where((hru_type == _LAKE) | (hru_type == _INACTIVE))
-        # GSFLOW zeroes ag_frac on this mask; upstream (and this port)
-        # will NOT edit inputs -- assert instead
         assert (refs["ag_frac"][wh_no_ag] == 0.0).all()
-
-        np.multiply(refs["ag_frac"], hru_area, out=refs["ag_area"])
-        hru_area_perv = refs["hru_area_perv"]
-        hru_area_perv[:] = hru_area - refs["hru_area_imperv"]
-        wh_active = np.where(hru_type != _INACTIVE)
-        dprst_area_max = refs["dprst_frac"] * hru_area
-        hru_area_perv[wh_active] = (
-            hru_area_perv[wh_active]
-            - dprst_area_max[wh_active]
-            - refs["ag_area"][wh_active]
-        )
-        refs["hru_frac_perv"][:] = 0.0
-        refs["hru_frac_perv"][wh_active] = (
-            hru_area_perv[wh_active] / hru_area[wh_active]
-        )
-        refs["soil_moist_tot"][:] = (
-            refs["ssres_stor"]
-            + refs["soil_moist"] * refs["hru_frac_perv"]
-            + refs["ag_soil_moist"] * refs["ag_frac"]
-        )
 
     def _post_kernel(self) -> None:
         self._post(*self._post_args)
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         if time.current_index == 0:
-            self._istep0_areas()
+            self._check_ag_frac()
         self._pre_kernel()
         self._calculate_family(iter_aet_flag=False)
         self._post_kernel()
@@ -2194,7 +2190,7 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         if time.current_index == 0:
-            self._istep0_areas()
+            self._check_ag_frac()
         self._pre_kernel()
         refs = self._refs
 

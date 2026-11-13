@@ -28,8 +28,8 @@ a bool kernel option run both ways, coverage accumulated); the
 PRMSSoilzoneAg family (the four soilzone helpers again, imported by
 name so patched in the Ag module; two bool options; the per-step area
 update, pre and post kernels via ``func=``); PRMSRunoffAg (four ag
-helpers beside the base ones; the post-kernel area update via
-``func=``). Harness: tests/kernel_units.py.
+helpers beside the base ones; the per-step area kernel and the
+post kernel via ``func=``). Harness: tests/kernel_units.py.
 Synthetic data, CI-able.
 """
 
@@ -1174,7 +1174,17 @@ def test_runoff_ag_kernel_units(runoff_ag_data):
     assert out["dprst_vol_clos_frac"][21] == 0.0
 
 
-def test_runoff_ag_post_areas_units(runoff_ag_data):
+def test_runoff_ag_areas_units(runoff_ag_data):
+    out = assert_kernel_dimensionally_consistent(
+        PRMSRunoffAg, runoff_ag_data, func=PRMSRunoffAg._areas.py_func
+    )
+    assert out["ag_area"][1] == 20.0
+    assert out["hru_perv"][1] == 65.0
+    assert out["hru_perv"][0] == 85.0  # no ag area
+    assert out["hru_frac_perv"][16] == pytest.approx(0.2)
+
+
+def test_runoff_ag_post_units(runoff_ag_data):
     data = runoff_ag_data | {
         "infil": np.full(22, 0.3),
         "infil_ag": np.full(22, 0.1),
@@ -1183,12 +1193,8 @@ def test_runoff_ag_post_areas_units(runoff_ag_data):
         "dprst_stor_hru": np.full(22, 0.5),
     }
     out = assert_kernel_dimensionally_consistent(
-        PRMSRunoffAg, data, func=PRMSRunoffAg._post_areas.py_func
+        PRMSRunoffAg, data, func=PRMSRunoffAg._post.py_func
     )
-    assert out["ag_area"][1] == 20.0
-    assert out["hru_perv"][1] == 65.0
-    assert out["hru_perv"][0] == 85.0  # no ag area
-    assert out["hru_frac_perv"][16] == pytest.approx(0.2)
     assert out["infil_hru"][1] == pytest.approx(0.3 * 0.65 + 0.1 * 0.2)
     assert out["infil_hru"][0] == pytest.approx(0.3 * 0.85)
     assert out["hru_impervstor_change"][1] == 0.02
@@ -1438,12 +1444,14 @@ def test_soilzone_ag_kernel_units(soilzone_ag_data):
 
 @pytest.fixture
 def update_areas_data() -> dict[str, np.ndarray]:
-    """Eight hrus for _update_areas: ag_frac 0.2 -> 0.2 unchanged; 0.1
+    """Nine hrus for _update_areas: ag_frac 0.2 -> 0.2 unchanged; 0.1
     (decrease: excess ag water to slow_stor); 0.3 (increase: ag depths
     scaled down); 0 (all ag water to slow_stor); 0.1 with no ag water;
     0.8 (pervious area to zero: pervious storages zeroed); already
-    0.8 with no pervious area; INACTIVE."""
-    nhru = 8
+    0.8 with no pervious area; INACTIVE; a cold start (ag_frac_prev
+    nan: nothing moves). The three areas are outputs: their values
+    here are placeholders the kernel overwrites."""
+    nhru = 9
 
     def at(default, dtype=np.float64, **by_hru):
         arr = np.full(nhru, default, dtype=dtype)
@@ -1451,17 +1459,19 @@ def update_areas_data() -> dict[str, np.ndarray]:
             arr[int(key[1:])] = value
         return arr
 
-    ag_area = at(20.0, h6=80.0)
     return {
-        "ag_area": ag_area,
-        "hru_area_perv": 100.0 - 20.0 - ag_area,
-        "hru_frac_perv": (100.0 - 20.0 - ag_area) / 100.0,
+        "ag_frac_prev": at(0.2, h6=0.8, h8=np.nan),
+        "ag_area": at(0.0),
+        "hru_area_perv": at(0.0),
+        "hru_frac_perv": at(0.6),
         "ag_soil_moist": at(2.0, h4=0.0),
         "ag_soil_rechr": at(1.0, h4=0.0),
         "slow_stor": at(0.5),
         "soil_moist": at(2.0),
         "soil_rechr": at(1.0),
-        "ag_frac": at(0.2, h1=0.1, h2=0.3, h3=0.0, h4=0.1, h5=0.8, h6=0.8),
+        "ag_frac": at(
+            0.2, h1=0.1, h2=0.3, h3=0.0, h4=0.1, h5=0.8, h6=0.8, h8=0.3
+        ),
         "hru_area": at(100.0),
         "hru_area_imperv": at(10.0),
         "dprst_frac": at(0.1),
@@ -1488,6 +1498,13 @@ def test_soilzone_ag_update_areas_units(update_areas_data):
     assert out["soil_moist"][6] == 2.0  # already no pervious area
     assert out["hru_area_perv"][7] == 90.0  # inactive: no carve-outs
     assert out["hru_frac_perv"][7] == 0.6  # not updated
+    # cold start: areas from ag_frac, storages untouched
+    assert out["ag_area"][8] == pytest.approx(30.0)
+    assert out["ag_soil_moist"][8] == 2.0
+    assert out["soil_moist"][8] == 2.0
+    np.testing.assert_array_equal(
+        out["ag_frac_prev"], update_areas_data["ag_frac"]
+    )
 
 
 @pytest.mark.parametrize("name", ["_pre", "_post"])

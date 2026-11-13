@@ -123,7 +123,7 @@ VARIANT_ROWS = [
 # rows, by the same test: prms_atmosphere (base kernel + ccov +
 # transpiration kernels), prms_stream_temp and its variants (five
 # module-level kernels + the shade hook), fgr's PRMSRunoffAg
-# (_calculate + _post_areas) and PRMSSoilzoneAg/AgObsET (pre/
+# (_areas + _calculate + _post) and PRMSSoilzoneAg/AgObsET (pre/
 # calculate/post kernels, the obs-ET iteration in Python) -- each
 # gets a row once it has one njit entry (README "Not in the first
 # cut").

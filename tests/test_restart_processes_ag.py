@@ -1,13 +1,13 @@
 """Perfect-restart tests for the Ag family (fgr_ag_2yr data).
 
 Extends the R2 recipe (test_restart_processes.perfect_restart) to the
-three ag processes. The ag-specific wrinkle is the PER-STEP AREAS:
-under time-varying ag_frac both processes read the PREVIOUS step's
-areas at step start (runoff-ag's kernel before _post_areas;
-soilzone-ag's _update_areas old_ag_frac = ag_area/harea) and the
-istep0 area blocks only run at time zero -- so hru_perv/hru_frac_perv/
-ag_area (runoff-ag) and hru_area_perv/ag_area (soilzone-ag) carry
-restart=True as prognostic markers even though they are not storages.
+three ag processes. The ag-specific wrinkle is the PER-STEP AREAS
+under time-varying ag_frac. Both processes compute their areas from
+the current ag_frac before their kernels on every step, so no area is
+restart state. The one thing soilzone-ag must remember is the ag_frac
+its storages are distributed for (ag_frac_prev: _update_areas moves
+water when the current ag_frac differs from it) -- restart=True as a
+prognostic marker, though it is not a storage.
 The storages mirror plain soilzone's set (incl. the derived
 soil_lower, and ag_soil_lower for symmetry). ObsET adds NO restart
 state: its It0 buffers are per-step scratch (overwritten from current
@@ -15,9 +15,10 @@ values at each step start before any read).
 
 Coverage: the live RunoffAg -> SoilzoneAg chain (static tiled ag_frac,
 the spinup configuration) is the definitive test; the ObsET standalone
-runs the DYNAMIC ag_frac + observed-AET iteration configuration. Two
-more tests restart by SUPPLIED state (a cold start at clock index 0),
-where the time-zero area blocks must not touch the supplied areas.
+runs the DYNAMIC ag_frac + observed-AET iteration configuration.
+Three more tests restart by SUPPLIED state (a cold start at clock
+index 0), each resuming on a step where ag_frac CHANGES: runoff-ag
+alone, soilzone-ag alone, and the live chain.
 """
 
 import pathlib as pl
@@ -177,15 +178,12 @@ def _dynamic_ag_frac(template):
 
 def test_flags_derivation_pin():
     """The ag flag sets, exactly (data-free)."""
+    # runoff-ag adds NO restart state: its per-step areas are
+    # recomputed from the input ag_frac before anything reads them
     assert set(PRMSRunoffAg.get_restart_variables()) == (
         set(PRMSRunoff.get_restart_variables())
         - {"PRMSRunoff_mass_residual_accum"}
-    ) | {
-        "hru_perv",
-        "hru_frac_perv",
-        "ag_area",
-        "PRMSRunoffAg_mass_residual_accum",
-    }
+    ) | {"PRMSRunoffAg_mass_residual_accum"}
     assert set(PRMSSoilzoneAg.get_restart_variables()) == {
         "soil_moist",
         "soil_rechr",
@@ -195,8 +193,9 @@ def test_flags_derivation_pin():
         "ag_soil_moist",
         "ag_soil_rechr",
         "ag_soil_lower",
-        "ag_area",
-        "hru_area_perv",
+        # the ag_frac the storages are distributed for; no AREA is
+        # restart state
+        "ag_frac_prev",
         # the mass budget's accumulator (restart=True by design)
         "PRMSSoilzoneAg_mass_residual_accum",
     }
@@ -252,19 +251,25 @@ def test_runoff_soilzone_ag_chain(tmp_path):
 def test_runoff_ag_supplied_state():
     """Restart by SUPPLIED state: every restart variable is handed to
     a cold start (clock index 0) under its own name, with inputs that
-    begin at the resume step. The time-zero area block of
-    PRMSRunoffAg.calculate must leave supplied areas alone -- run on
-    them, it carves the ag area out of hru_perv a second time and the
-    first step's kernel sees the wrong pervious area.
+    begin at the resume step. The three per-step areas are not
+    among them: PRMSRunoffAg computes them from ag_frac before its
+    kernel on every step, the resume step included.
 
-    The resume step is chosen for pervious-area runoff on an ag hru
-    (asserted): on a step without it the wrong area changes nothing
-    (step 30 passes with the double carve in place)."""
+    ag_frac is halved FROM the resume step on. The resumed model has
+    only that step's ag_frac to work from, so a bit-identical result
+    pins that the continuous run's kernel also used the CURRENT
+    step's areas on the step of the change, and nothing remembered
+    from the step before. The resume step is chosen for pervious-area
+    runoff on an hru whose ag_frac changes (asserted): on a step
+    without it a different pervious area changes nothing (step 30 is
+    such a step)."""
     n_total, idx_b = 230, 200
     dt = np.float64(1.0)
     name = "prms_runoff_ag"
     forcings = _load_forcings(RUNOFF_STANDALONE_INPUTS, GEN_SPINUP)
     forcings["ag_frac"] = _static_ag_frac(forcings["potet"])
+    forcings["ag_frac"][idx_b:] *= 0.5
+    ag_frac = forcings["ag_frac"].values
     parameters = xr.load_dataset(DOMAIN_DIR / "parameters_PRMSRunoffAg.nc")
 
     def make_model(start, state):
@@ -292,7 +297,7 @@ def test_runoff_ag_supplied_state():
         proc_ac = m_ac.model_dict[name]
         assert (
             (proc_ac["hru_sroffp"].values > 0.0)
-            & (proc_ac["ag_area"].values > 0.0)
+            & (ag_frac[idx_b] != ag_frac[idx_b - 1])
         ).any()
         m_ac.run(dt, np.int32(n_total - idx_b - 1))
     with make_model(0, {}) as m_ab:
@@ -355,16 +360,17 @@ def test_soilzone_ag_obs_et(tmp_path):
 def test_soilzone_ag_supplied_state():
     """Restart by SUPPLIED state: every restart variable is handed to
     a cold start (clock index 0) under its own name, with inputs that
-    begin at the resume step. The time-zero area block of the ag soil
-    zone must leave supplied areas alone: they are the PREVIOUS step's
-    areas, and _update_areas compares them with the resume step's
-    ag_frac to move water between the storages. Overwritten with the
-    resume step's own areas, no change is seen and nothing moves.
+    begin at the resume step. Among them is ag_frac_prev, the ag_frac
+    the storages are distributed for: _update_areas compares it with
+    the resume step's ag_frac to move water between the storages.
+    Without it (a cold start: nan) no change is seen and nothing
+    moves.
 
     So the resume step must be one where ag_frac changes on an hru
     that holds ag soil water (asserted): 2001-01-01, the one change
-    in the analysis period's dynamic ag_frac. On any other step the
-    overwrite writes back the values already there."""
+    in the analysis period's dynamic ag_frac. On any other step
+    ag_frac_prev equals the step's ag_frac and its absence changes
+    nothing."""
     start, idx_b, n_after = 336, 366, 20
     dt = np.float64(1.0)
     name = "prms_soilzone_ag_obs"
@@ -422,3 +428,137 @@ def test_soilzone_ag_supplied_state():
             err_msg=f"variable '{nn}' not bit-identical after a "
             "restart by supplied state",
         )
+
+
+_chain_dyn_needed = [
+    DOMAIN_DIR / "parameters_PRMSRunoffAg.nc",
+    DOMAIN_DIR / "parameters_PRMSSoilzoneAg.nc",
+    DOMAIN_DIR / "parameters_dis_hru.nc",
+    DOMAIN_DIR / "dyn_ag_frac.param",
+    PYWS_ROOT / "pywatershed" / "utils" / "prms_dyn_param.py",
+] + [
+    GEN_ANALYSIS / f"{nn}.nc"
+    for nn in RUNOFF_DISK_INPUTS + SOILZONE_DISK_INPUTS
+]
+_chain_dyn_missing = [str(ff) for ff in _chain_dyn_needed if not ff.exists()]
+chain_dyn_skipif = pytest.mark.skipif(
+    bool(_chain_dyn_missing),
+    reason=(
+        "pywatershed fgr_ag_2yr analysis data not present/generated; "
+        "missing: " + ", ".join(_chain_dyn_missing[:3])
+    ),
+)
+
+
+@chain_dyn_skipif
+def test_runoff_soilzone_ag_chain_dynamic_ag_frac():
+    """The live RunoffAg -> SoilzoneAg chain on one grid under
+    DYNAMIC ag_frac, across the step where ag_frac changes
+    (2001-01-01), with both mass budgets in error mode.
+
+    Both classes declare ag_area and hru_frac_perv, and on one grid
+    each is ONE array. The soil zone must still see the change of
+    ag_frac and move water between its storages: ag depths are scaled
+    down where the ag area grows, and the excess goes to slow_stor
+    where it shrinks (both asserted against the kernel's arithmetic,
+    on hrus that hold ag soil water). When the soil zone took the
+    previous ag area from the shared ag_area, runoff-ag had already
+    overwritten it and nothing moved.
+
+    The same run is then resumed on that step by SUPPLIED state and
+    compared bit for bit, for both processes."""
+    start, idx_b, n_after = 336, 366, 20
+    dt = np.float64(1.0)
+    classes = {
+        "prms_runoff_ag": PRMSRunoffAg,
+        "prms_soilzone_ag": PRMSSoilzoneAg,
+    }
+    runoff_forcings = _load_forcings(RUNOFF_DISK_INPUTS, GEN_ANALYSIS)
+    runoff_forcings["ag_frac"] = _dynamic_ag_frac(runoff_forcings["potet"])
+    forcings = {
+        "prms_runoff_ag": runoff_forcings,
+        "prms_soilzone_ag": _load_forcings(SOILZONE_DISK_INPUTS, GEN_ANALYSIS),
+    }
+    parameters = {
+        "prms_runoff_ag": xr.load_dataset(
+            DOMAIN_DIR / "parameters_PRMSRunoffAg.nc"
+        ),
+        "prms_soilzone_ag": xr.load_dataset(
+            DOMAIN_DIR / "parameters_PRMSSoilzoneAg.nc"
+        ),
+    }
+
+    def make_model(first, state):
+        process_dict = {
+            name: {
+                "class": cls,
+                "discretization": "nhru",
+                "parameters": parameters[name],
+                **{
+                    nn: da.isel(time=slice(first, None))
+                    for nn, da in forcings[name].items()
+                },
+                **state.get(name, {}),
+            }
+            for name, cls in classes.items()
+        }
+        discretizations = {
+            "nhru": Discretization(
+                ["nhru"], parameters=DOMAIN_DIR / "parameters_dis_hru.nc"
+            ),
+        }
+        return Model(
+            process_dict, {"budget": "error"}, discretizations=discretizations
+        )
+
+    ag_frac = runoff_forcings["ag_frac"].values
+    old_frac, new_frac = ag_frac[idx_b - 1], ag_frac[idx_b]
+    with make_model(start, {}) as m_ac:
+        m_ac.run(dt, np.int32(idx_b - start))
+        procs_ac = m_ac.model_dict
+        state = {
+            name: {
+                nn: procs_ac[name][nn].values.copy()
+                for nn in cls.get_restart_variables()
+            }
+            for name, cls in classes.items()
+        }
+        m_ac.run(dt, np.int32(1))
+
+        # the step of the change: water moves as _update_areas says
+        soilzone = procs_ac["prms_soilzone_ag"]
+        ag_water = state["prms_soilzone_ag"]["ag_soil_moist"]
+        seen = np.abs(new_frac - old_frac) > 1.0e-8 + 1.0e-5 * old_frac
+        grew = seen & (new_frac > old_frac) & (ag_water > 0.0)
+        shrank = (
+            seen & (new_frac < old_frac) & (new_frac > 0.0) & (ag_water > 0.0)
+        )
+        assert grew.any() and shrank.any()
+        np.testing.assert_allclose(
+            soilzone["ag_soil_moist_redistribution"].values[grew],
+            ag_water[grew] * (old_frac[grew] / new_frac[grew] - 1.0),
+            rtol=1.0e-10,
+        )
+        assert (
+            soilzone["ag_soil_moist_redistribution"].values[grew] < 0
+        ).all()
+        np.testing.assert_allclose(
+            soilzone["slow_stor_redistribution"].values[shrank],
+            ag_water[shrank] * (old_frac[shrank] - new_frac[shrank]),
+            rtol=1.0e-9,
+            atol=1.0e-12,
+        )
+        assert (soilzone["slow_stor_redistribution"].values[shrank] > 0).all()
+
+        m_ac.run(dt, np.int32(n_after - 1))
+    with make_model(idx_b, state) as m_bc:
+        m_bc.run(dt, np.int32(n_after))
+
+    for name, cls in classes.items():
+        for nn in cls.get_var_names():
+            np.testing.assert_array_equal(
+                m_bc.model_dict[name][nn].values,
+                procs_ac[name][nn].values,
+                err_msg=f"'{name}' variable '{nn}' not bit-identical "
+                "after a restart by supplied state",
+            )
