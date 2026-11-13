@@ -14,10 +14,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-pytest.importorskip("pyPRMS", reason="pyPRMS not installed")
-
 from conftest import PWS_TEST_DATA, PYWS_ROOT
-from pws_phoenix.prms_translate import (  # noqa: E402
+from pws_phoenix.prms_translate import (
     assemble_from_control,
     from_control,
     load_cbh,
@@ -29,8 +27,8 @@ from pws_phoenix.prms_translate import (  # noqa: E402
     resolve_classes,
     volume_map_weights,
 )
-from pws_phoenix.prms_translate.dyn_param import forward_fill  # noqa: E402
-from pws_phoenix.prms_translate.readers import (  # noqa: E402
+from pws_phoenix.prms_translate.dyn_param import forward_fill
+from pws_phoenix.prms_translate.readers import (
     _drop_unknown_control_entries,
 )
 

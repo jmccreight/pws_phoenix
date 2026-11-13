@@ -114,7 +114,7 @@ end in `tests/test_prms_channel{,_mpi}.py`.
   THE path), `verbose`, `fastmath=True` (strict IEEE here — see below),
   unused declared parameters, dead upstream code. (Budget and restart
   arrived later in pws_phoenix form — budgets Oct 2026, see "Framework
-  findings"; only groundwater declares one so far.)
+  findings".)
 - **Upstream edits of true parameters** (runoff's clos-flag zeroing,
   soilzone's `soil_moist_max` clamp, channel's `seg_slope` clamp,
   snow's nonzero-`snowpack_init` block) are either proven no-ops and

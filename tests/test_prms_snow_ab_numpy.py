@@ -80,14 +80,25 @@ _needed = [
     GEN_DIR / "soltab_horad_potsw.nc",
 ]
 _missing = [str(ff) for ff in _needed if not ff.exists()]
-pywatershed = pytest.importorskip(
-    "pywatershed", reason="pywatershed not importable"
-)
+# a skipif mark, not pytest.importorskip: --error-for-skips does not see
+# a collection-time module skip, so importorskip would pass the sweep
+try:
+    import pywatershed  # noqa: F401
+
+    _pyws_reason = ""
+except ImportError as err:
+    _pyws_reason = f"pywatershed not importable ({err}); "
+
 pytestmark = pytest.mark.skipif(
-    bool(_missing),
+    bool(_missing) or bool(_pyws_reason),
     reason=(
-        "pywatershed drb_2yr test data not generated; missing: "
-        + ", ".join(_missing[:3])
+        _pyws_reason
+        + (
+            "pywatershed drb_2yr test data not generated; missing: "
+            + ", ".join(_missing[:3])
+            if _missing
+            else ""
+        )
     ),
 )
 

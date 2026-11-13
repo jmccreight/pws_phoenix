@@ -114,6 +114,8 @@ def runs(tmp_path_factory):
             UCB_CONTROL,
             control={
                 "budget": "error",
+                # every array the splice hands the model carries units
+                "units": "check",
                 "output_serial_zarr": out_dir / "graph.zarr",
                 "output_var_names": GRAPH_OUTPUTS,
                 "time_chunk_size": N_DAYS,

@@ -210,9 +210,44 @@ def reconcile(
     and `convertible` -- the array is converted in place (the write
     flag is restored afterwards) and its attrs updated. Everything
     else raises ValueError naming `context` and `name`."""
-    if mode is None or declared is None:
+    conv = conversion(name, da.attrs, declared, mode, patch, context=context)
+    if conv is None:
         return
+    scale, offset = conv
     supplied = patch.get(name, da.attrs.get("units"))
+    where = f"{context}: '{name}' (declared {declared!r})"
+    if not convertible:
+        raise ValueError(
+            f"{where}: supplied in {supplied!r}, which would need "
+            "converting, but the array is streamed/lazy -- conversion is "
+            "never a per-step edit; pre-process the file to "
+            f"{declared!r} (scale {scale!r}, offset {offset!r})."
+        )
+    apply_affine(da.values, scale, offset, where=where)
+    da.attrs["units"] = declared
+
+
+def conversion(
+    name: str,
+    attrs: Any,
+    declared: str | None,
+    mode: str | None,
+    patch: dict[str, str],
+    *,
+    context: str,
+) -> tuple[float, float] | None:
+    """The JUDGING half of :func:`reconcile`, for a supplied array known
+    only by its ``attrs`` (so also for data that is COPIED into a model
+    buffer rather than being one: supplied initial state, restart
+    files). Returns None when nothing is to be done (mode None, a
+    unit-less declaration, or supplied units that are :func:`same` as
+    `declared`); returns ``(scale, offset)`` (see :func:`affine`) under
+    mode "convert" for compatible units; raises ValueError otherwise
+    (no units, a string outside the vocabulary, a mismatch under
+    "check", incompatible dimensions)."""
+    if mode is None or declared is None:
+        return None
+    supplied = patch.get(name, attrs.get("units"))
     where = f"{context}: '{name}' (declared {declared!r})"
     if supplied is None:
         raise ValueError(
@@ -226,21 +261,20 @@ def reconcile(
             "as a vocabulary key via control['units_patch'] or add the key."
         )
     if same(declared, supplied):
-        return
+        return None
     if mode == "check":
         raise ValueError(
             f"{where}: supplied units are {supplied!r}; control['units'] "
             "= 'convert' converts resident arrays in place."
         )
-    scale, offset = affine(supplied, declared)  # raises if incompatible
-    if not convertible:
-        raise ValueError(
-            f"{where}: supplied in {supplied!r}, which would need "
-            "converting, but the array is streamed/lazy -- conversion is "
-            "never a per-step edit; pre-process the file to "
-            f"{declared!r} (scale {scale!r}, offset {offset!r})."
-        )
-    values = da.values
+    return affine(supplied, declared)  # raises if incompatible
+
+
+def apply_affine(
+    values: np.ndarray, scale: float, offset: float, *, where: str
+) -> None:
+    """``values = scale * values + offset`` IN PLACE (no temporary; the
+    write flag is restored afterwards)."""
     if not np.issubdtype(values.dtype, np.floating):
         raise ValueError(
             f"{where}: cannot convert a {values.dtype} array in place."
@@ -253,4 +287,3 @@ def reconcile(
             values += offset
     finally:
         values.flags.writeable = writeable
-    da.attrs["units"] = declared

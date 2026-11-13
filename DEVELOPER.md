@@ -133,15 +133,18 @@ would fail them.
    input, as `PRMSAtmosphereTranspFrostDyn` does) change which buffer
    is assembled, not when it is captured -- no special case.
 
-### Open
+### Outcome (Oct 27, 2026)
 
-- Re-run `ProcessLifecycle.time_calculate` on the implemented cache --
-  expected to fall to about `time_kernel` plus numba dispatch (a few
-  us for long argument lists) plus ~40 ns per dict lookup.
-- The four multi-kernel processes (atmosphere, stream temperature,
-  RunoffAg, SoilzoneAg/AgObsET) get one njit `_calculate` per leaf in
-  the same pass (njit-to-njit calls are free; the obs-ET iteration can
-  move into numba), which also gives them `time_kernel` rows.
+- `ProcessLifecycle.time_calculate` on the implemented cache is within
+  a few us of `time_kernel` for every process; the drb chain step fell
+  from 9.80 ms to 1.92 ms (`benchmarks/README.md`, "After the `_refs`
+  cache").
+- One njit `_calculate` per leaf for the four multi-kernel processes
+  (atmosphere, stream temperature, RunoffAg, SoilzoneAg/AgObsET) was
+  measured and dropped: the Python between kernels is about 2 us in
+  three of them, and moving AgObsET's obs-ET loop (about 21 us) into
+  numba gained nothing (`benchmarks/README.md`, "The multi-kernel
+  processes, measured").
 
 ## Numba cache: on for users, off for tests, opt-in per kernel
 
