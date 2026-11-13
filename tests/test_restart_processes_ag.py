@@ -15,7 +15,9 @@ values at each step start before any read).
 
 Coverage: the live RunoffAg -> SoilzoneAg chain (static tiled ag_frac,
 the spinup configuration) is the definitive test; the ObsET standalone
-runs the DYNAMIC ag_frac + observed-AET iteration configuration.
+runs the DYNAMIC ag_frac + observed-AET iteration configuration. Two
+more tests restart by SUPPLIED state (a cold start at clock index 0),
+where the time-zero area blocks must not touch the supplied areas.
 """
 
 import pathlib as pl
@@ -347,3 +349,76 @@ def test_soilzone_ag_obs_et(tmp_path):
         )
 
     perfect_restart(make_model, np.float64(1.0), 120, tmp_path)
+
+
+@obs_skipif
+def test_soilzone_ag_supplied_state():
+    """Restart by SUPPLIED state: every restart variable is handed to
+    a cold start (clock index 0) under its own name, with inputs that
+    begin at the resume step. The time-zero area block of the ag soil
+    zone must leave supplied areas alone: they are the PREVIOUS step's
+    areas, and _update_areas compares them with the resume step's
+    ag_frac to move water between the storages. Overwritten with the
+    resume step's own areas, no change is seen and nothing moves.
+
+    So the resume step must be one where ag_frac changes on an hru
+    that holds ag soil water (asserted): 2001-01-01, the one change
+    in the analysis period's dynamic ag_frac. On any other step the
+    overwrite writes back the values already there."""
+    start, idx_b, n_after = 336, 366, 20
+    dt = np.float64(1.0)
+    name = "prms_soilzone_ag_obs"
+    forcings = _load_forcings(OBS_DISK_INPUTS, GEN_ANALYSIS)
+    template = forcings["potet"]
+    forcings["ag_frac"] = _dynamic_ag_frac(template)
+    forcings["aet_observed"] = (
+        xr.load_dataarray(DOMAIN_DIR / "aet_observed.nc")
+        .sel(time=template["time"])
+        .assign_coords(nhru=template["nhru"])
+    )
+    parameters = xr.load_dataset(DOMAIN_DIR / "parameters_PRMSSoilzoneAg.nc")
+
+    def make_model(first, state):
+        process_dict = {
+            name: {
+                "class": PRMSSoilzoneAgObsET,
+                "discretization": "nhru",
+                "parameters": parameters,
+                **{
+                    nn: da.isel(time=slice(first, None))
+                    for nn, da in forcings.items()
+                },
+                **state,
+            },
+        }
+        discretizations = {
+            "nhru": Discretization(
+                ["nhru"], parameters=DOMAIN_DIR / "parameters_dis_hru.nc"
+            ),
+        }
+        return Model(process_dict, {}, discretizations=discretizations)
+
+    ag_frac = forcings["ag_frac"].values
+    with make_model(start, {}) as m_ac:
+        m_ac.run(dt, np.int32(idx_b - start))
+        proc_ac = m_ac.model_dict[name]
+        state = {
+            nn: proc_ac[nn].values.copy()
+            for nn in PRMSSoilzoneAgObsET.get_restart_variables()
+        }
+        assert (
+            (ag_frac[idx_b] != ag_frac[idx_b - 1])
+            & (state["ag_soil_moist"] > 0.0)
+        ).any()
+        m_ac.run(dt, np.int32(n_after))
+    with make_model(idx_b, state) as m_bc:
+        m_bc.run(dt, np.int32(n_after))
+
+    proc_bc = m_bc.model_dict[name]
+    for nn in PRMSSoilzoneAgObsET.get_var_names():
+        np.testing.assert_array_equal(
+            proc_bc[nn].values,
+            proc_ac[nn].values,
+            err_msg=f"variable '{nn}' not bit-identical after a "
+            "restart by supplied state",
+        )
