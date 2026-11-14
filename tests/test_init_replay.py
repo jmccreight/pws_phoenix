@@ -21,18 +21,35 @@ Both replays are helpers here, not Model methods: ``reset()`` and
 
 This module: the toy model (no external data) plus a toy that uses
 each hook for its purpose, and three toys that break one rule each --
-the replays must catch all three.
+the replays must catch all three; then the complete NHM with stream
+temperature, built from the drb PRMS control (every ported NHM
+process, two grids, supplied starting state from the translation).
 """
 
 import numpy as np
 import pytest
 import xarray as xr
+from conftest import PWS_TEST_DATA
 from pws_phoenix.clock import Time
 from pws_phoenix.model import Model
 from pws_phoenix.process import _FILL_VALUE, DataArrayMeta, Process
 from pws_phoenix.processes_concrete import Lower, Upper
+from pws_phoenix.prms_translate import model_from_control
 
 DT = np.float64(1.0)
+DT_DAY = np.float64(86400.0)
+DRB_DIR = PWS_TEST_DATA / "drb_2yr"
+_drb_needed = [
+    DRB_DIR / "nhm_stream_temp.control",
+    DRB_DIR / "myparam.param",
+    DRB_DIR / "prcp.cbh",
+    DRB_DIR / "rhavg.cbh",
+]
+_drb_missing = [str(ff) for ff in _drb_needed if not ff.exists()]
+drb_skipif = pytest.mark.skipif(
+    bool(_drb_missing),
+    reason="drb_2yr legacy files missing: " + ", ".join(_drb_missing[:3]),
+)
 N_STEPS_BEFORE_REPLAY = np.int32(3)
 PARAM_NAMES = [
     "param_up_0",
@@ -445,3 +462,54 @@ def test_parameter_replay_catches(toy_ds, toy_class, message):
         model.run(DT, N_STEPS_BEFORE_REPLAY)
         with pytest.raises(AssertionError, match=message):
             replay_parameters(model)
+
+
+# ----------------------------------------------------------------------
+# the complete NHM with stream temperature, from the drb PRMS control
+# ----------------------------------------------------------------------
+
+
+@drb_skipif
+def test_drb_stream_temp_kit_replays():
+    """Both replays on every ported NHM process at once: the hru grid
+    (atmosphere through groundwater), the segment grid (channel,
+    hydraulic geometry, stream temperature with its silos held in
+    attributes) and the starting state the translation supplies
+    (gwres_stor, seg_inflow)."""
+    with model_from_control(
+        DRB_DIR / "nhm_stream_temp.control", control={"budget": "error"}
+    ) as model:
+        assert model._supplied_state
+        snapshot = snapshot_state(model)
+        # most variables hold a default the build put in place, so the
+        # replay cannot pass by leaving the fill (measured Nov 2026:
+        # 155 of 184 variables; 31 parameter_internal; 4 state arrays
+        # held in attributes)
+        n_default = sum(
+            not np.array_equal(
+                snapshot[key],
+                np.full_like(snapshot[key], fill),
+                equal_nan=True,
+            )
+            for key, fill in _variable_fills(model).items()
+        )
+        assert n_default > 100
+        assert len(_private_state(model)) == 4
+        model.run(DT_DAY, N_STEPS_BEFORE_REPLAY)
+
+        # the steps moved state of each kind the replay must put back
+        stream_temp = model.model_dict["prms_stream_temp"]
+        assert (stream_temp._gw_index > 0).any()
+        assert (stream_temp._gw_silo > -98.0).any()
+        n_moved = sum(
+            not np.array_equal(array, snapshot[key], equal_nan=True)
+            for key, array in _state(model).items()
+        )
+        assert n_moved > 100
+
+        replay_state(model)
+        assert_state_equal(model, snapshot)
+
+        model.run(DT_DAY, N_STEPS_BEFORE_REPLAY)
+        assert _parameters_internal(model)
+        replay_parameters(model)
