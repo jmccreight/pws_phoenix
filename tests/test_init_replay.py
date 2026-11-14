@@ -12,14 +12,19 @@ be run again without being rebuilt:
   state before it, so a default that only the build put in place is
   missed. The same steps run again after the reset must then
   reproduce the first run bit for bit.
-- PARAMETER REPLAY (what a later ``Model.set_parameters()`` will do):
+- PARAMETER REPLAY (``Model.set_parameters()`` with no new values):
   ``init_from_params()`` run a second time must reproduce every
   ``parameter_internal`` bit for bit, replace no private array (only
   ``allocate()`` may allocate) and change nothing else (it writes no
   variable).
-
-The parameter replay is a helper here, not a Model method:
-``set_parameters()`` arrives with the calibration reuse loop.
+- NEW PARAMETERS: ``set_parameters(values)`` -> ``reset()`` -> run
+  must equal, in every array and bit for bit, a fresh build whose
+  parameter datasets hold the new values.
+- RESULTS IN MEMORY (``control["collect_var_names"]``, the
+  ``ResultCollector`` held as ``model.results``): row ``tt`` is the
+  variable after step ``tt``, the zarr Output holds the same numbers,
+  and a run repeated after a reset fills the same buffer with the
+  same values.
 
 This module: the toy model (no external data) plus a toy that uses
 each hook for its purpose, and three toys that break one rule each --
@@ -36,6 +41,7 @@ import pytest
 import xarray as xr
 from conftest import PWS_TEST_DATA, cold_start_state
 from pws_phoenix.clock import Time
+from pws_phoenix.data_io import ResultCollector
 from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import StarfitFlowNode
 from pws_phoenix.model import Model
@@ -176,15 +182,6 @@ def _parameters_internal(model: Model) -> dict[tuple[str, str], np.ndarray]:
     return out
 
 
-def _parameter_internal_fills(model: Model) -> dict[tuple[str, str], object]:
-    out = {}
-    for key, proc in model.model_dict.items():
-        grid = model._proc_grid[key]
-        for name, meta in proc.get_parameters_internal().items():
-            out[(grid, name)] = _FILL_VALUE[meta.dtype]
-    return out
-
-
 def _collect(value: object, path: str, arrays: dict, scalars: dict) -> None:
     """Arrays and plain numbers reachable from one attribute, through
     tuples, lists and dicts (a tuple of array references, _refs, a
@@ -214,25 +211,21 @@ def _private(model: Model) -> tuple[dict, dict]:
 
 
 def replay_parameters(model: Model) -> None:
-    """Overwrite every parameter_internal with its allocation fill,
-    run init_from_params() over all processes again (author order, as
-    the build does) and refreeze. Asserts: parameter_internal bit for
-    bit; no attribute array replaced; no other array or number
-    changed."""
+    """Model.set_parameters() with no new values: it overwrites every
+    parameter_internal with its allocation fill, runs
+    init_from_params() over all processes again (author order, as
+    the build does) and refreezes. Asserts: parameter_internal bit
+    for bit; no attribute array replaced; no other array or number
+    changed. The model then needs a reset() before it steps."""
     internal = _parameters_internal(model)
-    fills = _parameter_internal_fills(model)
     arrays_before, scalars_before = _private(model)
     values_before = {
         path: array.copy() for path, array in arrays_before.items()
     }
 
-    for key, array in internal.items():
-        array.flags.writeable = True
-        array[...] = fills[key]
-    for proc in model.model_dict.values():
-        proc.init_from_params()
+    model.set_parameters({})
     for array in internal.values():
-        array.flags.writeable = False
+        assert not array.flags.writeable
 
     arrays_after, scalars_after = _private(model)
     assert arrays_after.keys() == arrays_before.keys()
@@ -380,6 +373,16 @@ class AllocatesInParamsToy(ReplayToy):
         self._weights = refs["capacity"] / refs["capacity"].sum()
 
 
+class CheckedToy(ReplayToy):
+    """Not a rule-breaker: a parameter check that raises in
+    init_from_params(), before anything is computed."""
+
+    def init_from_params(self) -> None:
+        if (self._refs["capacity"] <= 0.0).any():
+            raise ValueError("capacity must be positive")
+        super().init_from_params()
+
+
 # ----------------------------------------------------------------------
 # tests
 # ----------------------------------------------------------------------
@@ -390,14 +393,17 @@ def toy_ds(dimensions, make_toy_input):
     return make_toy_input(dimensions)
 
 
-def _make_model(toy_ds, toy_class, control=None):
+def _make_model(toy_ds, toy_class, control=None, capacity=None):
     """Upper -> Lower with SUPPLIED starting state (none when
     `control` restarts), and a bucket that starts from its own
-    default, on one grid; budgets judged."""
+    default, on one grid; budgets judged. `capacity` is the bucket's
+    parameter (the model freezes the array it is given)."""
     control = {"budget": "error"} | (control or {})
     n_space = toy_ds.sizes["space"]
+    if capacity is None:
+        capacity = np.linspace(2.0, 12.0, n_space)
     bucket_parameters = xr.Dataset(
-        {"capacity": ("space", np.linspace(2.0, 12.0, n_space))},
+        {"capacity": ("space", capacity)},
         coords={"space": toy_ds["space"]},
     )
     process_dict = {
@@ -454,8 +460,8 @@ def test_state_replay(toy_ds):
 
 
 def test_reset_raises(toy_ds, tmp_path):
-    """reset() refuses a model with a zarr Output, a warm-started
-    model and a finalized model."""
+    """reset() and set_parameters() refuse a model with a zarr
+    Output, a warm-started model and a finalized model."""
     control = {
         "output_var_names": ["flow"],
         "output_serial_zarr": tmp_path / "out.zarr",
@@ -465,6 +471,8 @@ def test_reset_raises(toy_ds, tmp_path):
         model.run(DT, N_STEPS_BEFORE_REPLAY)
         with pytest.raises(NotImplementedError, match="zarr Output"):
             model.reset()
+        with pytest.raises(NotImplementedError, match="zarr Output"):
+            model.set_parameters({})
 
     restart_dir = tmp_path / "restarts"
     with _make_model(toy_ds, ReplayToy) as model:
@@ -475,9 +483,165 @@ def test_reset_raises(toy_ds, tmp_path):
     ) as model:
         with pytest.raises(NotImplementedError, match="restart_read"):
             model.reset()
+        with pytest.raises(NotImplementedError, match="restart_read"):
+            model.set_parameters({})
 
     with pytest.raises(RuntimeError, match="finalized"):
         model.reset()
+    with pytest.raises(RuntimeError, match="finalized"):
+        model.set_parameters({})
+
+
+def test_set_parameters(toy_ds):
+    """set_parameters -> reset -> run equals a fresh build with the
+    new values, in every array. The bucket's starting storage is a
+    rule relative to the parameter, so the reset must recompute it."""
+    new_capacity = np.linspace(3.0, 30.0, toy_ds.sizes["space"])
+    with _make_model(toy_ds, ReplayToy) as model:
+        model.run(DT, N_STEPS_BEFORE_REPLAY)
+        model.set_parameters({"capacity": new_capacity})
+
+        # written into the model's own array, which is frozen again
+        capacity = model.model_dict["bucket"]._refs["capacity"]
+        assert capacity is not new_capacity
+        np.testing.assert_array_equal(capacity, new_capacity)
+        assert not capacity.flags.writeable
+        assert new_capacity.flags.writeable
+
+        # the state in place belongs to the old parameters
+        with pytest.raises(RuntimeError, match=r"call reset\(\)"):
+            model.step(DT)
+        model.reset()
+        model.run(DT, N_STEPS_BEFORE_REPLAY)
+        stepped = snapshot_state(model)
+
+    with _make_model(
+        toy_ds, ReplayToy, capacity=new_capacity.copy()
+    ) as fresh:
+        fresh.run(DT, N_STEPS_BEFORE_REPLAY)
+        assert_state_equal(
+            fresh, stepped, when="in the model whose parameters were set"
+        )
+
+
+def test_set_parameters_raises(toy_ds):
+    n_space = toy_ds.sizes["space"]
+    with _make_model(toy_ds, CheckedToy) as model:
+        bucket = model.model_dict["bucket"]
+        capacity = bucket._refs["capacity"]
+        capacity_built = capacity.copy()
+
+        # every name and value is checked before anything is written
+        for values, grid, error, message in (
+            ({"no_such_name": 1.0}, None, ValueError, "not a parameter"),
+            ({"capacity": 1.0}, "nowhere", ValueError, "grid 'nowhere'"),
+            ({"leak_coef": 0.5}, None, ValueError, "parameter_internal"),
+            ({"capacity": np.ones(n_space + 1)}, None, ValueError, "shape"),
+            (
+                {"capacity": np.ones(n_space, dtype=complex)},
+                None,
+                TypeError,
+                "dtype",
+            ),
+        ):
+            with pytest.raises(error, match=message):
+                model.set_parameters({"capacity": 99.0} | values, grid=grid)
+        np.testing.assert_array_equal(capacity, capacity_built)
+        model.step(DT)
+
+        # a parameter check raises in init_from_params(): the values
+        # stay written (a scalar, broadcast), the internals are
+        # frozen again, and the model refuses to go on
+        with pytest.raises(ValueError, match="capacity must be positive"):
+            model.set_parameters({"capacity": -1.0})
+        assert (capacity == -1.0).all()
+        assert not bucket._refs["leak_coef"].flags.writeable
+        with pytest.raises(RuntimeError, match="set_parameters"):
+            model.reset()
+        with pytest.raises(RuntimeError, match=r"call reset\(\)"):
+            model.step(DT)
+
+        # until a set_parameters() succeeds
+        model.set_parameters({"capacity": capacity_built})
+        model.reset()
+        model.run(DT, N_STEPS_BEFORE_REPLAY)
+        assert np.isfinite(bucket._refs["bucket_storage"]).all()
+
+
+COLLECT_NAMES = ["flow", "bucket_storage"]
+
+
+def _step_and_check_rows(model, dt, n_steps):
+    """Step the model; after each step the collector's row of that
+    step equals the live variable."""
+    refs = {
+        name: proc._refs[name]
+        for name in model.results.values
+        for proc in model.model_dict.values()
+        if name in proc.get_var_names(include_budget=True)
+    }
+    assert refs.keys() == model.results.values.keys()
+    for _ in range(int(n_steps)):
+        tt = model._next_index
+        model.step(dt)
+        assert model.results.n_collected == tt + 1
+        for name, ref in refs.items():
+            np.testing.assert_array_equal(
+                model.results.values[name][tt], ref, err_msg=name
+            )
+
+
+def test_result_collector(toy_ds, tmp_path):
+    n_time = toy_ds.sizes["time"]
+    n_space = toy_ds.sizes["space"]
+
+    # one run that both collects and writes zarr: the same numbers
+    store = tmp_path / "out.zarr"
+    control = {
+        "collect_var_names": COLLECT_NAMES,
+        "output_var_names": COLLECT_NAMES,
+        "output_serial_zarr": store,
+        "time_chunk_size": 2,
+    }
+    with _make_model(toy_ds, ReplayToy, control) as model:
+        assert model.results.n_collected == 0
+        for name in COLLECT_NAMES:
+            assert model.results.values[name].shape == (n_time, n_space)
+            assert np.isnan(model.results.values[name]).all()
+        model.run(DT, np.int32(n_time))
+        assert model.results.n_collected == n_time
+        collected = model.results.values
+    with xr.open_zarr(store, consolidated=False) as written:
+        for name in COLLECT_NAMES:
+            assert np.isfinite(collected[name]).all()
+            np.testing.assert_array_equal(
+                collected[name], written[name].values, err_msg=name
+            )
+
+    # reuse: the same buffers, the same values, the count from zero
+    control = {"collect_var_names": COLLECT_NAMES}
+    with _make_model(toy_ds, ReplayToy, control) as model:
+        buffers = dict(model.results.values)
+        _step_and_check_rows(model, DT, n_time)
+        first = {name: array.copy() for name, array in buffers.items()}
+        model.reset()
+        assert model.results.n_collected == 0
+        # a shorter run: its rows are counted, the rest are left
+        _step_and_check_rows(model, DT, N_STEPS_BEFORE_REPLAY)
+        assert model.results.n_collected == N_STEPS_BEFORE_REPLAY
+        model.run(DT, np.int32(n_time - N_STEPS_BEFORE_REPLAY))
+        for name, array in model.results.values.items():
+            assert array is buffers[name]
+            np.testing.assert_array_equal(array, first[name], err_msg=name)
+            np.testing.assert_array_equal(
+                array, collected[name], err_msg=name
+            )
+
+
+def test_result_collector_raises(toy_ds):
+    control = {"collect_var_names": ["no_such_name"]}
+    with pytest.raises(ValueError, match="'no_such_name' not found"):
+        _make_model(toy_ds, ReplayToy, control)
 
 
 def test_parameter_replay(toy_ds):
@@ -575,6 +739,105 @@ def test_drb_stream_temp_kit_replays():
         # both grids, with the Maps between them, run again
         assert model.maps
         assert_rerun_equal(model, DT_DAY, stepped)
+
+
+# one parameter per kind of consequence: starting storages that are a
+# rule relative to it (soil_moist_max), parameter_internal values
+# (x_coef -> the Muskingum coefficients), a (month, space) parameter
+# (dday_slope), and two read only by a kernel
+DRB_PARAMETER_FACTORS = {
+    "soil_moist_max": 0.9,
+    "x_coef": 0.9,
+    "dday_slope": 1.05,
+    "gwflow_coef": 1.1,
+    "carea_max": 0.9,
+}
+
+
+@drb_skipif
+def test_drb_set_parameters():
+    """set_parameters -> reset -> run on the complete NHM equals a
+    fresh build whose parameter datasets hold the new values: every
+    array of both grids, bit for bit."""
+    control_file = DRB_DIR / "nhm_stream_temp.control"
+    control = {"budget": "error"}
+    with model_from_control(control_file, control=control) as model:
+        new_values = {}
+        for name, factor in DRB_PARAMETER_FACTORS.items():
+            ((_, array),) = [
+                item
+                for item in model._parameter_arrays.items()
+                if item[0][1] == name
+            ]
+            new_values[name] = factor * array
+        with pytest.raises(ValueError, match="owned by the Discretization"):
+            model.set_parameters({"tosegment": 1})
+
+        model.run(DT_DAY, N_STEPS_BEFORE_REPLAY)
+        stepped_built = snapshot_state(model)
+        model.set_parameters(new_values)
+        model.reset()
+        model.run(DT_DAY, N_STEPS_BEFORE_REPLAY)
+        stepped = snapshot_state(model)
+        # the new values moved the run: more arrays than the five set
+        n_moved = sum(
+            not np.array_equal(array, stepped_built[key], equal_nan=True)
+            for key, array in stepped.items()
+        )
+        assert n_moved > 3 * len(new_values)
+
+    kit = assemble_from_control(control_file, control=control)
+    n_written = 0
+    for entry in kit.process_dict.values():
+        parameters = entry.get("parameters")
+        for name, values in new_values.items():
+            if parameters is not None and name in parameters:
+                parameters[name].values[...] = values
+                n_written += 1
+    assert n_written >= len(new_values)
+    with kit.model() as fresh:
+        fresh.run(DT_DAY, N_STEPS_BEFORE_REPLAY)
+        assert_state_equal(
+            fresh, stepped, when="in the model whose parameters were set"
+        )
+
+
+@drb_skipif
+def test_drb_result_collector():
+    """Variables of both grids collected through a run, a reset and
+    the same run again."""
+    names = ["seg_outflow", "soil_moist", "gwres_flow"]
+    with model_from_control(
+        DRB_DIR / "nhm_stream_temp.control",
+        control={"budget": "error", "collect_var_names": names},
+    ) as model:
+        _step_and_check_rows(model, DT_DAY, N_STEPS_BEFORE_REPLAY)
+        first = {
+            name: array.copy()
+            for name, array in model.results.values.items()
+        }
+        for name in names:
+            assert np.isfinite(first[name][:N_STEPS_BEFORE_REPLAY]).all()
+            assert np.isnan(first[name][N_STEPS_BEFORE_REPLAY:]).all()
+        assert {array.shape[1] for array in first.values()} == {
+            model.discretizations[grid].dataset.sizes[grid]
+            for grid in ("nhru", "nsegment")
+        }
+
+        model.reset()
+        _step_and_check_rows(model, DT_DAY, N_STEPS_BEFORE_REPLAY)
+        for name, array in model.results.values.items():
+            np.testing.assert_array_equal(array, first[name], err_msg=name)
+
+        # an integer or bool variable has no nan to fill with
+        not_float = next(
+            name
+            for proc in model.model_dict.values()
+            for name in proc.get_var_names()
+            if not np.issubdtype(proc._refs[name].dtype, np.floating)
+        )
+        with pytest.raises(ValueError, match="only float variables"):
+            ResultCollector([not_float], model.model_dict, model.ntime)
 
 
 # ----------------------------------------------------------------------

@@ -5,6 +5,7 @@ IO primitives for pws_phoenix:
   - open_xr: open a NetCDF file as DataArray or Dataset
   - Input:   time-varying input wrapper with advance() / current_values
   - Output:  serial buffered, time-chunked zarr writer (adapted from pywatershed)
+  - ResultCollector: chosen variables kept in memory for the whole run
 
 These are process-agnostic and sit at the base of the import stack
 (model.py builds on them; process.py no longer imports data_io).
@@ -106,6 +107,76 @@ class Input:
             if self._input_file is not None:
                 self.data.close()
             self._closed = True
+
+
+class ResultCollector:
+    """Chosen variables kept in memory for the whole run, for a caller
+    that computes on them right after it (an objective function in a
+    calibration loop): ``values[name]`` is one (n_time, *variable
+    shape) array per name, allocated ONCE at the build and filled with
+    nan. Row ``tt`` is the variable after model time step ``tt``.
+
+    ``values[name]`` is the buffer itself, not a copy: the next run
+    overwrites it. Nothing blanks it between runs; ``n_collected`` is
+    the number of rows the current run has written (Model.reset()
+    sets it to 0), so rows at or past it hold nan or an earlier run.
+
+    Serial only, float variables only (an integer buffer has no nan),
+    full spatial extent, every time step. Peak memory = n_time x the
+    variable's size per name, by design: at 350,000 HRUs over 2 years
+    of daily steps that is 2 GB per variable.
+    """
+
+    def __init__(
+        self,
+        variable_names: List[str],
+        model_dict: Dict[str, Any],
+        n_time: int,
+    ) -> None:
+        """Args:
+            variable_names: the variables to keep (budget variables
+                allowed).
+            model_dict: Model.model_dict (key -> bound Process).
+            n_time: length of the model's time axis.
+
+        Raises:
+            ValueError: a name is no process's variable, or is not a
+                float variable.
+        """
+        self.values: Dict[str, np.ndarray] = {}
+        # the variables' own ndarrays (DEVELOPER.md "Per-step data
+        # access"): no Dataset lookup in collect()
+        self._refs: Dict[str, np.ndarray] = {}
+        self.n_collected = 0
+        for name in variable_names:
+            for proc in model_dict.values():
+                if name in proc.get_var_names(include_budget=True):
+                    ref = proc._refs[name]
+                    break
+            else:
+                raise ValueError(
+                    f"Variable '{name}' not found in any process"
+                )
+            if not np.issubdtype(ref.dtype, np.floating):
+                raise ValueError(
+                    f"Variable '{name}' has dtype {ref.dtype}: only "
+                    "float variables can be collected."
+                )
+            self._refs[name] = ref
+            self.values[name] = np.full(
+                (n_time,) + ref.shape, np.nan, dtype=ref.dtype
+            )
+
+    def collect(self, time_index: int) -> None:
+        """Copy each variable into its row `time_index`."""
+        for name, ref in self._refs.items():
+            self.values[name][time_index] = ref
+        self.n_collected = time_index + 1
+
+    def reset(self) -> None:
+        """A new run begins (Model.reset): no row of it is written
+        yet. The buffers are left as they are."""
+        self.n_collected = 0
 
 
 class Output:

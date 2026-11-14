@@ -20,12 +20,13 @@ separate process-agnostic orchestrator layer.
 
 import pathlib as pl
 import warnings
+from collections.abc import Mapping
 from typing import Any, Dict, List, Literal, Union
 
 import numpy as np
 import xarray as xr
 
-from pws_phoenix.data_io import Input, Output, open_xr
+from pws_phoenix.data_io import Input, Output, ResultCollector, open_xr
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.clock import Time
 from pws_phoenix import units as units_mod
@@ -58,8 +59,12 @@ class Model:
     either can warm-start from the other's.
 
     Reuse: ``model.reset()`` puts a built model back to its state
-    right after the build, so it can be run again without a rebuild
-    (cold starts without a zarr Output only; see reset()).
+    right after the build, so it can be run again without a rebuild;
+    ``model.set_parameters(values)`` before it gives the next run new
+    parameter values (cold starts without a zarr Output only; see
+    both methods). ``control["collect_var_names"]`` keeps the named
+    variables in memory for the whole run, as
+    ``model.results.values[name]`` (data_io.ResultCollector).
 
     Usage:
         with Model(process_dict, control) as model:
@@ -106,6 +111,12 @@ class Model:
         }
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._finalized = False
+        # set_parameters() -> True: the state in place belongs to the
+        # old parameters, and step() raises until reset()
+        self._needs_reset = False
+        # True while a set_parameters() has written values but not
+        # finished init_from_params() (one raised): reset() raises
+        self._parameters_incomplete = False
 
         if load_all is None:
             self._load_all = control.get("load_all", False)
@@ -176,6 +187,16 @@ class Model:
                 time_values=self.times.values,
             )
             self.output.initialize_variable_tracking(self.model_dict)
+
+        # Optional collector of results in memory (serial path): one
+        # (n_time, space) array per named variable, allocated here.
+        self.results = None
+        if "collect_var_names" in control:
+            self.results = ResultCollector(
+                list(control["collect_var_names"]),
+                self.model_dict,
+                self.ntime,
+            )
 
     def _load_paths_to_data(self) -> None:
         """Convert file paths in process_dict to xarray objects."""
@@ -454,6 +475,7 @@ class Model:
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
         self._variable_fills = self._collect_variable_fills()
+        self._collect_parameter_arrays()
 
         # the clock exists before the init hooks: init_state(time)
         # receives it at index 0
@@ -586,6 +608,25 @@ class Model:
                     (grid, name), (proc._refs[name], _FILL_VALUE[meta.dtype])
                 )
         return list(fills.values())
+
+    def _collect_parameter_arrays(self) -> None:
+        """(grid, name) -> array for every supplied parameter, and
+        (grid, name) -> (array, allocation fill) for every
+        parameter_internal. Built once after binding;
+        set_parameters() writes through them."""
+        self._parameter_arrays: Dict[tuple[str, str], np.ndarray] = {}
+        self._parameter_internal_fills: Dict[
+            tuple[str, str], tuple[np.ndarray, Any]
+        ] = {}
+        for kk, proc in self.model_dict.items():
+            grid = self._proc_grid[kk]
+            for name in proc.get_parameters():
+                self._parameter_arrays[(grid, name)] = proc._refs[name]
+            for name, meta in proc.get_parameters_internal().items():
+                self._parameter_internal_fills[(grid, name)] = (
+                    proc._refs[name],
+                    _FILL_VALUE[meta.dtype],
+                )
 
     def _apply_supplied_state(self) -> None:
         """Write the supplied initial state (restart variables given in
@@ -1001,6 +1042,12 @@ class Model:
         start and run() is a loop of these."""
         if self._finalized:
             raise RuntimeError("Cannot step a finalized Model.")
+        if self._needs_reset:
+            raise RuntimeError(
+                "Parameters were set: call reset() before step() or "
+                "run() (the state in place belongs to the old "
+                "parameters)."
+            )
         tt = self._next_index
         if tt >= self.ntime:
             raise ValueError(
@@ -1014,6 +1061,8 @@ class Model:
         self.calculate(dt=dt)
         if self.output is not None:
             self.output.collect_current_timestep(tt)
+        if self.results is not None:
+            self.results.collect(tt)
         self._next_index = tt + 1
 
     def run(self, dt: np.float64, n_steps: np.int32) -> None:
@@ -1032,7 +1081,9 @@ class Model:
         the build does after the freeze -- init_state(time) and
         initialize_budgets() per process with the clock at index 0,
         the supplied initial state, the initial-state check; last,
-        the step cursor returns to the start.
+        the step cursor returns to the start. A ResultCollector
+        (control["collect_var_names"]) keeps its buffers; only its
+        count of rows written returns to 0.
 
         No copy of the starting state is stored: the defaults are
         recomputed, and the supplied state is read again from the
@@ -1043,20 +1094,13 @@ class Model:
         restart state is not kept after the build -- supply the state
         in process_dict instead) and on a model with a zarr Output
         (a second run would overwrite the store)."""
-        if self._finalized:
-            raise RuntimeError("Cannot reset a finalized Model.")
-        if self._warm_start:
-            raise NotImplementedError(
-                "reset() of a model built with control['restart_read'] "
-                "is not implemented: the restart state is not kept "
-                "after the build. Supply the starting state in "
-                "process_dict instead."
-            )
-        if self.output is not None:
-            raise NotImplementedError(
-                "reset() of a model with a zarr Output "
-                "(control['output_serial_zarr']) is not implemented: a "
-                "second run would overwrite the store."
+        self._raise_if_not_reusable("reset()")
+        if self._parameters_incomplete:
+            raise RuntimeError(
+                "The last set_parameters() raised inside "
+                "init_from_params(): the parameter_internal values are "
+                "incomplete. Call set_parameters() with valid values "
+                "before reset()."
             )
         for array, fill in self._variable_fills:
             array[...] = fill
@@ -1070,6 +1114,165 @@ class Model:
         self._next_index = self._start_index
         self.current_time_index[0] = self._start_index
         self.current_time[0] = self.time.current
+        if self.results is not None:
+            self.results.reset()
+        self._needs_reset = False
+
+    def _raise_if_not_reusable(self, what: str) -> None:
+        """The models reset() and set_parameters() refuse."""
+        if self._finalized:
+            raise RuntimeError(
+                f"{what} cannot be called on a finalized Model."
+            )
+        if self._warm_start:
+            raise NotImplementedError(
+                f"{what} of a model built with control['restart_read'] "
+                "is not implemented: the restart state is not kept "
+                "after the build. Supply the starting state in "
+                "process_dict instead."
+            )
+        if self.output is not None:
+            raise NotImplementedError(
+                f"{what} of a model with a zarr Output "
+                "(control['output_serial_zarr']) is not implemented: a "
+                "second run would overwrite the store."
+            )
+
+    def set_parameters(
+        self, values: Mapping[str, Any], grid: str | None = None
+    ) -> None:
+        """Write new values into the model's parameter arrays and
+        recompute what the model derives from parameters, so that the
+        built model can be run with them: set_parameters() -> reset()
+        -> run() (the calibration reuse loop).
+
+        `values` maps a parameter name to its new values, in the
+        parameter's DECLARED units (there is no units check). The
+        values are broadcast to the parameter's shape (a scalar; or
+        one value per element into a (month, space) parameter); a
+        float into an integer parameter raises. `grid` is needed only
+        for a name that is a parameter on two grids. Every name and
+        value is checked before anything is written.
+
+        Then every parameter_internal is refilled with its allocation
+        fill and init_from_params() runs over all processes, as at the
+        build. The state in place belongs to the old parameters, so
+        step() raises until reset() is called. If an
+        init_from_params() raises (a parameter check), the new values
+        STAY written, and reset() and step() raise until a later
+        set_parameters() succeeds.
+
+        Know before use:
+
+        - The arrays written are the caller's own (the model never
+          copied them): the dataset the model was built from changes,
+          and so does any other model built from it in this session
+          -- without its init_from_params() being run.
+        - Only init_from_params() is run again. What was derived from
+          parameters OUTSIDE the model is not: Map weights (in a
+          translated PRMS model, from hru_segment and hru_area), the
+          solar tables (from hru_slope, hru_aspect, hru_lat), supplied
+          initial state translated from a parameter. Recompute those
+          yourself; where the result is a parameter (the solar
+          tables), pass it in the same call.
+        - A parameter owned by a Discretization (tosegment, ...)
+          raises: the grid's topological order was built from it.
+
+        Raises where reset() does (a warm start, a zarr Output)."""
+        self._raise_if_not_reusable("set_parameters()")
+        targets = []
+        for name, value in values.items():
+            array = self._settable_parameter_array(name, grid)
+            targets.append((array, self._assignable(name, value, array)))
+
+        self._needs_reset = True
+        self._parameters_incomplete = True
+        for array, new in targets:
+            array.flags.writeable = True
+            array[...] = new
+            array.flags.writeable = False
+        internal = self._parameter_internal_fills.values()
+        for array, fill in internal:
+            array.flags.writeable = True
+            array[...] = fill
+        try:
+            for proc in self.model_dict.values():
+                proc.init_from_params()
+        finally:
+            for array, _ in internal:
+                array.flags.writeable = False
+        self._parameters_incomplete = False
+
+    def _settable_parameter_array(
+        self, name: str, grid: str | None
+    ) -> np.ndarray:
+        """The model's array of parameter `name`; raises when the name
+        is not a supplied parameter, is one on two grids and `grid`
+        does not choose, is owned by a Discretization, or cannot be
+        made writeable."""
+        where = "" if grid is None else f" on grid '{grid}'"
+        grids = [
+            gg
+            for gg, nn in self._parameter_arrays
+            if nn == name and grid in (None, gg)
+        ]
+        if not grids:
+            if any(
+                nn == name and grid in (None, gg)
+                for gg, nn in self._parameter_internal_fills
+            ):
+                raise ValueError(
+                    f"'{name}' is computed by init_from_params() "
+                    "(parameter_internal): set the parameters it is "
+                    "computed from."
+                )
+            raise ValueError(
+                f"'{name}' is not a parameter of this model{where}."
+            )
+        if len(grids) > 1:
+            raise ValueError(
+                f"'{name}' is a parameter on grids {grids}: pass grid=."
+            )
+        dis_params = self.discretizations[grids[0]].parameters
+        if dis_params is not None and name in dis_params:
+            raise ValueError(
+                f"'{name}' is owned by the Discretization of grid "
+                f"'{grids[0]}' and cannot be set: grid structure (its "
+                "topological order) was built from the grid's "
+                "parameters."
+            )
+        array = self._parameter_arrays[(grids[0], name)]
+        try:
+            array.flags.writeable = True
+        except ValueError:
+            raise ValueError(
+                f"parameter '{name}' cannot be set: the array the model "
+                "was built with is a view of a read-only array."
+            ) from None
+        array.flags.writeable = False
+        return array
+
+    @staticmethod
+    def _assignable(name: str, value: Any, array: np.ndarray) -> np.ndarray:
+        """`value` as an array that can be written into `array`; raises
+        on a dtype of another kind (a float into an integer
+        parameter) or a shape that does not broadcast."""
+        # no copy of an ndarray or a DataArray; a list or a scalar
+        # becomes a temporary of the caller's making
+        new = np.asarray(value)
+        if not np.can_cast(new.dtype, array.dtype, casting="same_kind"):
+            raise TypeError(
+                f"parameter '{name}': dtype {new.dtype} cannot be written "
+                f"into its {array.dtype} array."
+            )
+        try:
+            np.broadcast_to(new, array.shape)
+        except ValueError:
+            raise ValueError(
+                f"parameter '{name}': shape {new.shape} does not fit "
+                f"its shape {array.shape}."
+            ) from None
+        return new
 
     # -- restart ---------------------------------------------------------
 
@@ -1352,6 +1555,12 @@ class ModelMPI(Model):
     def _build(self) -> None:
         f64 = np.float64
         control = self._control
+        if "collect_var_names" in control:
+            # the same control on every rank: all ranks raise
+            raise NotImplementedError(
+                "control['collect_var_names'] (the in-memory "
+                "ResultCollector) is not implemented under MPI."
+            )
         input_file = str(control["input_file"])
         output_parallel_netcdf = str(control["output_parallel_netcdf"])
         out_var_names = list(control["output_var_names"])
@@ -1760,6 +1969,15 @@ class ModelMPI(Model):
         raise NotImplementedError(
             "ModelMPI.reset() is not implemented: rewinding the "
             "mpixarray time stream is undecided."
+        )
+
+    def set_parameters(
+        self, values: Mapping[str, Any], grid: str | None = None
+    ) -> None:
+        """Not implemented under MPI (it needs reset())."""
+        raise NotImplementedError(
+            "ModelMPI.set_parameters() is not implemented: it needs "
+            "ModelMPI.reset()."
         )
 
     def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:
