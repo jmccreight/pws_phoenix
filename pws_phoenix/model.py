@@ -57,6 +57,10 @@ class Model:
     needed. Restart files are format-identical across serial and MPI:
     either can warm-start from the other's.
 
+    Reuse: ``model.reset()`` puts a built model back to its state
+    right after the build, so it can be run again without a rebuild
+    (cold starts without a zarr Output only; see reset()).
+
     Usage:
         with Model(process_dict, control) as model:
             model.run(dt, n_steps)
@@ -449,6 +453,7 @@ class Model:
         for kk in self._process_dict:
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
+        self._variable_fills = self._collect_variable_fills()
 
         # the clock exists before the init hooks: init_state(time)
         # receives it at index 0
@@ -556,10 +561,31 @@ class Model:
             grid_ds = self.discretizations[self._proc_grid[kk]].dataset
             for name in proc.get_parameters_internal():
                 grid_ds[name].values.flags.writeable = False
+        self._init_state_all()
+
+    def _init_state_all(self) -> None:
+        """init_state(time) and initialize_budgets() over all
+        processes in author order, with the clock at index 0: the
+        build's last hook, and what reset() runs again."""
         self.time.set_index(0)
         for proc in self.model_dict.values():
             proc.init_state(self.time)
             proc.initialize_budgets()
+
+    def _collect_variable_fills(self) -> List[tuple[np.ndarray, Any]]:
+        """(array, allocation fill) for every variable, budget
+        variables included; a name shared by two processes of a grid
+        is ONE array and one entry. Built once after binding; reset()
+        refills from it."""
+        fills: Dict[tuple[str, str], tuple[np.ndarray, Any]] = {}
+        for kk, proc in self.model_dict.items():
+            grid = self._proc_grid[kk]
+            variables = proc.get_variables(include_budget=True)
+            for name, meta in variables.items():
+                fills.setdefault(
+                    (grid, name), (proc._refs[name], _FILL_VALUE[meta.dtype])
+                )
+        return list(fills.values())
 
     def _apply_supplied_state(self) -> None:
         """Write the supplied initial state (restart variables given in
@@ -996,6 +1022,54 @@ class Model:
         otherwise)."""
         for _ in range(int(n_steps)):
             self.step(dt)
+
+    def reset(self) -> None:
+        """Put a built model back to its state right after the build,
+        so it can be run again without a rebuild (the calibration
+        reuse loop). In order: every variable is refilled with its
+        allocation fill; the inputs are rewound and their current
+        values set to nan; Map target buffers are zeroed; then what
+        the build does after the freeze -- init_state(time) and
+        initialize_budgets() per process with the clock at index 0,
+        the supplied initial state, the initial-state check; last,
+        the step cursor returns to the start.
+
+        No copy of the starting state is stored: the defaults are
+        recomputed, and the supplied state is read again from the
+        caller's arrays (which may therefore be edited between runs).
+        Parameters and parameter_internal values are not touched.
+
+        Raises on a warm-started model (control["restart_read"]: the
+        restart state is not kept after the build -- supply the state
+        in process_dict instead) and on a model with a zarr Output
+        (a second run would overwrite the store)."""
+        if self._finalized:
+            raise RuntimeError("Cannot reset a finalized Model.")
+        if self._warm_start:
+            raise NotImplementedError(
+                "reset() of a model built with control['restart_read'] "
+                "is not implemented: the restart state is not kept "
+                "after the build. Supply the starting state in "
+                "process_dict instead."
+            )
+        if self.output is not None:
+            raise NotImplementedError(
+                "reset() of a model with a zarr Output "
+                "(control['output_serial_zarr']) is not implemented: a "
+                "second run would overwrite the store."
+            )
+        for array, fill in self._variable_fills:
+            array[...] = fill
+        for inp in self.inputs_dict.values():
+            inp.reset()
+        for mm in self.maps.values():
+            mm.target_values.values[...] = 0.0
+        self._init_state_all()
+        self._apply_supplied_state()
+        self._check_initial_state()
+        self._next_index = self._start_index
+        self.current_time_index[0] = self._start_index
+        self.current_time[0] = self.time.current
 
     # -- restart ---------------------------------------------------------
 
@@ -1678,6 +1752,14 @@ class ModelMPI(Model):
         raise NotImplementedError(
             "ModelMPI has no step(): the streaming time loop belongs to "
             "mpixarray; use run()."
+        )
+
+    def reset(self) -> None:
+        """Not implemented under MPI: the mpixarray stream owns the
+        time loop, and rewinding it is undecided."""
+        raise NotImplementedError(
+            "ModelMPI.reset() is not implemented: rewinding the "
+            "mpixarray time stream is undecided."
         )
 
     def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:

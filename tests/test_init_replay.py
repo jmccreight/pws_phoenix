@@ -3,21 +3,23 @@
 The three hooks (Process docstrings) exist so that a built model can
 be run again without being rebuilt:
 
-- STATE REPLAY (what a later ``Model.reset()`` will do): after any
-  number of steps, ``init_state(time)`` + ``initialize_budgets()`` +
-  the supplied initial state must put every variable, and every array
-  of ``get_restart_state()``, back to its value right after the
-  build -- bit for bit. Before the replay every variable is
-  overwritten with its allocation fill and the private state is
-  poisoned, so a default that only the build put in place is missed.
+- STATE REPLAY (``Model.reset()``): after any number of steps,
+  ``init_state(time)`` + ``initialize_budgets()`` + the supplied
+  initial state must put every array of every grid dataset, and
+  every array of ``get_restart_state()``, back to its value right
+  after the build -- bit for bit. reset() first overwrites every
+  variable with its allocation fill, and the test poisons the private
+  state before it, so a default that only the build put in place is
+  missed. The same steps run again after the reset must then
+  reproduce the first run bit for bit.
 - PARAMETER REPLAY (what a later ``Model.set_parameters()`` will do):
   ``init_from_params()`` run a second time must reproduce every
   ``parameter_internal`` bit for bit, replace no private array (only
   ``allocate()`` may allocate) and change nothing else (it writes no
   variable).
 
-Both replays are helpers here, not Model methods: ``reset()`` and
-``set_parameters()`` arrive with the calibration reuse loop.
+The parameter replay is a helper here, not a Model method:
+``set_parameters()`` arrives with the calibration reuse loop.
 
 This module: the toy model (no external data) plus a toy that uses
 each hook for its purpose, and three toys that break one rule each --
@@ -32,7 +34,7 @@ storage has no default and comes only from supplied state.
 import numpy as np
 import pytest
 import xarray as xr
-from conftest import PWS_TEST_DATA
+from conftest import PWS_TEST_DATA, cold_start_state
 from pws_phoenix.clock import Time
 from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import StarfitFlowNode
@@ -78,16 +80,16 @@ PARAM_NAMES = [
 # ----------------------------------------------------------------------
 
 
-def _variables(model: Model) -> dict[tuple[str, str], np.ndarray]:
-    """Every variable of the model, budget variables included, keyed
-    (grid, name): a name shared by two processes of a grid is ONE
-    array."""
-    out = {}
-    for key, proc in model.model_dict.items():
-        grid = model._proc_grid[key]
-        for name in proc.get_variables(include_budget=True):
-            out[(grid, name)] = proc._refs[name]
-    return out
+def _dataset_arrays(model: Model) -> dict[tuple[str, str], np.ndarray]:
+    """Every array of every grid dataset, keyed (grid, name):
+    parameters, parameter_internal, the inputs' current values, Map
+    target buffers and variables (budget variables included). A name
+    shared by two processes of a grid is ONE array."""
+    return {
+        (grid, str(name)): disc.dataset[name].values
+        for grid, disc in model.discretizations.items()
+        for name in disc.dataset.data_vars
+    }
 
 
 def _variable_fills(model: Model) -> dict[tuple[str, str], object]:
@@ -110,7 +112,7 @@ def _private_state(model: Model) -> dict[tuple[str, str], np.ndarray]:
 
 
 def _state(model: Model) -> dict[tuple[str, str], np.ndarray]:
-    return _variables(model) | _private_state(model)
+    return _dataset_arrays(model) | _private_state(model)
 
 
 def snapshot_state(model: Model) -> dict[tuple[str, str], np.ndarray]:
@@ -127,25 +129,21 @@ def _poison(array: np.ndarray) -> None:
 
 
 def replay_state(model: Model) -> None:
-    """Fill every variable with its allocation fill and poison the
-    private state, then do what the build does after the freeze:
-    init_state(time) and initialize_budgets() per process with the
-    clock at index 0, then the supplied initial state."""
-    fills = _variable_fills(model)
-    for key, array in _variables(model).items():
-        array[...] = fills[key]
+    """Poison the private state, then Model.reset(), which refills
+    every variable with its allocation fill before it runs
+    init_state(time)."""
     for array in _private_state(model).values():
         _poison(array)
-
-    model.time.set_index(0)
-    for proc in model.model_dict.values():
-        proc.init_state(model.time)
-        proc.initialize_budgets()
-    model._apply_supplied_state()
+    model.reset()
+    assert model._next_index == 0
+    assert model.current_time_index[0] == 0
+    assert model.current_time[0] == model.times.values[0]
 
 
 def assert_state_equal(
-    model: Model, snapshot: dict[tuple[str, str], np.ndarray]
+    model: Model,
+    snapshot: dict[tuple[str, str], np.ndarray],
+    when: str = "after the build",
 ) -> None:
     state = _state(model)
     assert state.keys() == snapshot.keys()
@@ -153,8 +151,20 @@ def assert_state_equal(
         np.testing.assert_array_equal(
             state[key],
             expected,
-            err_msg=f"{key} differs from its value after the build",
+            err_msg=f"{key} differs from its value {when}",
         )
+
+
+def assert_rerun_equal(
+    model: Model,
+    dt: np.float64,
+    stepped: dict[tuple[str, str], np.ndarray],
+) -> None:
+    """On a model just reset: the same steps run again reproduce the
+    first run (`stepped`, its snapshot) bit for bit."""
+    model.run(dt, N_STEPS_BEFORE_REPLAY)
+    assert model._next_index == N_STEPS_BEFORE_REPLAY
+    assert_state_equal(model, stepped, when="after the first run")
 
 
 def _parameters_internal(model: Model) -> dict[tuple[str, str], np.ndarray]:
@@ -380,9 +390,11 @@ def toy_ds(dimensions, make_toy_input):
     return make_toy_input(dimensions)
 
 
-def _make_model(toy_ds, toy_class):
-    """Upper -> Lower with SUPPLIED starting state, and a bucket that
-    starts from its own default, on one grid; budgets judged."""
+def _make_model(toy_ds, toy_class, control=None):
+    """Upper -> Lower with SUPPLIED starting state (none when
+    `control` restarts), and a bucket that starts from its own
+    default, on one grid; budgets judged."""
+    control = {"budget": "error"} | (control or {})
     n_space = toy_ds.sizes["space"]
     bucket_parameters = xr.Dataset(
         {"capacity": ("space", np.linspace(2.0, 12.0, n_space))},
@@ -392,13 +404,13 @@ def _make_model(toy_ds, toy_class):
         "upper": {
             "class": Upper,
             "forcing_up": toy_ds["forcing_up"],
-            "flow": toy_ds["flow_initial"],
+            **cold_start_state(control, flow=toy_ds["flow_initial"]),
             "parameters": toy_ds[PARAM_NAMES],
         },
         "lower": {
             "class": Lower,
             "forcing_low": toy_ds["forcing_low"],
-            "storage": toy_ds["storage_initial"],
+            **cold_start_state(control, storage=toy_ds["storage_initial"]),
             "parameters": toy_ds[PARAM_NAMES],
         },
         "bucket": {
@@ -407,13 +419,14 @@ def _make_model(toy_ds, toy_class):
             "parameters": bucket_parameters,
         },
     }
-    return Model(process_dict, {"budget": "error"})
+    return Model(process_dict, control)
 
 
 def test_state_replay(toy_ds):
     with _make_model(toy_ds, ReplayToy) as model:
         snapshot = snapshot_state(model)
         model.run(DT, N_STEPS_BEFORE_REPLAY)
+        stepped = snapshot_state(model)
 
         # the steps moved the state the replay must put back
         bucket = model.model_dict["bucket"]
@@ -434,6 +447,37 @@ def test_state_replay(toy_ds):
         np.testing.assert_array_equal(
             bucket._refs["bucket_storage"], 0.5 * bucket._refs["capacity"]
         )
+        # an input's current values are nan again, as at the build
+        assert np.isnan(bucket._refs["inflow"]).all()
+
+        assert_rerun_equal(model, DT, stepped)
+
+
+def test_reset_raises(toy_ds, tmp_path):
+    """reset() refuses a model with a zarr Output, a warm-started
+    model and a finalized model."""
+    control = {
+        "output_var_names": ["flow"],
+        "output_serial_zarr": tmp_path / "out.zarr",
+        "time_chunk_size": 2,
+    }
+    with _make_model(toy_ds, ReplayToy, control) as model:
+        model.run(DT, N_STEPS_BEFORE_REPLAY)
+        with pytest.raises(NotImplementedError, match="zarr Output"):
+            model.reset()
+
+    restart_dir = tmp_path / "restarts"
+    with _make_model(toy_ds, ReplayToy) as model:
+        model.run(DT, N_STEPS_BEFORE_REPLAY)
+        model.write_restart(restart_dir)
+    with _make_model(
+        toy_ds, ReplayToy, {"restart_read": restart_dir}
+    ) as model:
+        with pytest.raises(NotImplementedError, match="restart_read"):
+            model.reset()
+
+    with pytest.raises(RuntimeError, match="finalized"):
+        model.reset()
 
 
 def test_parameter_replay(toy_ds):
@@ -510,6 +554,7 @@ def test_drb_stream_temp_kit_replays():
         assert n_default > 100
         assert len(_private_state(model)) == 4
         model.run(DT_DAY, N_STEPS_BEFORE_REPLAY)
+        stepped = snapshot_state(model)
 
         # the steps moved state of each kind the replay must put back
         stream_temp = model.model_dict["prms_stream_temp"]
@@ -522,13 +567,14 @@ def test_drb_stream_temp_kit_replays():
         assert n_moved > 100
 
         # parameters first, on the stepped model: a variable written
-        # by init_from_params() would show as a changed array. No
-        # steps follow the state replay: it rewinds neither the
-        # inputs nor the Model's step counter (reset() will).
+        # by init_from_params() would show as a changed array
         assert _parameters_internal(model)
         replay_parameters(model)
         replay_state(model)
         assert_state_equal(model, snapshot)
+        # both grids, with the Maps between them, run again
+        assert model.maps
+        assert_rerun_equal(model, DT_DAY, stepped)
 
 
 # ----------------------------------------------------------------------
@@ -561,6 +607,7 @@ def test_ucb_starfit_graph_replays(starfit_class):
         assert wh_reservoir.sum() == 1
 
         model.run(DT_DAY, N_STEPS_BEFORE_REPLAY)
+        stepped = snapshot_state(model)
         # the steps moved the reservoir's storage: the hourly node
         # marches lake_storage_sub, the daily node lake_storage
         refs = model.model_dict["flow_graph"]._refs
@@ -576,3 +623,6 @@ def test_ucb_starfit_graph_replays(starfit_class):
         replay_parameters(model)
         replay_state(model)
         assert_state_equal(model, snapshot)
+        # StarfitDailyFlowNode's first-substep seed is gated on step
+        # 0: the rerun needs the step cursor back at the start
+        assert_rerun_equal(model, DT_DAY, stepped)

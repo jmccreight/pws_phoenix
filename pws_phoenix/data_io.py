@@ -88,6 +88,13 @@ class Input:
         before any calculate reads it."""
         self._current_index = np.int64(index) - np.int64(1)
 
+    def reset(self) -> None:
+        """Back to construction (Model.reset): the NEXT advance()
+        serves index 0, and current_values is nan again, so a read
+        before that advance does not see the last run's final step."""
+        self._current_index = np.int64(-1)
+        self._current[:] = np.nan
+
     @property
     def current_values(self) -> xr.DataArray:
         """Values at the current time step."""
