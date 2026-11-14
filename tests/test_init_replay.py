@@ -23,7 +23,10 @@ This module: the toy model (no external data) plus a toy that uses
 each hook for its purpose, and three toys that break one rule each --
 the replays must catch all three; then the complete NHM with stream
 temperature, built from the drb PRMS control (every ported NHM
-process, two grids, supplied starting state from the translation).
+process, two grids, supplied starting state from the translation);
+then the ucb model with a FlowGraph spliced in (muskingum channel,
+pass-through and STARFIT node types), where the reservoir's starting
+storage has no default and comes only from supplied state.
 """
 
 import numpy as np
@@ -31,10 +34,21 @@ import pytest
 import xarray as xr
 from conftest import PWS_TEST_DATA
 from pws_phoenix.clock import Time
+from pws_phoenix.hydrology.starfit_daily_flow_node import StarfitDailyFlowNode
+from pws_phoenix.hydrology.starfit_flow_node import StarfitFlowNode
 from pws_phoenix.model import Model
 from pws_phoenix.process import _FILL_VALUE, DataArrayMeta, Process
 from pws_phoenix.processes_concrete import Lower, Upper
 from pws_phoenix.prms_translate import model_from_control
+from pws_phoenix.prms_translate.assemble import (
+    assemble_from_control,
+    insert_flow_graph,
+)
+from test_prms_translate_flow_graph import (
+    UCB_CONTROL,
+    big_sandy_nodes,
+    ucb_skipif,
+)
 
 DT = np.float64(1.0)
 DT_DAY = np.float64(86400.0)
@@ -507,9 +521,58 @@ def test_drb_stream_temp_kit_replays():
         )
         assert n_moved > 100
 
+        # parameters first, on the stepped model: a variable written
+        # by init_from_params() would show as a changed array. No
+        # steps follow the state replay: it rewinds neither the
+        # inputs nor the Model's step counter (reset() will).
+        assert _parameters_internal(model)
+        replay_parameters(model)
         replay_state(model)
         assert_state_equal(model, snapshot)
 
+
+# ----------------------------------------------------------------------
+# a FlowGraph with a STARFIT reservoir, spliced into the ucb model
+# ----------------------------------------------------------------------
+
+
+@ucb_skipif
+@pytest.mark.parametrize(
+    "starfit_class",
+    [StarfitFlowNode, StarfitDailyFlowNode],
+    ids=["starfit", "starfit_daily"],
+)
+def test_ucb_starfit_graph_replays(starfit_class):
+    """Both replays through a composed FlowGraph, whose hooks forward
+    to three node types. The reservoir storage lake_storage_sub is
+    required initial state: init_state leaves it at the allocation
+    nan and only the supplied state fills the reservoir's row."""
+    nodes, _ = big_sandy_nodes(starfit_class)
+    kit = insert_flow_graph(
+        assemble_from_control(UCB_CONTROL, control={"budget": "error"}),
+        nodes,
+    )
+    with kit.model() as model:
+        key = ("nnodes", "lake_storage_sub")
+        assert key in model._supplied_state
+        snapshot = snapshot_state(model)
+        # one reservoir row; every other node's row is nan
+        wh_reservoir = np.isfinite(snapshot[key])
+        assert wh_reservoir.sum() == 1
+
         model.run(DT_DAY, N_STEPS_BEFORE_REPLAY)
-        assert _parameters_internal(model)
+        # the steps moved the reservoir's storage: the hourly node
+        # marches lake_storage_sub, the daily node lake_storage
+        refs = model.model_dict["flow_graph"]._refs
+        assert any(
+            not np.array_equal(
+                refs[name][wh_reservoir],
+                snapshot[("nnodes", name)][wh_reservoir],
+                equal_nan=True,
+            )
+            for name in ("lake_storage_sub", "lake_storage")
+        )
+
         replay_parameters(model)
+        replay_state(model)
+        assert_state_equal(model, snapshot)

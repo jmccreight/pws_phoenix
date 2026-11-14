@@ -63,22 +63,25 @@ drb_skipif = pytest.mark.skipif(
 )
 
 
-def big_sandy_nodes() -> tuple[list[NewNode], NewNode]:
+def big_sandy_nodes(
+    starfit_class: type = StarfitFlowNode,
+) -> tuple[list[NewNode], NewNode]:
     """The Big Sandy chain (PT2 -> STARFIT -> PT3 above 44426, plus a
     lone PT1 above 44409) as NewNodes; returns (collated list, the
-    reservoir node)."""
+    reservoir node). `starfit_class` is the reservoir's node type
+    (tests/test_init_replay.py also passes StarfitDailyFlowNode)."""
     with xr.load_dataset(GRAND_PARAM_FILE) as ds:
         row = ds.where(ds.grand_id == BIG_SANDY_GRAND_ID, drop=True).isel(
             nreservoirs=0
         )
     params = {
         name: float(row[name])
-        for name, meta in StarfitFlowNode.fields.items()
+        for name, meta in starfit_class.fields.items()
         if meta.kind == "parameter"
     }
     pt3 = NewNode(PassThroughFlowNode, NHM_SEG_RESERVOIR_ABOVE, 9003)
     starfit = NewNode(
-        StarfitFlowNode,
+        starfit_class,
         pt3,
         RESERVOIR_ID,
         params,
