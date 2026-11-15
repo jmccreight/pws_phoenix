@@ -48,6 +48,8 @@ Terms:
 | Memory: reference, do not copy; kernels write in place | built | Jul 2026 | Framework |
 | The input contract: `Model.input_spec` and three classes of parameter | built | Aug 2026 | Framework |
 | Initial state: the restart variables, supplied under their own names | built | Nov 2026 | Framework |
+| Three init hooks: `allocate`, `init_from_params`, `init_state` | built | Nov 2026 | Framework |
+| Reuse of a built model: `reset()`, `set_parameters()`, `ResultCollector` | built, serial only | Nov 2026 | Framework |
 | Restart: flagged prognostic state, one file format for serial and MPI | built | Aug 2026 | Framework |
 | Benchmarks: ASV in the existing environment | built; not in CI | Oct 2026 | Performance |
 | Per-step data access: hold the ndarray, not the Dataset lookup | built | Oct 2026 | Performance |
@@ -301,8 +303,9 @@ Terms:
   should also be one path, not three.
 - **Decision:**
   - Starting state is the `restart=True` variables. One order in
-    serial and MPI: allocate, the init hook sets each one's default,
-    then supplied state or `control["restart_read"]` overrides it.
+    serial and MPI: allocate, `init_state(time)` sets each one's
+    default, then supplied state or `control["restart_read"]`
+    overrides it.
   - A process never reads state from a parameter. PRMS's
     `gwstor_init` and `segment_flow_init` are translated only in
     `prms_translate.prms_initial_state`.
@@ -318,8 +321,8 @@ Terms:
     `lake_storage_sub`); `check_initial_state()` reports bad starting
     state and the Model raises on every rank.
   - `state_groups` name restart variables that must be supplied
-    together, because the init hook computes some members from the
-    others' defaults.
+    together, because `init_state(time)` computes some members from
+    the others' defaults.
   - The `*_init_frac` parameters stay process parameters (Nov 12,
     2026): they are fractions of maxima that calibration changes, so
     an absolute supplied state would stop following a calibrated
@@ -344,10 +347,10 @@ Terms:
   `pws_phoenix/prms_translate/assemble.py` (`prms_initial_state`);
   `tests/test_restart*.py`, `tests/test_input_spec.py`.
 - **Left unfinished** (moved from memory Nov 12, 2026):
-  - First-step blocks that overwrite supplied state on a cold start:
-    the init-hook split on branch feat_spotpy closes all but
-    StarfitDailyFlowNode's first substep, which needs the first
-    substep's inflow.
+  - One first-step block still overwrites supplied state on a cold
+    start: StarfitDailyFlowNode's first substep, which needs the
+    first substep's inflow. The others were closed by the init hook
+    split ("Three init hooks").
   - Setting part of a state group (for example soil moisture alone,
     for data assimilation) needs derived state recomputed from
     whatever state is in place. `dprst_area_clos` is frozen at its
@@ -360,6 +363,285 @@ Terms:
     initial state should be separate files.
   - STARFIT's requirement is by class composition; the alternative
     is a check on reservoir rows only.
+
+### Three init hooks: `allocate`, `init_from_params`, `init_state`
+
+- **Status:** decided and built Nov 12-13, 2026 on branch
+  feat_spotpy, for every process and FlowGraph node type.
+  `Model.reset()` and `Model.set_parameters()`, which the split
+  prepares, are the next entry.
+- **Why:** calibration runs one built model hundreds of times with
+  changed parameters, and rebuilding the model for each run is the
+  larger cost. The single hook `initialize()` allocated private
+  arrays, derived parameters and set the starting state in one body,
+  so no part of it could be run again alone: a second call
+  reallocated, and a start that is a rule relative to a parameter
+  (`soil_moist_init_frac * soil_moist_max`) could not follow a
+  changed maximum. Separately, first-step blocks inside `calculate()`
+  overwrote supplied state on a cold start.
+- **Decision:**
+  - `allocate()` runs once per model: private arrays and tuples of
+    array references. It is the only hook that may allocate.
+  - `init_from_params()` computes everything that is a function of
+    the parameters: the `parameter_internal` fields, private derived
+    values, and the parameter checks that raise. It writes no
+    variable and may be run again.
+  - `init_state(time)` writes the cold-start default of every
+    variable and of private state, with the clock at index 0. It runs
+    after `parameter_internal` is frozen, so a write to one raises.
+    It may be run again.
+  - The Model's order: bind, `allocate`, `init_from_params`, freeze,
+    `init_state` and the budget accumulators, supplied state or a
+    restart, `check_initial_state`. Each hook runs over all processes
+    before the next. All three are local to a rank.
+  - The `*_init_frac` parameters stay parameters. Their rule sits in
+    `init_state`, so a later reset recomputes the start from the
+    maximum then in place.
+  - What `init_state` needs from the parameters it recomputes
+    (soilzone's `soil_rechr` seed, taken before the clamps) or
+    receives as a private array filled by `init_from_params` (stream
+    temperature's `_never_has_flow` mask).
+  - `init_state` reads no input: under MPI the inputs exist only
+    inside the time loop. A first-step block that reads an input
+    cannot move there. PRMSAtmosphere's transpiration block reads
+    none and moved; the Ag area blocks were removed by another route
+    ("Ag variants").
+  - A composed FlowGraph forwards to its node types: the required
+    `init_from_params_type` and the optional `allocate_type` and
+    `init_state_type`.
+- **For users:**
+  - Writing a process: put each line in the hook whose contract
+    covers it. A state default left in `init_from_params`, private
+    state with no default in `init_state`, or an array created
+    outside `allocate` are each caught by the two replays in
+    `tests/test_init_replay.py`.
+- **Where:** the hook docstrings in `pws_phoenix/process.py`;
+  `Model._run_initialize_hooks` in `pws_phoenix/model.py`;
+  `pws_phoenix/flow_graph.py`; `CLAUDE.md` "Parameters: owned by a
+  grid, or computed at init"; `tests/test_discretization.py`
+  (`TestInitHooks`), `tests/test_init_replay.py`.
+- **Left unfinished:**
+  - StarfitDailyFlowNode's first substep still overwrites supplied
+    state on a cold start.
+  - JLM's third phase, `init_diagnostic_state` (derived state
+    recomputed from whatever state is in place), is deferred.
+  - The toy processes of `tests/test_restart.py` still set state
+    defaults in `init_from_params`.
+
+### Reuse of a built model: `reset()`, `set_parameters()`, `ResultCollector`
+
+- **Status:** decided and built Nov 14, 2026 on branch feat_spotpy,
+  for the serial `Model`. `ModelMPI` raises for all three.
+- **Why:** calibration runs one model hundreds of times with changed
+  parameters; the target is calibration by HRU, up to 350,000 HRUs.
+  Measured on drb (Nov 2, 2026, warm): a run is 0.26 s of compute
+  against 1.07 s of build, 0.64 s of kernel cache load and 0.65 s of
+  imports. Per run that is 2.6 s in a fresh Python process, 1.3 s
+  with a rebuild in one session, and 0.26 s when the built model is
+  run again: 5 times faster than a rebuild per run. The three init
+  hooks made each part of the build repeatable; these three pieces
+  are the Model's use of them.
+- **Decision:**
+  - `reset()` -- what it does:
+    - It puts the model back to its state right after the build and
+      stores no copy of that state. A stored copy would double the
+      state in memory, and a start that is a rule relative to a
+      parameter has to be recomputed after `set_parameters()`
+      anyway.
+    - Its order: refill every variable (budget variables included)
+      with its allocation fill; rewind the inputs; zero the Map
+      target buffers; `init_state` and the budget accumulators over
+      all processes with the clock at index 0; the supplied state;
+      `check_initial_state`; the step cursor back to the start.
+    - The allocation fill comes first because some state relies on
+      it (a STARFIT row with no reservoir stays nan), and because a
+      default that only the build put in place then shows as a fill.
+    - The supplied state is read again from the caller's arrays, so
+      it can be edited between runs.
+    - The inputs' current values return to nan and Map target
+      buffers to 0.0, their values at construction. A correct model
+      rewrites both before it reads them. The refill makes every
+      array of a reset model equal a fresh build's, so the test
+      compares all of them with no exclusions, and a process that
+      wrongly reads an input before the first `advance()` gets nan,
+      not the last run's final step.
+    - Parameters and `parameter_internal` values are not touched.
+  - `reset()` -- what it refuses:
+    - A warm-started model (`control["restart_read"]`) raises: the
+      restart state is not kept after the build. A reused model that
+      needs a warmer start takes supplied state. The alternatives,
+      reading the restart files on every reset or keeping them in
+      memory, were left until a use appears.
+    - A model with a zarr `Output` raises: a second run would
+      overwrite the store, and every calibration run would pay for
+      writes that nobody reads. It also catches a calibration script
+      that left the zarr keys in its control.
+    - A finalized model raises.
+  - `set_parameters(values, grid=None)` -- what it does:
+    - It writes into the model's existing parameter arrays. None is
+      replaced, because every process and every kernel argument
+      tuple holds references to them.
+    - It then refills every `parameter_internal` with its allocation
+      fill and runs `init_from_params` over all processes, as the
+      build does, between an unfreeze and a refreeze. The fill makes
+      the rerun equal a fresh build even where a hook writes a
+      derived value only for some elements.
+    - `set_parameters({})` runs the hooks again with the values in
+      place; the parameter replay test is that call.
+    - Values are in the declared units; there is no units check.
+      They are broadcast to the parameter's shape (a scalar, or one
+      value per element into a `(month, space)` parameter).
+  - `set_parameters()` -- the guard:
+    - It raises unless the model was built with
+      `control["calibration_mode"] = True`, before any other check
+      (`set_parameters({})` included). Outside calibration nothing
+      should run `init_from_params` a second time or write the
+      caller's parameter arrays.
+    - A control key was chosen over an environment variable
+      (`PWS_CALIB_MODE` was the first idea): the control is the same
+      on every MPI rank, so all ranks raise together, where an
+      environment variable can differ between ranks; it is known at
+      the build; it marks the one model meant for calibration, not
+      every model in the session; and options are build-time
+      configuration in `control`, as `collect_var_names` is.
+    - `reset()` is not guarded: it does not run `init_from_params`,
+      and running a built model twice with the same parameters is
+      not specific to calibration.
+  - `set_parameters()` -- what it checks, all before anything is
+    written:
+    - The name is a supplied parameter. A `parameter_internal` name
+      raises (set what it is computed from). A name that is a
+      parameter on two grids needs `grid=`.
+    - A parameter owned by a `Discretization` raises: the grid's
+      topological order was built from it.
+    - The dtype is of the same kind: a float into an integer
+      parameter raises, where numpy would truncate silently.
+    - The shape broadcasts, and the array can be made writeable (a
+      view of a read-only array raises).
+    - The model is one `reset()` accepts. Otherwise the model would
+      be left needing a reset it can never get.
+  - `set_parameters()` -- what follows it:
+    - The state in place belongs to the old parameters, so `step()`
+      raises until `reset()` is called. `set_parameters()` does not
+      reset by itself: the reset stays visible in the caller's code,
+      and two calls do not reset twice.
+    - When a parameter check inside `init_from_params` raises, the
+      new values stay written, the `parameter_internal` arrays are
+      frozen again, and `reset()` and `step()` raise until a later
+      `set_parameters()` succeeds. Falling back to the old values
+      would need a copy of every parameter being set and would hide
+      the failure (JLM: a raise is better). A calibration driver
+      scores the sample as failed and sets the next one.
+  - `ResultCollector`:
+    - `control["collect_var_names"]` keeps the named variables in
+      memory for the whole run, as `model.results`: one
+      `(n_time, space)` array per name, allocated once at the build
+      and filled with nan. Row `tt` is the variable after step `tt`.
+    - It is a separate key and a separate class from the zarr
+      `Output` because it is not output: nothing is written, and the
+      caller computes on the arrays right after the run. "Memory"
+      was kept out of the names, since it also means prognostic
+      state here. One run may have both a zarr `Output` and a
+      collector, with different variables.
+    - A control key was chosen over an object attached after the
+      build: it reads like `output_var_names` and passes through
+      `model_from_control(..., control={...})`.
+    - The collector holds each variable's ndarray ("Per-step data
+      access"), so a step costs one row copy per name.
+    - The row is the model's time index, so there is no cursor to
+      rewind. `reset()` blanks nothing: blanking would write the
+      whole buffer on every calibration run. `n_collected` counts
+      the rows the current run has written and `reset()` sets it to
+      0; a run shorter than an earlier one leaves the earlier rows
+      past it.
+    - First cut: every time step, the full spatial extent, float
+      variables only (an integer buffer has no nan to mark an
+      unwritten row). The size is `n_time` times the variable's
+      size per name: 2 GB per variable at 350,000 HRUs over 2 years
+      of daily steps.
+- **For users:**
+  - The loop:
+
+    ```python
+    control = {
+        "calibration_mode": True,   # allows set_parameters()
+        "collect_var_names": ["seg_outflow"],
+    }
+    model = model_from_control(control_file, control=control)  # once
+    for values in samples:          # {parameter name: array}
+        model.set_parameters(values)
+        model.reset()
+        model.run(dt, n_steps)
+        score(model.results.values["seg_outflow"])
+    ```
+
+  - `model.results.values[name]` is the buffer itself, not a copy:
+    the next run overwrites it.
+  - `set_parameters()` writes the arrays the model was built from,
+    and those are the caller's ("Memory: reference, do not copy").
+    The caller's dataset changes, and so does any other model built
+    from it in the same session, without its `init_from_params`
+    being run.
+  - Only `init_from_params` is run again. What was derived from
+    parameters OUTSIDE the model is not: Map weights (in a translated
+    PRMS model, from `hru_segment` and `hru_area`), the solar tables
+    (from `hru_slope`, `hru_aspect`, `hru_lat`), supplied initial
+    state translated from a parameter. The Model does not detect a
+    change to one of these sources.
+  - The solar radiation parameters (`dday_slope`, `dday_intcp`,
+    `radmax`, `radadj_intcp`, `radadj_slope`, `ppt_rad_adj`,
+    `tmax_index`) are ordinary parameters and can be set. The solar
+    tables are parameters too: to change the topography behind them,
+    recompute them with `compute_soltabs` and pass them in the same
+    call.
+  - A reused model starts from the `init_state` defaults plus
+    supplied state. Some defaults follow the parameters and move with
+    `set_parameters()`: the soil zone's `*_init_frac` times the
+    maxima, runoff's `dprst_frac_init`, and the transpiration flag
+    from `transp_beg` / `transp_end` and the start date. The others
+    are fixed (groundwater's 2.0 inches; zeros for snow, canopy,
+    impervious storage and the channel; stream temperature's -99.9)
+    and take supplied state for any other start. STARFIT's
+    `lake_storage_sub` has no default.
+- **Where:** the docstrings of `Model.reset` and
+  `Model.set_parameters` in `pws_phoenix/model.py`; `Input.reset`
+  and `ResultCollector` in `pws_phoenix/data_io.py`. Tests, all bit
+  for bit, in `tests/test_init_replay.py`:
+  - run / reset / run: `test_state_replay` (toy),
+    `test_drb_stream_temp_kit_replays`,
+    `test_ucb_starfit_graph_replays`;
+  - set / reset / run against a fresh build holding the new values:
+    `test_set_parameters` (toy), `test_drb_set_parameters` (five
+    parameters, one of each kind of consequence);
+  - the refusals and the failed parameter check: `test_reset_raises`,
+    `test_set_parameters_raises`;
+  - the guard: `test_set_parameters_needs_calibration_mode`;
+  - the collector against the live variables, the zarr `Output` and
+    a repeated run: `test_result_collector` (toy),
+    `test_drb_result_collector`.
+- **Left unfinished:**
+  - MPI: the mpixarray stream owns the time loop, and rewinding it
+    (a new `as_iterable`) is undecided. `set_parameters()` and the
+    collector under MPI are not designed either. No test covers the
+    three `ModelMPI` raises.
+  - Collector subsets, if the objective functions need them: a
+    spin-up window, a spatial subset, float32, or an objective
+    accumulated step by step with no full buffer.
+  - `reset()` of a warm-started model (read the restart files again,
+    or keep them in memory) and of a model with a zarr `Output`
+    (rewind the writer).
+  - No test sets a name that is a parameter on two grids. The ucb
+    FlowGraph model is covered by the replay (`set_parameters({})`)
+    and run / reset / run, not by new values against a fresh build.
+  - A check that refuses, or recomputes, what is derived outside the
+    model. The `derivation=` strings on the declarations already name
+    the sources of the solar tables.
+  - One user-facing description of where each process's cold-start
+    state comes from.
+  - The evaluator that drives this loop for calibration by HRU, and
+    where it lives (pws_phoenix or the calibration repository).
+  - A timing of the loop itself: the 5 times figure is the Nov 2
+    measurement of a run against a build, not of these methods.
 
 ### Restart: flagged prognostic state, one file format for serial and MPI
 
@@ -534,6 +816,26 @@ Terms:
     the other runoff classes).
   - Upstream quirks are kept verbatim, including one Fortran bug
     pywatershed also keeps: the Fortran answers are the reference.
+  - A PRMS "dynamic parameter" is an input and is handled as one
+    (JLM, Nov 13, 2026). `ag_frac` is always `kind="input"`; whether
+    it is static or dynamic is settled outside the processes, where
+    a static field is repeated along time. The memory that costs is
+    accepted.
+  - The areas derived from `ag_frac` (`ag_area`, the pervious area
+    and its fraction) are results of the current step's input: no
+    restart flag, no first-step block, no state group. PRMSRunoffAg
+    computes them before its kernel. This departs from pywatershed,
+    which updates them after its kernel (`docs/MAINTENANCE.md`).
+  - The one area state is PRMSSoilzoneAg's `ag_frac_prev`: the
+    `ag_frac` its storages are distributed for. When the input
+    differs from it, water moves between the ag store and
+    `slow_stor`.
+  - Why the areas stopped being state: both Ag classes declare
+    `ag_area`, and one name on one grid is one array. In a live
+    chain runoff wrote the current step's value before the soil zone
+    read it as the previous step's, so the redistribution never ran
+    (0 hrus against 82 standalone on the one change date of
+    fgr_ag_2yr).
 - **For users:**
   - `ag_frac` is a time-varying input: a static field is still
     supplied along time.
@@ -555,6 +857,8 @@ Terms:
   `tests/test_prms_{runoff,soilzone}_ag{,_mpi}.py`,
   `tests/test_prms_soilzone_ag_obs_et.py`,
   `tests/test_prms_runoff_soilzone_ag.py`,
+  `tests/test_restart_processes_ag.py` (area timing, `ag_frac_prev`,
+  the chain under dynamic `ag_frac`),
   `tests/test_process_fields.py` (the redeclaration pins).
 - **Left unfinished** (moved from memory Nov 12, 2026):
   - PRMSSoilzoneNoDprstAg is not ported (pywatershed does not test
@@ -562,9 +866,17 @@ Terms:
   - `_pref_flow_flag` is `any()` over a rank's own rows; a domain
     with mixed `pref_flow_den` needs a reduction over all ranks,
     which the init hook's local-only contract does not allow.
-  - On a cold start PRMSSoilzoneAg's first-step area block
-    overwrites supplied state (`CLAUDE.md` "Initial state", known
-    gaps); closed by the init-hook split on branch feat_spotpy.
+  - PRMSRunoffAg's area timing is not checked against GSFLOW. The
+    fgr_ag_2yr answers cannot tell the two orders apart: on the one
+    change date (step 366, 2001-01-01) the 124 changed hrus have no
+    rain, melt, infiltration or runoff. The GSFLOW Fortran source
+    would settle it.
+  - No test compares the live chain (PRMSRunoffAg ->
+    PRMSSoilzoneAgObsET, dynamic `ag_frac`) with the GSFLOW answers;
+    parity is per process, and the chain test is self-consistent.
+  - `hru_frac_perv` has two writers on a shared grid, PRMSRunoffAg
+    and PRMSSoilzoneAg, with a different order of subtraction. Each
+    writes it before its own kernel; output shows the soil zone's.
   - The original larger Ag domains (`ucb_ag_*`, kept offline) were
     not used; they may return.
 

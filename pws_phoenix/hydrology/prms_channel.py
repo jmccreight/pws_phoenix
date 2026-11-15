@@ -26,7 +26,7 @@ SEPARATED along framework seams (design decisions w/ JLM):
   happens first thing in the kernel. Cross-dis fluxes are VOLUMES
   (cubic feet) -- dis-relative units (inches) never cross a Map.
 - **Muskingum coefficients -> parameter_internal.** ``c0/c1/c2/ts/tsi``
-  (+ 0-based ``tosegment0``) are computed in ``initialize()`` from
+  (+ 0-based ``tosegment0``) are computed in ``init_from_params()`` from
   process params (``mann_n``, ``x_coef``) + dis variables, then frozen.
 
 dt is SECONDS (s_per_time = dt = 86400.0 for daily PRMS).
@@ -149,7 +149,7 @@ def muskingum_mann_coefficients(
     buffers first), replicating pywatershed
     PRMSChannel._initialize_channel_data numerics exactly.
 
-    Shared by PRMSChannel.initialize() and the FlowGraph channel node
+    Shared by PRMSChannel.init_from_params() and the FlowGraph channel node
     type -- ONE derivation, two consumers. Init-time temporaries only
     (velocity, Kcoef, masks), never per-step.
     """
@@ -299,7 +299,7 @@ class PRMSChannel(Process):
         description="Muskingum storage weighting factor [-]",
     )
 
-    # -- derived parameters (computed by initialize(), then frozen) --
+    # -- derived parameters (computed by init_from_params(), then frozen) --
     tosegment0 = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -444,39 +444,14 @@ class PRMSChannel(Process):
     # Initialization (derived parameters + initial values)
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
-        """Compute Muskingum coefficients and initial routing state,
-        replicating pywatershed _initialize_channel_data numerics (and
-        order) exactly. Temporaries here are INIT-time, not per-step."""
+    def init_from_params(self) -> None:
+        """Compute the Muskingum coefficients, replicating pywatershed
+        _initialize_channel_data numerics (and order) exactly.
+        Temporaries here are INIT-time, not per-step."""
         refs = self._refs
-
-        # -- init values: allocation fills nan; pywatershed zero-inits
-        # these (channel_outflow_vol is nan upstream but overwritten
-        # every step; zeroed here for tidiness) --
-        for name in (
-            "seg_lateral_inflow",
-            "seg_upstream_inflow",
-            "seg_inflow",
-            "seg_outflow",
-            "outflow_ts",
-            "seg_stor_change",
-            "channel_outflow_vol",
-            "inflow_ts",
-            "seg_current_sum",
-        ):
-            refs[name][:] = 0.0
-        # pywatershed order: inflow_ts_prev from seg_inflow (zero)
-        refs["inflow_ts_prev"][:] = refs["seg_inflow"]
 
         # -- 0-based connectivity for the kernel --
         refs["tosegment0"][:] = refs["tosegment"] - 1
-
-        # Initial state: the defaults above (zeros). A nonzero start is
-        # SUPPLIED state (seg_inflow, outflow_ts under their own names,
-        # written after this hook). PRMS's segment_flow_init parameter
-        # is translated to a supplied seg_inflow by prms_translate
-        # (pywatershed's propagation, verbatim); the channel no longer
-        # consumes state from parameters.
 
         # -- Muskingum coefficients (module function above; shared with
         # the FlowGraph channel node type) --
@@ -493,6 +468,34 @@ class PRMSChannel(Process):
             refs["segment_type"],
             refs["x_coef"],
         )
+
+    def init_state(self, time: Time) -> None:
+        """Initial routing state: zeros (pywatershed
+        _initialize_channel_data). A nonzero start is SUPPLIED state
+        (seg_inflow, outflow_ts under their own names, written after
+        this hook). PRMS's segment_flow_init parameter is translated
+        to a supplied seg_inflow by prms_translate (pywatershed's
+        propagation, verbatim); the channel does not consume state
+        from parameters."""
+        refs = self._refs
+
+        # allocation fills nan; pywatershed zero-inits these
+        # (channel_outflow_vol is nan upstream but overwritten every
+        # step; zeroed here for tidiness)
+        for name in (
+            "seg_lateral_inflow",
+            "seg_upstream_inflow",
+            "seg_inflow",
+            "seg_outflow",
+            "outflow_ts",
+            "seg_stor_change",
+            "channel_outflow_vol",
+            "inflow_ts",
+            "seg_current_sum",
+        ):
+            refs[name][:] = 0.0
+        # pywatershed order: inflow_ts_prev from seg_inflow (zero)
+        refs["inflow_ts_prev"][:] = refs["seg_inflow"]
 
     # ------------------------------------------------------------------
     # Computation

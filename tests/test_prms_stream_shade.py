@@ -162,7 +162,7 @@ def test_tabulated_shade_is_exact():
     pp = {nn: params[nn].values for nn in names}
     nseg = seg_lat_rad.shape[0]
 
-    # the PRMSStreamTemp.initialize recipe: the (366,) declination
+    # the PRMSStreamTemp.init_from_params recipe: the (366,) declination
     # table, then the five (366, nseg) tables
     kk = np.arange(366) + 1.0
     declination = 0.40928 * np.cos(((2.0 * np.pi) / _DAYS_YR) * (172.0 - kk))

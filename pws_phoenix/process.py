@@ -83,7 +83,7 @@ class DataArrayMeta:
     # belongs in a restart file -- the minimal set that, restored at a
     # time step, reproduces the continuous run exactly (the perfect-
     # restart tests police completeness). It is also the INITIAL-STATE
-    # surface: at a cold start initialize() sets each restart
+    # surface: at a cold start init_from_params() sets each restart
     # variable's DEFAULT, and a value supplied in the process_dict
     # entry under the variable's OWN name overrides it (Nov 2026;
     # replaced the `initial=` seams). Not checked for nan: nan is a
@@ -107,7 +107,7 @@ class DataArrayMeta:
     #    provenance stamps digest to detect stale artifacts. May
     #    become optional under future compute-if-absent semantics.
     # 3. INTERNAL (kind="parameter_internal", no derivation):
-    #    computed by initialize(), NEVER supplied, never part of the
+    #    computed by init_from_params(), NEVER supplied, never part of the
     #    contract's required half. "Internal" and "derivable" are
     #    deliberately distinct words for distinct lifecycles.
     derivation: str | None = None
@@ -245,7 +245,7 @@ _FILL_VALUE: dict[type, object] = {
     np.float64: np.nan,
     # ints have no nan; use a glaringly-invalid sentinel
     np.int64: np.iinfo(np.int64).min,
-    # bools have no invalid value; initialize() must fully set them
+    # bools have no invalid value; init_from_params() must fully set them
     np.bool_: False,
 }
 
@@ -305,15 +305,15 @@ class Process(ABC):
 
     # Restart variables that must be SUPPLIED TOGETHER as initial state
     # (the Model raises on part of a group; none of it, or a restart,
-    # is fine). Declare a group when initialize() computes some of its
+    # is fine). Declare a group when init_from_params() computes some of its
     # members from the DEFAULTS of others (e.g. soil_lower =
     # soil_moist - soil_rechr): supplied state is written after
-    # initialize(), so supplying one member alone would leave the rest
+    # init_from_params(), so supplying one member alone would leave the rest
     # computed from a default that was then replaced. A variant
     # inherits the tuple or redeclares it whole.
     state_groups: tuple[tuple[str, ...], ...] = ()
 
-    # Restart variables with NO default: initialize() leaves them
+    # Restart variables with NO default: init_from_params() leaves them
     # unset, so they must be supplied as initial state or come from a
     # restart. The Model raises at assembly when one is missing.
     required_initial_state: tuple[str, ...] = ()
@@ -341,7 +341,7 @@ class Process(ABC):
 
     def initialize_budgets(self) -> None:
         """Zero the budget accumulators. Called by the Model with the
-        initialize() hooks, before any restart restore."""
+        init_state() hooks, before any restart restore."""
         for bb in self._budgets.values():
             bb.initialize(self._refs)
 
@@ -362,18 +362,41 @@ class Process(ABC):
         grid's shared dataset)."""
         return self._obj[key]
 
-    def initialize(self) -> None:
-        """Per-process init hook (default: no-op). Called ONCE by the Model
-        after binding, IC loading, and input validation, before the run
-        loop. Compute `kind="parameter_internal"` fields in place here
-        (e.g. Muskingum coefficients from mann_n + dis variables); the
-        Model freezes them (read-only) after all hooks run. Contract:
-        LOCAL (no collectives), reads params/dis vars off self._refs, no
-        Time (construction, not runtime)."""
+    # The three init hooks (all default to no-ops; all LOCAL -- no
+    # collectives). The Model calls them in this order, each over ALL
+    # processes before the next:
+    #   allocate()          once per model
+    #   init_from_params()  then parameter_internal is frozen
+    #   init_state(time)    then supplied state | restart overrides it
+
+    def allocate(self) -> None:
+        """Run ONCE per model, after binding: create private arrays
+        (scratch, lookup tables, state held outside the dataset) and
+        tuples of array references. The ONLY hook that may allocate;
+        the other two fill in place, so they are safe to run again."""
+
+    def init_from_params(self) -> None:
+        """Compute everything that is a function of the PARAMETERS:
+        `kind="parameter_internal"` fields in place (e.g. Muskingum
+        coefficients from mann_n + dis variables) and private
+        parameter-derived values; raise on invalid parameters. The
+        Model freezes parameter_internal (read-only) after all
+        processes' hooks run. Contract: writes NO variable, allocates
+        nothing, no Time; reads params/dis vars off self._refs. Safe
+        to run again after the parameters change."""
+
+    def init_state(self, time: Time) -> None:
+        """Write the cold-start DEFAULT of every variable this process
+        needs defined before the first step (restart variables above
+        all), and of any private state. `time` is the clock at index 0
+        (the start date). Runs after the freeze: a write to a
+        parameter_internal raises. Supplied state or a restart then
+        overrides these defaults. Contract: writes variables only,
+        allocates nothing. Safe to run again."""
 
     def check_initial_state(self) -> list[str]:
         """Called ONCE by the Model after the starting state is in place
-        (initialize() defaults, then supplied state or a restart).
+        (init_from_params() defaults, then supplied state or a restart).
         Returns this rank's problems as messages (default: none).
         Contract: LOCAL (no collectives), never raises -- the Model
         raises, on every rank under MPI."""
@@ -397,7 +420,7 @@ class Process(ABC):
 
     @classmethod
     def get_parameters_internal(cls) -> dict[str, DataArrayMeta]:
-        """Parameters COMPUTED by initialize() rather than supplied
+        """Parameters COMPUTED by init_from_params() rather than supplied
         (read-only after; metas returned for allocation)."""
         return _dict_of_kind(cls, "parameter_internal")
 
@@ -457,7 +480,7 @@ class Process(ABC):
     # Restart state hooks -- for the few processes carrying EVOLVING
     # python-attribute state outside the grid dataset (e.g. stream
     # temp's gw/ss silos + circular-buffer indices). Static attrs
-    # (topology, lookup tables) are rebuilt by initialize() and do NOT
+    # (topology, lookup tables) are rebuilt by init_from_params() and do NOT
     # belong here; within-step scratch does not either.
     # ------------------------------------------------------------------
 

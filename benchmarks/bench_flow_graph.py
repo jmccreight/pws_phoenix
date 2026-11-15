@@ -38,7 +38,7 @@ class FlowGraphLifecycle:
         type(proc)(proc._obj)
 
     def time_initialize(self, label):
-        get_graph_model(label).model_dict["flow_graph"].initialize()
+        get_graph_model(label).model_dict["flow_graph"].init_from_params()
 
     def time_advance(self, label):
         get_graph_model(label).model_dict["flow_graph"].advance()

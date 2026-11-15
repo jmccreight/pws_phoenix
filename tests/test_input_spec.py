@@ -215,7 +215,7 @@ def test_full_chain_contract():
 
     # starting state = the restart variables under their own names
     # (the old initial= seams and their PRMS names are gone); the
-    # PRMS *_init PARAMETERS initialize() still consumes -- soilzone's
+    # PRMS *_init PARAMETERS init_from_params() still consumes -- soilzone's
     # soil_moist_init_frac etc. -- ride the "parameters" list
     assert "seg_inflow" in seg["initial_state"]["prms_channel"]
     assert "gwres_stor" in hru["initial_state"]["prms_groundwater"]

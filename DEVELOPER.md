@@ -10,7 +10,7 @@ README "Installation" and `CLAUDE.md`; the pywatershed port record is
 **Status (Oct 27, 2026): measured, decided, IMPLEMENTED** --
 `Process.__init__` captures `self._refs: dict[str, np.ndarray]` (one
 entry per declared field, `_resolved_fields`), and every
-`advance()`/`calculate()`/`initialize()` reads `refs[name]`; no
+`advance()`/`calculate()` and init hook reads `refs[name]`; no
 `.values` inside a step anywhere in the package. The MPI rebind does
 not recapture (rule 2 below). `Model._validate_inputs_resolved` now
 runs BEFORE binding in both paths -- the capture is strict, so an
@@ -233,7 +233,7 @@ test is pinned at `NUMBA_NUM_THREADS=3 mpirun -n 4`).
 
 Deliberately NOT threaded:
 
-- the light per-element helpers (`_post_areas`, `_update_areas`,
+- the light per-element helpers (`_areas`, `_update_areas`,
   `_pre`/`_post`, `_iter_diag`, `_compute_ccov_hru`, `_transp_tindex`,
   `_transp_frost`): a parallel region costs a thread launch (~10-30
   us), more than those loops;

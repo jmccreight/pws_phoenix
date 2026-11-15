@@ -42,7 +42,7 @@ compute_daily=True node driven identically
 the physics.
 
 Port notes:
-- n_substeps >= 2 is REQUIRED (initialize_type raises): in a
+- n_substeps >= 2 is REQUIRED (init_from_params_type raises): in a
   1-substep graph the first day's if/elif/else never reaches the
   last-substep output bookkeeping (a pywatershed latent edge -- its
   daily mode hardcodes nsubsteps=24); use the hourly StarfitFlowNode
@@ -241,7 +241,7 @@ class StarfitDailyFlowNode:
     finalize = starfit_finalize
 
     @staticmethod
-    def initialize_type(dataset, n_substeps, io_in_cfs) -> None:
+    def init_from_params_type(dataset, n_substeps, io_in_cfs) -> None:
         if n_substeps < 2:
             raise ValueError(
                 "starfit_daily requires a sub-daily graph "

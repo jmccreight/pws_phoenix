@@ -9,7 +9,10 @@ declarations + the njit node contract and the numpy build/advance
 hooks:
 
   - fields                     -- its DataArrayMeta declarations
-  - initialize_type(dataset)   -- numpy, once at build
+  - init_from_params_type(dataset, n_substeps, io_in_cfs)
+                               -- numpy; derived parameters
+  - init_state_type(dataset, time)  -- numpy; cold-start defaults
+                                       (optional)
   - advance_type(dataset)      -- numpy, once per day
   - prepare(inode, state)      -- njit, zero this node's substep scratch
   - substep(istep, inode, state)  -- njit, the sub-timestep physics
@@ -75,9 +78,13 @@ class PassThroughFlowNode:
     finalize = _finalize
 
     @staticmethod
-    def initialize_type(dataset, n_substeps, io_in_cfs) -> None:
-        # n_substeps unused (no substep-length physics); io_in_cfs
-        # unused (pass-through is unit-agnostic)
+    def init_from_params_type(dataset, n_substeps, io_in_cfs) -> None:
+        # nothing parameter-derived: n_substeps unused (no
+        # substep-length physics); io_in_cfs unused (unit-agnostic)
+        pass
+
+    @staticmethod
+    def init_state_type(dataset, time) -> None:
         dataset["accum_inflow"].values[:] = 0.0
 
     @staticmethod

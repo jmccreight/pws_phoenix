@@ -26,7 +26,7 @@ pywatershed's, verbatim:
 Padding: every ``(nsegment,)`` variable of the segment dis and of the
 channel parameters is extended to ``nnodes`` with nan (floats) or 0
 (ints); a new node's own parameters fill its row, every other declared
-parameter of its type stays nan. A node type's ``initialize_type``
+parameter of its type stays nan. A node type's ``init_from_params_type``
 owns the "nan where it matters" check (STARFIT raises on nan
 ``Obs_MEANFLOW_CUMECS`` -- that data-prep stays the caller's, as
 decided for the STARFIT port).

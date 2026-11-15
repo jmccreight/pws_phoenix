@@ -24,24 +24,24 @@ zero arrays fed to the shared kernel). Here the hierarchy points the
 right way: ``PRMSRunoffNoDprst`` is the minimal core (pervious/
 impervious runoff + infiltration partitioning, its own kernel over the
 shared njit helpers) and ``PRMSRunoff`` EXTENDS it: dprst parameters/
-derived/variables ADDED, ``initialize``/``advance``/kernel overridden.
+derived/variables ADDED, ``init_from_params``/``advance``/kernel overridden.
 The core never touches dprst.
 
 Initialization -> framework seams (the Stage-2 mechanisms):
 
-- **basin_init/dprst_init -> ``initialize()`` + ``parameter_internal``.**
+- **basin_init/dprst_init -> ``init_from_params()`` + ``parameter_internal``.**
   pywatershed computes static geometry (``hru_perv``/``hru_frac_perv``/
   ``hru_imperv``/``dprst_area_max``/``dprst_area_open_max``/
   ``dprst_area_clos_max``/``dprst_frac_clos``/``dprst_vol_open_max``/
   ``dprst_vol_clos_max``/``dprst_vol_thres_open``) at construction;
-  here they are ``parameter_internal``: written once in ``initialize()``,
+  here they are ``parameter_internal``: written once in ``init_from_params()``,
   then frozen. ``dprst_vol_thres_open`` is nominally a pywatershed
   "variable" but is never written by its kernel (its own autotest
   excludes it from comparison) -- derived here.
 - **dprst initial state** (``dprst_vol_open``/``dprst_vol_clos``/
   ``dprst_area_open``/``dprst_area_clos``/``dprst_stor_hru`` + olds/
-  fracs) is computed in ``initialize()`` (dprst_init verbatim, the
-  no-restart path).
+  fracs) is computed in ``init_state()`` (dprst_init verbatim, the
+  no-restart path), from ``dprst_frac_init`` and the frozen maxima.
 
 Deliberately NOT ported (conventions in pws_phoenix/CLAUDE.md):
 
@@ -50,7 +50,7 @@ Deliberately NOT ported (conventions in pws_phoenix/CLAUDE.md):
   ``imbalance_behavior``.
 - The ``_dprst_clos_flag == OFF`` parameter-zeroing hack in dprst_init
   (hit by nhm domains: ``dprst_frac_open == 1`` everywhere, drb
-  included) -- provably a no-op, see the comment in ``initialize()``.
+  included) -- provably a no-op, see the comment in ``init_from_params()``.
 - Hardwired-off upstream paths, kept hardwired: cascades, frozen
   ground, glaciers, water use.
 - ``intcp_changeover_in_net_rain`` (GSFLOW/PRMS-6 accounting): fixed
@@ -961,7 +961,7 @@ def dprst_comp_ag(
         )
     else:
         # never true: called only where dprst_area_max > 0, and
-        # initialize() rejects dprst_depth_avg == 0 there
+        # init_from_params() rejects dprst_depth_avg == 0 there
         dprst_vol_frac = 0.0  # units-test: unreachable
 
     return (
@@ -1073,7 +1073,7 @@ class PRMSRunoffNoDprst(Process):
         description="Maximum snow infiltration per day [inches/day]",
     )
 
-    # -- derived parameters (initialize(); basin_init) --
+    # -- derived parameters (init_from_params(); basin_init) --
     hru_perv = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -1317,29 +1317,12 @@ class PRMSRunoffNoDprst(Process):
     # Initialization (basin_init, no-dprst path)
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
         """basin_init with the dprst branch OFF (upstream shared
         basin_init under _dprst_flag == False)."""
         refs = self._refs
         nhru = refs["hru_area"].shape[0]
 
-        # -- zero-init all variables (pywatershed get_init_values) --
-        for name in (
-            "contrib_fraction",
-            "infil",
-            "infil_hru",
-            "sroff",
-            "sroff_vol",
-            "hru_sroffp",
-            "hru_sroffi",
-            "imperv_stor",
-            "imperv_evap",
-            "hru_impervevap",
-            "hru_impervstor",
-            "hru_impervstor_old",
-            "hru_impervstor_change",
-        ):
-            refs[name][:] = 0.0
         for name in (
             "hru_perv",
             "hru_frac_perv",
@@ -1363,6 +1346,26 @@ class PRMSRunoffNoDprst(Process):
 
             hru_perv[ii] = perv_area
             hru_frac_perv[ii] = perv_area / harea
+
+    def init_state(self, time: Time) -> None:
+        refs = self._refs
+        # -- zero-init all variables (pywatershed get_init_values) --
+        for name in (
+            "contrib_fraction",
+            "infil",
+            "infil_hru",
+            "sroff",
+            "sroff_vol",
+            "hru_sroffp",
+            "hru_sroffi",
+            "imperv_stor",
+            "imperv_evap",
+            "hru_impervevap",
+            "hru_impervstor",
+            "hru_impervstor_old",
+            "hru_impervstor_change",
+        ):
+            refs[name][:] = 0.0
 
     # ------------------------------------------------------------------
     # Computation
@@ -1678,7 +1681,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         description="Open-depression flow threshold (frac of max volume) [-]",
     )
 
-    # -- derived parameters (initialize(); basin_init/dprst_init) --
+    # -- derived parameters (init_from_params(); basin_init/dprst_init) --
     dprst_area_max = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -1867,7 +1870,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
     }
     budgets = {"mass": _MASS_BUDGET}
 
-    # initialize() computes the dprst areas and dprst_stor_hru from
+    # init_state() computes the dprst areas and dprst_stor_hru from
     # the DEFAULT volumes; dprst_area_clos is never recomputed after
     # (see Process.state_groups)
     state_groups = (
@@ -1884,48 +1887,16 @@ class PRMSRunoff(PRMSRunoffNoDprst):
     # Initialization (basin_init + dprst_init, no-restart path)
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
-        """basin_init + dprst_init verbatim (init-time loops; perf
-        irrelevant). Derived geometry -> parameter_internal (frozen
-        after this); dprst initial state -> variables."""
+    def init_from_params(self) -> None:
+        """basin_init + the parameter half of dprst_init, verbatim
+        (init-time loops; perf irrelevant). Derived geometry ->
+        parameter_internal (frozen after this). The dprst starting
+        state is init_state(); the pervious area goes through the
+        _pervious_area_from_params hook."""
         refs = self._refs
         nhru = refs["hru_area"].shape[0]
 
-        # -- zero-init all variables (pywatershed get_init_values) --
         for name in (
-            "contrib_fraction",
-            "infil",
-            "infil_hru",
-            "sroff",
-            "sroff_vol",
-            "hru_sroffp",
-            "hru_sroffi",
-            "imperv_stor",
-            "imperv_evap",
-            "hru_impervevap",
-            "hru_impervstor",
-            "hru_impervstor_old",
-            "hru_impervstor_change",
-            "dprst_vol_frac",
-            "dprst_vol_clos",
-            "dprst_vol_open",
-            "dprst_vol_clos_frac",
-            "dprst_vol_open_frac",
-            "dprst_area_clos",
-            "dprst_area_open",
-            "dprst_sroff_hru",
-            "dprst_seep_hru",
-            "dprst_evap_hru",
-            "dprst_insroff_hru",
-            "dprst_stor_hru",
-            "dprst_stor_hru_old",
-            "dprst_stor_hru_change",
-            "dprst_in",
-        ):
-            refs[name][:] = 0.0
-        for name in (
-            "hru_perv",
-            "hru_frac_perv",
             "hru_imperv",
             "dprst_area_max",
             "dprst_area_open_max",
@@ -1941,14 +1912,9 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         hru_percent_imperv = refs["hru_percent_imperv"]
         dprst_frac = refs["dprst_frac"]
         dprst_frac_open = refs["dprst_frac_open"]
-        dprst_frac_init = refs["dprst_frac_init"]
         dprst_depth_avg = refs["dprst_depth_avg"]
         op_flow_thres = refs["op_flow_thres"]
-        va_open_exp = refs["va_open_exp"]
-        va_clos_exp = refs["va_clos_exp"]
 
-        hru_perv = refs["hru_perv"]
-        hru_frac_perv = refs["hru_frac_perv"]
         hru_imperv = refs["hru_imperv"]
         dprst_area_max = refs["dprst_area_max"]
         dprst_area_open_max = refs["dprst_area_open_max"]
@@ -1957,22 +1923,14 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         dprst_vol_open_max = refs["dprst_vol_open_max"]
         dprst_vol_clos_max = refs["dprst_vol_clos_max"]
         dprst_vol_thres_open = refs["dprst_vol_thres_open"]
-        dprst_vol_open = refs["dprst_vol_open"]
-        dprst_vol_clos = refs["dprst_vol_clos"]
-        dprst_area_open = refs["dprst_area_open"]
-        dprst_area_clos = refs["dprst_area_clos"]
-        dprst_stor_hru = refs["dprst_stor_hru"]
-        dprst_stor_hru_old = refs["dprst_stor_hru_old"]
-        dprst_vol_frac = refs["dprst_vol_frac"]
 
-        # -- basin_init (prms basin.f90/basinit subset) --
+        # -- basin_init (prms basin.f90/basinit subset); its pervious
+        # area lines are _pervious_area_from_params --
         dprst_clos_flag = False
         for ii in range(nhru):
             harea = hru_area[ii]
-            perv_area = harea
             if hru_percent_imperv[ii] > 0.0:
                 hru_imperv[ii] = hru_percent_imperv[ii] * harea
-                perv_area = perv_area - hru_imperv[ii]
 
             dprst_area_max[ii] = dprst_frac[ii] * harea
             if dprst_area_max[ii] > 0.0:
@@ -1985,10 +1943,8 @@ class PRMSRunoff(PRMSRunoffNoDprst):
                 )
                 if dprst_area_clos_max[ii] > 0.0:
                     dprst_clos_flag = True
-                perv_area = perv_area - dprst_area_max[ii]
 
-            hru_perv[ii] = perv_area
-            hru_frac_perv[ii] = perv_area / harea
+        self._pervious_area_from_params()
 
         # -- dprst_init --
         # When no HRU has closed depressions (nhm domains:
@@ -2017,6 +1973,89 @@ class PRMSRunoff(PRMSRunoffNoDprst):
                 dprst_vol_open_max[ii] = (
                     dprst_area_open_max[ii] * dprst_depth_avg[ii]
                 )
+
+                # threshold volume: fraction of max open storage above
+                # which flow occurs
+                dprst_vol_thres_open[ii] = (
+                    op_flow_thres[ii] * dprst_vol_open_max[ii]
+                )
+
+    def _pervious_area_from_params(self) -> None:
+        """basin_init's pervious area, verbatim: the HRU less its
+        impervious area and its maximum depression area (same
+        conditions and subtraction order as the basin_init loop these
+        lines came from; reads the stored hru_imperv and
+        dprst_area_max). hru_perv and hru_frac_perv are
+        parameter_internal here. PRMSRunoffAg, where they are
+        variables computed every step from the input ag_frac,
+        overrides this with a no-op."""
+        refs = self._refs
+        hru_area = refs["hru_area"]
+        hru_percent_imperv = refs["hru_percent_imperv"]
+        hru_imperv = refs["hru_imperv"]
+        dprst_area_max = refs["dprst_area_max"]
+        hru_perv = refs["hru_perv"]
+        hru_frac_perv = refs["hru_frac_perv"]
+
+        for ii in range(hru_area.shape[0]):
+            harea = hru_area[ii]
+            perv_area = harea
+            if hru_percent_imperv[ii] > 0.0:
+                perv_area = perv_area - hru_imperv[ii]
+            if dprst_area_max[ii] > 0.0:
+                perv_area = perv_area - dprst_area_max[ii]
+
+            hru_perv[ii] = perv_area
+            hru_frac_perv[ii] = perv_area / harea
+
+    def init_state(self, time: Time) -> None:
+        """The state half of dprst_init, verbatim (the no-restart
+        path): starting volumes from dprst_frac_init and the frozen
+        maxima, then the areas, dprst_stor_hru and dprst_vol_frac that
+        follow from them."""
+        super().init_state(time)
+        refs = self._refs
+        nhru = refs["hru_area"].shape[0]
+
+        for name in (
+            "dprst_vol_frac",
+            "dprst_vol_clos",
+            "dprst_vol_open",
+            "dprst_vol_clos_frac",
+            "dprst_vol_open_frac",
+            "dprst_area_clos",
+            "dprst_area_open",
+            "dprst_sroff_hru",
+            "dprst_seep_hru",
+            "dprst_evap_hru",
+            "dprst_insroff_hru",
+            "dprst_stor_hru",
+            "dprst_stor_hru_old",
+            "dprst_stor_hru_change",
+            "dprst_in",
+        ):
+            refs[name][:] = 0.0
+
+        hru_area = refs["hru_area"]
+        dprst_frac = refs["dprst_frac"]
+        dprst_frac_init = refs["dprst_frac_init"]
+        va_open_exp = refs["va_open_exp"]
+        va_clos_exp = refs["va_clos_exp"]
+        dprst_area_open_max = refs["dprst_area_open_max"]
+        dprst_area_clos_max = refs["dprst_area_clos_max"]
+        dprst_vol_open_max = refs["dprst_vol_open_max"]
+        dprst_vol_clos_max = refs["dprst_vol_clos_max"]
+
+        dprst_vol_open = refs["dprst_vol_open"]
+        dprst_vol_clos = refs["dprst_vol_clos"]
+        dprst_area_open = refs["dprst_area_open"]
+        dprst_area_clos = refs["dprst_area_clos"]
+        dprst_stor_hru = refs["dprst_stor_hru"]
+        dprst_stor_hru_old = refs["dprst_stor_hru_old"]
+        dprst_vol_frac = refs["dprst_vol_frac"]
+
+        for ii in range(nhru):
+            if dprst_frac[ii] > 0.0:
                 # initial storage volumes (no-restart path)
                 dprst_vol_open[ii] = (
                     dprst_frac_init[ii] * dprst_vol_open_max[ii]
@@ -2025,11 +2064,6 @@ class PRMSRunoff(PRMSRunoffNoDprst):
                     dprst_frac_init[ii] * dprst_vol_clos_max[ii]
                 )
 
-                # threshold volume: fraction of max open storage above
-                # which flow occurs
-                dprst_vol_thres_open[ii] = (
-                    op_flow_thres[ii] * dprst_vol_open_max[ii]
-                )
                 if dprst_vol_open[ii] > 0.0:
                     open_vol_r = dprst_vol_open[ii] / dprst_vol_open_max[ii]
                     if open_vol_r < _NEARZERO:
@@ -2412,16 +2446,30 @@ class PRMSRunoffAg(PRMSRunoff):
     partitioning (pywatershed prms_runoff_ag.py; GSFLOW physics).
 
     ADDITIVE extension (upstream's interface is a strict superset of
-    PRMSRunoff's): ag declarations added; ``initialize``/kernel/
-    ``calculate`` overridden. ``ag_frac`` is a TIME-VARYING input
+    PRMSRunoff's): ag declarations added; ``init_from_params``/
+    ``init_state``/kernel/``calculate`` overridden. ``ag_frac`` is a
+    TIME-VARYING input
     (PRMS dynamic parameter), so ``hru_perv``/``hru_frac_perv`` are
     redeclared kind="variable" (declaration override; frozen in the
-    bases) and, with ``ag_area``, are recomputed AFTER the kernel each
-    step -- the kernel deliberately sees the PREVIOUS step's areas
-    while its ``ag_frac[ii]`` scalars are current (upstream ordering,
-    preserved). At time zero the upstream itime_step==0 block (ag area
-    carved out of basin_init's pervious area) runs in ``calculate``,
-    when ``ag_frac`` has been fed.
+    bases) and, with ``ag_area``, are computed from the CURRENT step's
+    ``ag_frac`` BEFORE the kernel, every step (``_areas``). They are
+    results of an input, nothing more: no starting value, no restart
+    state, no first-step block.
+
+    DEPARTURE from pywatershed: upstream updates the three areas
+    AFTER its kernel, so on a step where ``ag_frac`` changes its
+    kernel computes with the previous step's areas beside the current
+    ``ag_frac``, and multiplies an infiltration computed with the old
+    pervious fraction by the new one. Here the whole step uses the
+    current step's areas. The two orders give identical answers
+    whenever ``ag_frac`` is unchanged from the step before; the
+    GSFLOW answers (fgr_ag_2yr) cannot tell them apart, because the
+    one change date in the data (Jan 1, 2001) has no rain, melt or
+    runoff on the changed HRUs. The upstream order also cannot work
+    here as written: PRMSSoilzoneAg declares ``ag_area`` too, the two
+    declarations are one array on a shared grid, and an update
+    between this kernel and the soil zone's hides the change from the
+    soil zone.
 
     Deliberately NOT ported: ``sat_threshold`` (declared upstream,
     never used by its kernel); the unused ``_calculate_infil_ag`` method (dead
@@ -2438,10 +2486,8 @@ class PRMSRunoffAg(PRMSRunoff):
     # Declaration OVERRIDES: frozen geometry -> per-step variables
     # (dynamic ag_frac; enabled by the resolved-field MRO walk)
     # ------------------------------------------------------------------
-    # restart=True on all three per-step areas: the kernel reads the
-    # PREVIOUS step's areas (_post_areas updates them AFTER the
-    # kernel) and the istep0 carve-out only runs at time zero, so a
-    # restart must restore them (prognostic markers, not storages)
+    # NOT restart state: _areas computes all three per-step areas
+    # from the current ag_frac before anything reads them
     hru_perv = DataArrayMeta(
         kind="variable",
         dims=("space",),
@@ -2449,7 +2495,6 @@ class PRMSRunoffAg(PRMSRunoff):
         units="acres",
         description="Pervious HRU area [acres] (per-step: ag area and "
         "dynamic ag_frac carve it out)",
-        restart=True,
     )
     hru_frac_perv = DataArrayMeta(
         kind="variable",
@@ -2458,7 +2503,6 @@ class PRMSRunoffAg(PRMSRunoff):
         units="fraction",
         description="Pervious fraction of HRU area [-] (per-step under "
         "dynamic ag_frac)",
-        restart=True,
     )
 
     # -- process parameters (ADDED) --
@@ -2522,7 +2566,6 @@ class PRMSRunoffAg(PRMSRunoff):
         units="acres",
         description="Agricultural HRU area [acres] (per-step under "
         "dynamic ag_frac)",
-        restart=True,
     )
     infil_ag = DataArrayMeta(
         kind="variable",
@@ -2594,24 +2637,34 @@ class PRMSRunoffAg(PRMSRunoff):
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
-        """PRMSRunoff.initialize (basin_init + dprst_init) plus the ag
-        additions. The ag-area carve-out of the pervious area happens
-        at time zero in calculate() (upstream's itime_step==0 block):
-        ag_frac is an input, not yet fed here."""
-        super().initialize()
+    def _pervious_area_from_params(self) -> None:
+        pass  # variables here: _areas computes them every step
+
+    def init_from_params(self) -> None:
+        """PRMSRunoff.init_from_params (less the pervious area: a
+        variable here) plus the one ag derived parameter."""
+        super().init_from_params()
+        refs = self._refs
+        refs["ag_soil_rechr_max"][:] = (
+            refs["ag_soil_moist_max"] * refs["ag_soil_rechr_max_frac"]
+        )
+
+    def init_state(self, time: Time) -> None:
+        """PRMSRunoff.init_state plus the ag variables. The three
+        areas are zeroed like any other per-step result: calculate()
+        computes them from ag_frac before anything reads them."""
+        super().init_state(time)
         refs = self._refs
         for name in (
             "ag_area",
+            "hru_perv",
+            "hru_frac_perv",
             "infil_ag",
             "infil_ag_hru",
             "infil_perv_hru",
             "hru_sroff_ag",
         ):
             refs[name][:] = 0.0
-        refs["ag_soil_rechr_max"][:] = (
-            refs["ag_soil_moist_max"] * refs["ag_soil_rechr_max_frac"]
-        )
 
     # ------------------------------------------------------------------
     # Computation
@@ -2663,7 +2716,7 @@ class PRMSRunoffAg(PRMSRunoff):
         hru_intcpevap: np.ndarray,
         intcp_changeover: np.ndarray,
         ag_frac: np.ndarray,
-        # parameters + derived (areas are the PREVIOUS step's)
+        # parameters + derived (areas are this step's: _areas)
         hru_type: np.ndarray,
         hru_area: np.ndarray,
         hru_percent_imperv: np.ndarray,
@@ -2699,8 +2752,8 @@ class PRMSRunoffAg(PRMSRunoff):
         intcp_changeover_in_net_rain: bool,
     ) -> None:
         # upstream _calculate_numpy_ag verbatim per element; the
-        # post-kernel array lines live in _post_areas (they must see
-        # the UPDATED areas)
+        # areas it reads are _areas' (this step's), and the
+        # post-kernel array lines live in _post
         nhru = sroff.shape[0]
         for ii in numba.prange(nhru):
             soil_moist_prev = soil_lower_prev[ii] + soil_rechr_prev[ii]
@@ -2893,11 +2946,33 @@ class PRMSRunoffAg(PRMSRunoff):
 
     @staticmethod
     @numba.njit(cache=NUMBA_CACHE)
-    def _post_areas(
-        # updated in place
+    def _areas(
+        # written in place
         ag_area: np.ndarray,
         hru_perv: np.ndarray,
         hru_frac_perv: np.ndarray,
+        # read-only
+        ag_frac: np.ndarray,
+        hru_area: np.ndarray,
+        hru_imperv: np.ndarray,
+        dprst_area_max: np.ndarray,
+    ) -> None:
+        """The three areas from the CURRENT step's ag_frac (upstream
+        _update_ag_areas' arithmetic per element; dprst always active
+        in this port). Called before the kernel -- see the class
+        docstring for the departure from upstream's order."""
+        for ii in range(hru_area.shape[0]):
+            new_ag_area = ag_frac[ii] * hru_area[ii]
+            new_hru_perv = hru_area[ii] - hru_imperv[ii] - new_ag_area
+            new_hru_perv = new_hru_perv - dprst_area_max[ii]
+            ag_area[ii] = new_ag_area
+            hru_perv[ii] = new_hru_perv
+            hru_frac_perv[ii] = hru_perv[ii] / hru_area[ii]
+
+    @staticmethod
+    @numba.njit(cache=NUMBA_CACHE)
+    def _post(
+        # written in place
         infil_perv_hru: np.ndarray,
         infil_ag_hru: np.ndarray,
         infil_hru: np.ndarray,
@@ -2908,9 +2983,7 @@ class PRMSRunoffAg(PRMSRunoff):
         infil: np.ndarray,
         infil_ag: np.ndarray,
         ag_frac: np.ndarray,
-        hru_area: np.ndarray,
-        hru_imperv: np.ndarray,
-        dprst_area_max: np.ndarray,
+        hru_frac_perv: np.ndarray,
         hru_impervstor: np.ndarray,
         hru_impervstor_old: np.ndarray,
         dprst_stor_hru: np.ndarray,
@@ -2918,20 +2991,9 @@ class PRMSRunoffAg(PRMSRunoff):
         sroff: np.ndarray,
         hru_in_to_cf: np.ndarray,
     ) -> None:
-        """Upstream's post-kernel sequence, folded per element:
-        _update_ag_areas (full recompute from the CURRENT ag_frac;
-        dprst always active in this port) THEN the infil components --
-        infil computed with the OLD pervious fraction is multiplied by
-        the NEW one (upstream ordering quirk, preserved) -- and the
-        change/volume lines."""
-        for ii in range(hru_area.shape[0]):
-            new_ag_area = ag_frac[ii] * hru_area[ii]
-            new_hru_perv = hru_area[ii] - hru_imperv[ii] - new_ag_area
-            new_hru_perv = new_hru_perv - dprst_area_max[ii]
-            ag_area[ii] = new_ag_area
-            hru_perv[ii] = new_hru_perv
-            hru_frac_perv[ii] = hru_perv[ii] / hru_area[ii]
-
+        """Upstream's post-kernel lines, folded per element: the infil
+        components and the change/volume lines."""
+        for ii in range(infil.shape[0]):
             infil_perv_hru[ii] = infil[ii] * hru_frac_perv[ii]
             infil_ag_hru[ii] = infil_ag[ii] * ag_frac[ii]
             infil_hru[ii] = infil_perv_hru[ii] + infil_ag_hru[ii]
@@ -2947,21 +3009,15 @@ class PRMSRunoffAg(PRMSRunoff):
     def calculate(self, dt: np.float64, time: Time) -> None:
         refs = self._refs
 
-        if time.current_index == 0:
-            # upstream itime_step==0 block: carve the ag area out of
-            # basin_init's pervious area (ag_frac now fed; once-only
-            # numpy staging)
-            np.multiply(
-                refs["ag_frac"],
-                refs["hru_area"],
-                out=refs["ag_area"],
-            )
-            refs["hru_perv"][:] -= refs["ag_area"]
-            np.divide(
-                refs["hru_perv"],
-                refs["hru_area"],
-                out=refs["hru_frac_perv"],
-            )
+        self._areas(
+            refs["ag_area"],
+            refs["hru_perv"],
+            refs["hru_frac_perv"],
+            refs["ag_frac"],
+            refs["hru_area"],
+            refs["hru_imperv"],
+            refs["dprst_area_max"],
+        )
 
         # the budget's changeover input (upstream verbatim): zero when
         # the changeover already rides in net_rain
@@ -3046,10 +3102,7 @@ class PRMSRunoffAg(PRMSRunoff):
             self._intcp_changeover_in_net_rain,
         )
 
-        self._post_areas(
-            refs["ag_area"],
-            refs["hru_perv"],
-            refs["hru_frac_perv"],
+        self._post(
             refs["infil_perv_hru"],
             refs["infil_ag_hru"],
             refs["infil_hru"],
@@ -3059,9 +3112,7 @@ class PRMSRunoffAg(PRMSRunoff):
             refs["infil"],
             refs["infil_ag"],
             refs["ag_frac"],
-            refs["hru_area"],
-            refs["hru_imperv"],
-            refs["dprst_area_max"],
+            refs["hru_frac_perv"],
             refs["hru_impervstor"],
             refs["hru_impervstor_old"],
             refs["dprst_stor_hru"],

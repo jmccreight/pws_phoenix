@@ -92,7 +92,7 @@ stays closed (the storage keeps the water).
 - **Reachable only if** a step starts with `slow_stor >
   pref_flow_thrsh` (slow path: `ssresin = pref_flow_thrsh -
   slow_stor`) or `pref_flow_stor > pref_flow_max` (fast path).
-  `initialize()` never produces that state and each step preserves
+  `init_state()` never produces that state and each step preserves
   it, so the one way in is a supplied state (restart, or an initial
   state given under its own name). The Ag family shares the helper.
 - **Detector:** none yet. Planned: warn ONCE at run start where
@@ -100,6 +100,32 @@ stays closed (the storage keeps the water).
   arc), not a per-step check -- the state cannot arise mid-run.
 - **Not changed** in the kernel: verbatim lines; a raise or warning
   inside njit code is not possible (warn) or a departure (raise).
+
+## PRMSRunoffAg: areas from the current step's `ag_frac`, before the kernel (departure #3)
+
+pywatershed's PRMSRunoffAg updates `ag_area`, `hru_perv` and
+`hru_frac_perv` AFTER its kernel, so on a step where `ag_frac`
+changes its kernel still sees the previous step's areas. Here the
+kernel `_areas` computes them from the current step's `ag_frac`
+BEFORE the main kernel (`PRMSRunoffAg` docstring in
+`pws_phoenix/hydrology/prms_runoff.py`). Reason: a PRMS dynamic
+parameter is an input, and a result of an input belongs to the step
+that input is for; and with the areas held over from the previous
+step, a live RunoffAg -> SoilzoneAg chain never redistributed ag
+storage (`docs/design_description.md` "Ag variants").
+
+- **Bites only if** `ag_frac` differs from the previous step's AND
+  the changed hrus have rain, melt, infiltration or runoff on that
+  step. Otherwise the two orders give the same numbers.
+- **Not settled:** which order GSFLOW uses. The fgr_ag_2yr answers
+  cannot tell: on the one change date (step 366, 2001-01-01) the 124
+  changed hrus are dry. JLM suspects pywatershed's order is the wrong
+  one. The GSFLOW Fortran source (where it reads a dynamic parameter
+  relative to that step's runoff computation) would settle it.
+- **Detector:** `test_runoff_ag_supplied_state` in
+  `tests/test_restart_processes_ag.py` pins the order chosen here (it
+  fails with pywatershed's order). Nothing compares it with GSFLOW.
+- **Status:** not yet reported to pywatershed.
 
 ## Report upstream (pywatershed): SourceSinkFlowNode harvests the last substep's outflow
 

@@ -68,7 +68,7 @@ relies on Model/ModelMPI running ALL `advance()` hooks before any
 | PRMSGroundwater | `hydrology/prms_groundwater.py` | 1e-13 (upstream's own) | First real port; dis-first parameter sourcing |
 | PRMSChannel | `hydrology/prms_channel.py` | 1e-13; `seg_stor_change` (1e-7, 1e-4) cancellation carve-out | hru→segment aggregation externalized to Maps; muskingum coefficients = `parameter_internal` |
 | FlowGraph (6 node types) | `flow_graph.py` + `hydrology/*_flow_node.py` | 1e-7…1e-10 per mode; per-node mass budget 1e-8/1e-9 | Registry dispatch via `literal_unroll`; hourly + daily STARFIT; io_in_cfs |
-| PRMSRunoff | `hydrology/prms_runoff.py` | 1e-10 (upstream's own) | dprst-ACTIVE path; `basin_init`/`dprst_init` → `initialize()` + `parameter_internal` |
+| PRMSRunoff | `hydrology/prms_runoff.py` | 1e-10 (upstream's own) | dprst-ACTIVE path; `basin_init`/`dprst_init` → `init_from_params()` + `parameter_internal`; starting volumes → `init_state()` |
 | PRMSSoilzone | `hydrology/prms_soilzone.py` | 1e-10 observed (upstream's own is 5e-6) | First `mutable_input` (`sroff`/`sroff_vol`: dunnian added in place) |
 | PRMSCanopy | `hydrology/prms_canopy.py` | 1e-12 (upstream's own); mass budget 1e-12 | `pptmix` = written-never-read mutable input; hru_type hardwired all-LAND upstream |
 | PRMSSnow | `hydrology/prms_snow.py` | **bit-identical** to upstream's numpy path (A/B) except on the 9 hrus of the one deliberate departure (freeh2o accumulated, not overwritten, on rain into a cold pack); 1e-3 on upstream's own 5-var list vs answers; mass budget 1e-12 | See "The snow story" below |
@@ -107,9 +107,11 @@ end in `tests/test_prms_channel{,_mpi}.py`.
   (`compute_infil`, `calc_calin`, …) stay separate njit functions with
   verbatim signatures, called directly (not passed as arguments).
 - **Init-time work** (`basin_init`, `_initialize_soilzone_data`,
-  muskingum coefficients, solar tables) → `initialize()` +
+  muskingum coefficients, solar tables) → `init_from_params()` +
   `kind="parameter_internal"` (frozen after) or the factory pattern;
-  init-time numpy staging is fine there.
+  init-time numpy staging is fine there. Private arrays are created
+  in `allocate()`; starting state is set in `init_state(time)`
+  (`docs/design_description.md` "Three init hooks").
 - **NOT ported, everywhere**: adapters, `calc_method` switch (numba is
   THE path), `verbose`, `fastmath=True` (strict IEEE here — see below),
   unused declared parameters, dead upstream code. (Budget and restart
@@ -305,16 +307,24 @@ ag_frac (annual Jan-1 changes via dyn_ag_frac.param).
 
 - **PRMSRunoffAg(PRMSRunoff)** -- additive extension (upstream
   interface is a strict superset). `hru_perv`/`hru_frac_perv` are
-  redeclared per-step variables (declaration override); the kernel
-  sees the previous step's areas while `ag_frac` scalars are current
-  (upstream ordering). `intcp_changeover_in_net_rain` became a
+  redeclared per-step variables (declaration override). The kernel
+  `_areas` computes them and `ag_area` from the CURRENT step's
+  `ag_frac` before the main kernel; they are results of the input,
+  not state. This DEPARTS from pywatershed, whose kernel sees the
+  previous step's areas (it updates them after); the two agree
+  whenever `ag_frac` is unchanged from the previous step
+  (`docs/MAINTENANCE.md`). `intcp_changeover_in_net_rain` became a
   RUNTIME kernel argument across the runoff family (upstream's own
   signature): GSFLOW mode (True, fgr) skips the changeover block and
   flips the rain-on-snow check to `not (net_ppt - net_snow > 0)`.
 - **PRMSSoilzoneAg(Process)** -- sibling family core (see the module
   docstring for the full extend-vs-sibling rationale). One shared
   dual-area kernel with a runtime `iter_aet_flag`; reuses the four
-  plain-soilzone njit helpers.
+  plain-soilzone njit helpers. `_update_areas` writes the areas from
+  the current `ag_frac` and takes the old ones from the restart
+  variable `ag_frac_prev` (the `ag_frac` the storages are distributed
+  for; nan on a cold start = nothing to move), recomputed with
+  upstream's arithmetic, so the redistribution values are upstream's.
 - **PRMSSoilzoneAgObsET(PRMSSoilzoneAg)** -- adds observed-AET
   iteration: It0 state save/restore around the SAME kernel, with the
   irrigation-adjustment block extracted to its own njit kernel and
@@ -440,17 +450,22 @@ flow-driven variables see the knife-edge cascade).
   full-chain test at one knife-edge HRU) are prognostic; ours flags
   all of them.
   **Ag family DONE (Aug 2026)** (tests/test_restart_processes_ag.py,
-  fgr): the ag wrinkle is the PER-STEP AREAS -- under time-varying
-  ag_frac both processes read the PREVIOUS step's areas at step
-  start and the istep0 area blocks are time-zero-gated, so
-  hru_perv/hru_frac_perv/ag_area (RunoffAg) and
-  hru_area_perv/ag_area (SoilzoneAg) are flagged as prognostic
-  markers though not storages; SoilzoneAg storages mirror plain
+  fgr): the ag wrinkle is the PER-STEP AREAS. REVISED Nov 13, 2026:
+  the areas are results of the current step's input ag_frac in both
+  processes and carry NO restart flag (they were flagged as
+  prognostic markers until then). RunoffAg adds no restart state.
+  SoilzoneAg adds one, ag_frac_prev (the ag_frac its storages are
+  distributed for); its storages mirror plain
   soilzone (incl. derived soil_lower; ag_soil_lower for symmetry);
   ObsET adds NOTHING (It0 buffers = per-step scratch, overwritten
   before any read). Tests: flag pins + the live RunoffAg->SoilzoneAg
   chain (spinup/static ag_frac, 90 d) + ObsET standalone (DYNAMIC
-  ag_frac + AET iteration, 120 d), all bit-identical.
+  ag_frac + AET iteration, 120 d), all bit-identical; and three
+  resumes by SUPPLIED state: RunoffAg with ag_frac halved from the
+  resume step (pins the area timing), ObsET across the change date
+  (fails without ag_frac_prev), and the live chain under dynamic
+  ag_frac across the change date with both budgets in error mode
+  (checks the redistributed depths against the kernel's arithmetic).
   **FlowGraph node types DONE (Aug 2026)**
   (tests/test_restart_flow_graph.py): flags live on the node types'
   shared ``fields`` DataArrayMeta objects, so every composed class
@@ -523,7 +538,7 @@ flow-driven variables see the knife-edge cascade).
   parameters_dis_hru.nc; CBH float32 -> f64 widening happens at
   input preparation (exact; a translator responsibility). IC status
   (Nov 2026; `DataArrayMeta.initial` REMOVED): initial state = the
-  `restart=True` variables. `initialize()` sets each one's default;
+  `restart=True` variables. `init_state()` sets each one's default;
   an array supplied in the process_dict entry under the variable's
   OWN name is written after the init hooks and overrides it (the
   restart restore path, `_restore_grid_var`); supplied state +
@@ -536,7 +551,7 @@ flow-driven variables see the knife-edge cascade).
   and is not state). Under MPI the supplied arrays are FULL extent
   in process_dict (not in the combined input file); each rank takes
   its block. Other `*_init*` names are ordinary PARAMETERS that
-  initialize() reads to compute defaults. nan is a legitimate state
+  init_state() reads to compute defaults. nan is a legitimate state
   value (stream temp's never-has-flow marker, FlowGraph union rows,
   STARFIT `lake_storage`), so supplied or default state is NOT
   checked for nan by the framework. A process may instead declare

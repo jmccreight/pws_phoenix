@@ -7,7 +7,7 @@ file (params + dis vars + the 11 forcings, including the MUTABLE
 sroff/sroff_vol); `ssres_flow` streams to parallel NetCDF and is
 validated globally over all timesteps; a representative set of the
 remaining variables is validated from final state, gathered
-rank-ordered. Soilzone's initialize() (the derived-parameter +
+rank-ordered. Soilzone's init_from_params() (the derived-parameter +
 initial-state block) is purely per-element, so each rank derives its
 own rows.
 

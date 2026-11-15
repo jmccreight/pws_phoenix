@@ -219,7 +219,7 @@ class StarfitSourceSinkFlowNode:
     finalize = _finalize
 
     @staticmethod
-    def initialize_type(dataset, n_substeps, io_in_cfs) -> None:
+    def init_from_params_type(dataset, n_substeps, io_in_cfs) -> None:
         initialize_starfit_type(
             dataset,
             n_substeps,

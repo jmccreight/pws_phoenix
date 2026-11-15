@@ -20,7 +20,7 @@ step, 267 us/day on drb's 456 segments):
 - shday is SPLIT at its rprnvg call into _shday_statics (the
   sunrise/sunset geometry: depends on latitude, declination = day of
   year, azimuth and bank altitudes -- 36% of the cost, tabulated per
-  (day of year, segment) by PRMSStreamTemp.initialize) and
+  (day of year, segment) by PRMSStreamTemp.init_from_params) and
   _shday_from_statics (the seg_width-dependent vegetation shade, per
   step). _shday remains their composition, operation-identical to
   upstream.
@@ -186,7 +186,7 @@ def _shday_statics(seg_lat, declination, azrh, alte, altw, maxiter_sntemp):
     rprnvg in each branch), the topographic shade and the level-plain
     potential. Depends on nothing that changes within a run, so
     PRMSStreamTemp tabulates it per (day of year, segment) at
-    initialize (Oct 2026) and the per-step work is _shday_from_statics.
+    init_from_params (Oct 2026) and the per-step work is _shday_from_statics.
     """
     coso = math.cos(seg_lat)
     if coso == 0.0:

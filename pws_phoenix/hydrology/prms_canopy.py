@@ -330,7 +330,7 @@ class PRMSCanopy(Process):
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_state(self, time: Time) -> None:
         refs = self._refs
         for name in (
             "net_ppt",

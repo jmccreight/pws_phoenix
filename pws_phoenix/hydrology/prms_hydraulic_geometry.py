@@ -19,7 +19,7 @@ comment: "I dont love the design"). Here the direction is fixed with
 the declaration-override seam: ``PRMSHydraulicGeometryWidthOnly`` is
 the core, declaring ``depth_alpha``/``depth_m`` as
 ``parameter_internal`` filled with the strmflow_character defaults
-(0.27 / 0.39) at initialize; ``PRMSHydraulicGeometryFull`` EXTENDS it
+(0.27 / 0.39) at init_from_params; ``PRMSHydraulicGeometryFull`` EXTENDS it
 by overriding those two declarations to kind="parameter" (supplied)
 and no-op'ing the default fill. One shared kernel. NHM parameter
 files (drb included) carry only the width parameters, so WidthOnly is
@@ -149,7 +149,10 @@ class PRMSHydraulicGeometryWidthOnly(Process):
         description="Segment residence time [seconds]",
     )
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
+        self._set_depth_params()
+
+    def init_state(self, time: Time) -> None:
         refs = self._refs
         for name in (
             "seg_flow_width",
@@ -159,7 +162,6 @@ class PRMSHydraulicGeometryWidthOnly(Process):
             "seg_res_time",
         ):
             refs[name][:] = 0.0
-        self._set_depth_params()
 
     def _set_depth_params(self) -> None:
         """The strmflow_character defaults (Full overrides to no-op:

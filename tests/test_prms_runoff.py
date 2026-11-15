@@ -74,7 +74,7 @@ ANSWER_NAMES = (
     "dprst_stor_hru",
     "dprst_stor_hru_change",
 )
-# static after initialize(): validated once vs the answers' step 0
+# static after init_from_params(): validated once vs the answers' step 0
 STATIC_ANSWER_NAMES = (
     "dprst_area_clos",
     "dprst_area_open_max",

@@ -35,7 +35,8 @@ when it isn't.**
   noise against parity). Both rejected.
 
 - **Inheritance would buy only the declaration blocks.** Every method
-  is overridden anyway: ``initialize`` (dual-area, ag storages),
+  is overridden anyway: ``init_from_params`` / ``init_state``
+  (dual-area, ag storages),
   ``advance`` (ag prevs), the kernel (dual-area logic is threaded
   through the entire loop, not appended to it), ``calculate``. The
   real computational sharing is at the module njit-helper level
@@ -97,11 +98,23 @@ Port notes (upstream quirks preserved verbatim)
   argument is never read under False (the core passes
   ag_irrigation_add again -- benign aliasing, neither is written).
 - ``hru_area_perv``/``hru_frac_perv``/``ag_area``/``soil_moist_tot``
-  are per-step VARIABLES (dynamic ag_frac): the upstream
-  itime_step==0 area block runs at istep0 in calculate() (ag_frac is
-  an input, not fed at initialize); ``_update_areas`` (upstream
-  _update_ag_areas, np.isclose semantics hand-coded) runs each step
-  BEFORE the kernel and redistributes storages when ag_frac changes.
+  are per-step VARIABLES, results of the input ag_frac and nothing
+  more: ``_update_areas`` (upstream _update_ag_areas, np.isclose
+  semantics hand-coded) computes the areas from the CURRENT step's
+  ag_frac each step BEFORE the kernel. They have no starting value
+  and are not restart state, so upstream's itime_step==0 area block
+  is not ported.
+- The one piece of state the areas need is ``ag_frac_prev``: the
+  ag_frac the storages are distributed for. ``_update_areas``
+  compares it with the current ag_frac, moves water between the
+  storages when they differ, then sets it to the current value.
+  Upstream keeps the previous step's ``ag_area`` and
+  ``hru_area_perv`` for this instead. That cannot work here:
+  PRMSRunoffAg declares ``ag_area`` too, two declarations of one
+  name on a shared grid are ONE array, and PRMSRunoffAg writes this
+  step's value before this class reads it. The old areas are
+  recomputed from ``ag_frac_prev`` with upstream's arithmetic, so the
+  values are upstream's.
 """
 
 import numba
@@ -314,7 +327,7 @@ class PRMSSoilzoneAg(Process):
         units="fraction",
     )
 
-    # -- derived parameters (initialize(); STATIC, no ag_frac dep) --
+    # -- derived parameters (init_from_params(); STATIC, no ag_frac dep) --
     soil_rechr_max = _meta(
         "parameter_internal",
         "Recharge-zone maximum storage [in] (clamped)",
@@ -412,14 +425,20 @@ class PRMSSoilzoneAg(Process):
     )
 
     # -- variables: areas (per-step under dynamic ag_frac) --
-    # per-step areas: _update_areas reads the PREVIOUS step's areas
-    # (old_ag_frac = ag_area/harea), and _istep0_areas only runs at
-    # time zero -- so a restart must restore them (restart=True is a
-    # prognostic-state marker here, not a storage)
+    # NOT restart state: _update_areas computes them from the current
+    # ag_frac before anything reads them. What a restart must restore
+    # is ag_frac_prev (restart=True is a prognostic-state marker
+    # there, not a storage).
+    ag_frac_prev = _meta(
+        "variable",
+        "ag_frac the storages are distributed for: the previous "
+        "step's when _update_areas reads it; nan = cold start [-]",
+        restart=True,
+        units="fraction",
+    )
     hru_area_perv = _meta(
         "variable",
         "Pervious HRU area [acres] (per-step)",
-        restart=True,
         units="acres",
     )
     hru_frac_perv = _meta(
@@ -430,7 +449,6 @@ class PRMSSoilzoneAg(Process):
     ag_area = _meta(
         "variable",
         "Agricultural HRU area [acres] (per-step)",
-        restart=True,
         units="acres",
     )
 
@@ -701,11 +719,13 @@ class PRMSSoilzoneAg(Process):
     }
     budgets = {"mass": _MASS_BUDGET}
 
-    # initialize() computes soil_lower = soil_moist - soil_rechr and
+    # init_state() computes soil_lower = soil_moist - soil_rechr and
     # clamps soil_rechr <= soil_moist from the DEFAULTS (see
     # Process.state_groups)
     state_groups = (("soil_moist", "soil_rechr", "soil_lower"),)
 
+    # zeroed by init_state(); ag_frac_prev is NOT here: init_state()
+    # sets it to nan (see _update_areas)
     _ZERO_VARS = (
         "hru_area_perv",
         "hru_frac_perv",
@@ -785,188 +805,18 @@ class PRMSSoilzoneAg(Process):
 
     # ------------------------------------------------------------------
     # Initialization (_initialize_soilzone_ag_data, the parts that do
-    # NOT depend on ag_frac; area block runs at istep0 in calculate)
+    # NOT depend on ag_frac; its area block is not ported -- the areas
+    # are computed every step, see _update_areas)
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
-        refs = self._refs
-        for name in self._ZERO_VARS:
-            refs[name][:] = 0.0
-
-        hru_type = refs["hru_type"]
-        hru_area = refs["hru_area"]
-
-        refs["hru_area_imperv"][:] = refs["hru_percent_imperv"] * hru_area
-
-        soil_rechr_max = refs["soil_rechr_max"]
-        soil_rechr_max[:] = (
-            refs["soil_rechr_max_frac"] * refs["soil_moist_max"]
-        )
-        ag_soil_rechr_max = refs["ag_soil_rechr_max"]
-        ag_soil_rechr_max[:] = (
-            refs["ag_soil_rechr_max_frac"] * refs["ag_soil_moist_max"]
-        )
-
-        wh_inactive_or_lake = np.where(
-            (hru_type == _INACTIVE) | (hru_type == _LAKE)
-        )
-        sat_threshold = refs["_sat_threshold"]
-        sat_threshold[:] = refs["sat_threshold"]
-        sat_threshold[wh_inactive_or_lake] = 0.0
-        pref_flow_den = refs["_pref_flow_den"]
-        pref_flow_den[:] = refs["pref_flow_den"]
-        pref_flow_den[np.where(hru_type != 1)] = 0.0  # non-LAND
-
-        pfif = refs["pref_flow_infil_frac"]
-        if (pfif.min() < 0.0) or (pfif.max() > 1.0):
-            raise ValueError(
-                "Values of pref_flow_infil_frac outside of [0,1]."
-            )
-
-        # -- initial states (no-restart path) --
-        soil_moist = refs["soil_moist"]
-        soil_rechr = refs["soil_rechr"]
-        ag_soil_moist = refs["ag_soil_moist"]
-        ag_soil_rechr = refs["ag_soil_rechr"]
-        soil_moist[:] = refs["soil_moist_init_frac"] * refs["soil_moist_max"]
-        soil_rechr[:] = refs["soil_rechr_init_frac"] * soil_rechr_max
-        ag_soil_moist[:] = (
-            refs["ag_soil_moist_init_frac"] * refs["ag_soil_moist_max"]
-        )
-        ag_soil_rechr[:] = refs["ag_soil_rechr_init_frac"] * ag_soil_rechr_max
-
-        ssres_stor = refs["ssres_stor"]
-        ssres_stor[:] = refs["ssstor_init_frac"] * sat_threshold
-        ssres_stor[wh_inactive_or_lake] = 0.0
-
-        # no ag storage on LAKE|INACTIVE (ag_frac==0 asserted at istep0)
-        ag_soil_moist[wh_inactive_or_lake] = 0.0
-        ag_soil_rechr[wh_inactive_or_lake] = 0.0
-
-        # upstream order: ag_soil_lower_stor_max from the PRE-clamp
-        # ag_soil_rechr_max
-        refs["ag_soil_lower_stor_max"][:] = (
-            refs["ag_soil_moist_max"] - ag_soil_rechr_max
-        )
-
-        # -- upstream "adjust_parameters" block, exact order. TRUE
-        # parameter edits cannot happen against frozen parameters --
-        if (refs["soil_moist_max"] < 1.0e-5).any():
-            raise NotImplementedError(
-                "PRMSSoilzoneAg: soil_moist_max < 1e-5 requires upstream's "
-                "parameter adjustment, not ported (frozen parameters)"
-            )
-        if (refs["ag_soil_moist_max"] < 1.0e-5).any():
-            raise NotImplementedError(
-                "PRMSSoilzoneAg: ag_soil_moist_max < 1e-5 requires "
-                "upstream's parameter adjustment, not ported"
-            )
-        soil_rechr_max[:] = np.where(
-            soil_rechr_max < 1.0e-5, 1.0e-5, soil_rechr_max
-        )
-        ag_soil_rechr_max[:] = np.where(
-            ag_soil_rechr_max < 1.0e-5, 1.0e-5, ag_soil_rechr_max
-        )
-        soil_rechr_max[:] = np.where(
-            soil_rechr_max > refs["soil_moist_max"],
-            refs["soil_moist_max"],
-            soil_rechr_max,
-        )
-        ag_soil_rechr_max[:] = np.where(
-            ag_soil_rechr_max > refs["ag_soil_moist_max"],
-            refs["ag_soil_moist_max"],
-            ag_soil_rechr_max,
-        )
-        soil_rechr[:] = np.where(
-            soil_rechr > soil_rechr_max, soil_rechr_max, soil_rechr
-        )
-        ag_soil_rechr[:] = np.where(
-            ag_soil_rechr > ag_soil_rechr_max,
-            ag_soil_rechr_max,
-            ag_soil_rechr,
-        )
-        soil_moist[:] = np.where(
-            soil_moist > refs["soil_moist_max"],
-            refs["soil_moist_max"],
-            soil_moist,
-        )
-        ag_soil_moist[:] = np.where(
-            ag_soil_moist > refs["ag_soil_moist_max"],
-            refs["ag_soil_moist_max"],
-            ag_soil_moist,
-        )
-        soil_rechr[:] = np.where(
-            soil_rechr > soil_moist, soil_moist, soil_rechr
-        )
-        ag_soil_rechr[:] = np.where(
-            ag_soil_rechr > ag_soil_moist, ag_soil_moist, ag_soil_rechr
-        )
-        ssres_stor[:] = np.where(
-            ssres_stor > sat_threshold, sat_threshold, ssres_stor
-        )
-
-        # -- preferential-flow thresholds by hru_type --
-        pref_flow_thrsh = refs["pref_flow_thrsh"]
-        pref_flow_max = refs["pref_flow_max"]
-        pref_flow_thrsh[:] = 0.0
-        pref_flow_max[:] = 0.0
-        wh_swale = np.where(hru_type == _SWALE)
-        wh_land = np.where(hru_type == 1)
-        pref_flow_thrsh[wh_swale] = sat_threshold[wh_swale]
-        pref_flow_thrsh[wh_land] = sat_threshold[wh_land] * (
-            1.0 - pref_flow_den[wh_land]
-        )
-        pref_flow_max[wh_land] = (
-            sat_threshold[wh_land] - pref_flow_thrsh[wh_land]
-        )
-
-        # -- split initial ssres_stor into slow / preferential --
-        slow_stor = refs["slow_stor"]
-        pref_flow_stor = refs["pref_flow_stor"]
-        wh_land_or_swale = np.where((hru_type == 1) | (hru_type == _SWALE))
-        slow_stor[wh_land_or_swale] = np.minimum(
-            ssres_stor[wh_land_or_swale], pref_flow_thrsh[wh_land_or_swale]
-        )
-        pref_flow_stor[wh_land_or_swale] = (
-            ssres_stor[wh_land_or_swale] - slow_stor[wh_land_or_swale]
-        )
-
-        # SCALAR flag (upstream; unlike plain soilzone's per-HRU
-        # array). NOTE MPI: this is any() over the LOCAL rows;
-        # upstream's is global-any. Identical whenever pref_flow_den
-        # is uniformly zero/nonzero across ranks (fgr_ag_2yr: all
-        # zero); a mixed domain would need a global reduction, but
-        # initialize() is LOCAL by contract -- revisit if such a
-        # domain arrives (the flag gates the topfr carve-out even
-        # where den == 0, so local!=global WOULD change answers).
-        self._pref_flow_flag = bool((pref_flow_den > 0.0).any())
-
-        refs["soil_lower"][:] = soil_moist - soil_rechr
-        soil_lower_max = refs["soil_lower_max"]
-        soil_lower_max[:] = refs["soil_moist_max"] - soil_rechr_max
-        wh_soil_lower_stor = np.where(soil_lower_max > 0.0)
-        refs["soil_lower_ratio"][wh_soil_lower_stor] = (
-            refs["soil_lower"][wh_soil_lower_stor]
-            / soil_lower_max[wh_soil_lower_stor]
-        )
-
-        # -- *_prev seeds --
-        refs["soil_rechr_prev"][:] = soil_rechr
-        refs["soil_lower_prev"][:] = refs["soil_lower"]
-        refs["ag_soil_moist_prev"][:] = ag_soil_moist
-        refs["ag_soil_rechr_prev"][:] = ag_soil_rechr
-        refs["pref_flow_stor_prev"][:] = pref_flow_stor
-        refs["slow_stor_prev"][:] = slow_stor
-
-        # -- kernel argument tuples, assembled ONCE (the refs never
-        # change: DEVELOPER.md "Per-step data access"); the family
-        # tuple needs _pref_flow_flag, its iterating form AET_external
-        # (an ObsET-leaf field) --
-        flags = (False, True) if "AET_external" in refs else (False,)
-        self._family_args = {
-            flag: self._build_family_args(flag) for flag in flags
-        }
+    def allocate(self) -> None:
+        """The kernel argument tuples that hold field references only,
+        assembled ONCE (the refs never change: DEVELOPER.md "Per-step
+        data access"). The family kernel's tuple also carries
+        ``_pref_flow_flag``, which is derived from a parameter, so
+        init_from_params() builds that one."""
         self._update_areas_args = self._hold(
+            "ag_frac_prev",
             "ag_area",
             "hru_area_perv",
             "hru_frac_perv",
@@ -1042,6 +892,224 @@ class PRMSSoilzoneAg(Process):
             "infil_ag",
         )
 
+    def init_from_params(self) -> None:
+        """The parameter half of upstream
+        ``_initialize_soilzone_ag_data``: derived maxima, the
+        edited-copy parameters, the parameter checks, the
+        preferential-flow thresholds and flag."""
+        refs = self._refs
+        hru_type = refs["hru_type"]
+        hru_area = refs["hru_area"]
+
+        refs["hru_area_imperv"][:] = refs["hru_percent_imperv"] * hru_area
+
+        soil_rechr_max = refs["soil_rechr_max"]
+        soil_rechr_max[:] = (
+            refs["soil_rechr_max_frac"] * refs["soil_moist_max"]
+        )
+        ag_soil_rechr_max = refs["ag_soil_rechr_max"]
+        ag_soil_rechr_max[:] = (
+            refs["ag_soil_rechr_max_frac"] * refs["ag_soil_moist_max"]
+        )
+
+        wh_inactive_or_lake = np.where(
+            (hru_type == _INACTIVE) | (hru_type == _LAKE)
+        )
+        sat_threshold = refs["_sat_threshold"]
+        sat_threshold[:] = refs["sat_threshold"]
+        sat_threshold[wh_inactive_or_lake] = 0.0
+        pref_flow_den = refs["_pref_flow_den"]
+        pref_flow_den[:] = refs["pref_flow_den"]
+        pref_flow_den[np.where(hru_type != 1)] = 0.0  # non-LAND
+
+        pfif = refs["pref_flow_infil_frac"]
+        if (pfif.min() < 0.0) or (pfif.max() > 1.0):
+            raise ValueError(
+                "Values of pref_flow_infil_frac outside of [0,1]."
+            )
+
+        # upstream order: ag_soil_lower_stor_max from the PRE-clamp
+        # ag_soil_rechr_max
+        refs["ag_soil_lower_stor_max"][:] = (
+            refs["ag_soil_moist_max"] - ag_soil_rechr_max
+        )
+
+        # -- upstream "adjust_parameters" block, the parameter clamps
+        # in its order (the state clamps it interleaves are in
+        # init_state()). TRUE parameter edits cannot happen against
+        # frozen parameters --
+        if (refs["soil_moist_max"] < 1.0e-5).any():
+            raise NotImplementedError(
+                "PRMSSoilzoneAg: soil_moist_max < 1e-5 requires upstream's "
+                "parameter adjustment, not ported (frozen parameters)"
+            )
+        if (refs["ag_soil_moist_max"] < 1.0e-5).any():
+            raise NotImplementedError(
+                "PRMSSoilzoneAg: ag_soil_moist_max < 1e-5 requires "
+                "upstream's parameter adjustment, not ported"
+            )
+        soil_rechr_max[:] = np.where(
+            soil_rechr_max < 1.0e-5, 1.0e-5, soil_rechr_max
+        )
+        ag_soil_rechr_max[:] = np.where(
+            ag_soil_rechr_max < 1.0e-5, 1.0e-5, ag_soil_rechr_max
+        )
+        soil_rechr_max[:] = np.where(
+            soil_rechr_max > refs["soil_moist_max"],
+            refs["soil_moist_max"],
+            soil_rechr_max,
+        )
+        ag_soil_rechr_max[:] = np.where(
+            ag_soil_rechr_max > refs["ag_soil_moist_max"],
+            refs["ag_soil_moist_max"],
+            ag_soil_rechr_max,
+        )
+
+        # -- preferential-flow thresholds by hru_type --
+        pref_flow_thrsh = refs["pref_flow_thrsh"]
+        pref_flow_max = refs["pref_flow_max"]
+        pref_flow_thrsh[:] = 0.0
+        pref_flow_max[:] = 0.0
+        wh_swale = np.where(hru_type == _SWALE)
+        wh_land = np.where(hru_type == 1)
+        pref_flow_thrsh[wh_swale] = sat_threshold[wh_swale]
+        pref_flow_thrsh[wh_land] = sat_threshold[wh_land] * (
+            1.0 - pref_flow_den[wh_land]
+        )
+        pref_flow_max[wh_land] = (
+            sat_threshold[wh_land] - pref_flow_thrsh[wh_land]
+        )
+
+        # SCALAR flag (upstream; unlike plain soilzone's per-HRU
+        # array). NOTE MPI: this is any() over the LOCAL rows;
+        # upstream's is global-any. Identical whenever pref_flow_den
+        # is uniformly zero/nonzero across ranks (fgr_ag_2yr: all
+        # zero); a mixed domain would need a global reduction, but
+        # init_from_params() is LOCAL by contract -- revisit if such a
+        # domain arrives (the flag gates the topfr carve-out even
+        # where den == 0, so local!=global WOULD change answers).
+        self._pref_flow_flag = bool((pref_flow_den > 0.0).any())
+
+        refs["soil_lower_max"][:] = refs["soil_moist_max"] - soil_rechr_max
+
+        # -- the family kernel's argument tuples: rebuilt here because
+        # they carry _pref_flow_flag (a tuple of references, no array
+        # is allocated); the iterating form needs AET_external (an
+        # ObsET-leaf field) --
+        flags = (False, True) if "AET_external" in refs else (False,)
+        self._family_args = {
+            flag: self._build_family_args(flag) for flag in flags
+        }
+
+    def init_state(self, time: Time) -> None:
+        """The state half of upstream ``_initialize_soilzone_ag_data``
+        (the no-restart path), in its order: starting storages from
+        the ``*_init_frac`` parameters and the maxima, upstream's
+        value clamps, and what follows from them. The areas need the
+        input ``ag_frac`` and are computed in calculate(), every step
+        (see _update_areas)."""
+        refs = self._refs
+        for name in self._ZERO_VARS:
+            refs[name][:] = 0.0
+        # cold start: the storages are distributed for whatever
+        # ag_frac the first step brings (see _update_areas)
+        refs["ag_frac_prev"][:] = np.nan
+
+        hru_type = refs["hru_type"]
+        wh_inactive_or_lake = np.where(
+            (hru_type == _INACTIVE) | (hru_type == _LAKE)
+        )
+        sat_threshold = refs["_sat_threshold"]
+        soil_rechr_max = refs["soil_rechr_max"]
+        ag_soil_rechr_max = refs["ag_soil_rechr_max"]
+
+        # -- initial states (no-restart path). Upstream seeds the two
+        # recharge storages from their maxima BEFORE it clamps the
+        # maxima; the frozen soil_rechr_max / ag_soil_rechr_max hold
+        # the clamped values, so the pre-clamp products are recomputed
+        # here, in place --
+        soil_moist = refs["soil_moist"]
+        soil_rechr = refs["soil_rechr"]
+        ag_soil_moist = refs["ag_soil_moist"]
+        ag_soil_rechr = refs["ag_soil_rechr"]
+        soil_moist[:] = refs["soil_moist_init_frac"] * refs["soil_moist_max"]
+        soil_rechr[:] = refs["soil_rechr_max_frac"] * refs["soil_moist_max"]
+        soil_rechr *= refs["soil_rechr_init_frac"]
+        ag_soil_moist[:] = (
+            refs["ag_soil_moist_init_frac"] * refs["ag_soil_moist_max"]
+        )
+        ag_soil_rechr[:] = (
+            refs["ag_soil_rechr_max_frac"] * refs["ag_soil_moist_max"]
+        )
+        ag_soil_rechr *= refs["ag_soil_rechr_init_frac"]
+
+        ssres_stor = refs["ssres_stor"]
+        ssres_stor[:] = refs["ssstor_init_frac"] * sat_threshold
+        ssres_stor[wh_inactive_or_lake] = 0.0
+
+        # no ag storage on LAKE|INACTIVE (ag_frac == 0 there is
+        # asserted on the first step)
+        ag_soil_moist[wh_inactive_or_lake] = 0.0
+        ag_soil_rechr[wh_inactive_or_lake] = 0.0
+
+        # -- the state clamps of upstream's "adjust_parameters" block,
+        # in its order, against the clamped maxima --
+        soil_rechr[:] = np.where(
+            soil_rechr > soil_rechr_max, soil_rechr_max, soil_rechr
+        )
+        ag_soil_rechr[:] = np.where(
+            ag_soil_rechr > ag_soil_rechr_max,
+            ag_soil_rechr_max,
+            ag_soil_rechr,
+        )
+        soil_moist[:] = np.where(
+            soil_moist > refs["soil_moist_max"],
+            refs["soil_moist_max"],
+            soil_moist,
+        )
+        ag_soil_moist[:] = np.where(
+            ag_soil_moist > refs["ag_soil_moist_max"],
+            refs["ag_soil_moist_max"],
+            ag_soil_moist,
+        )
+        soil_rechr[:] = np.where(
+            soil_rechr > soil_moist, soil_moist, soil_rechr
+        )
+        ag_soil_rechr[:] = np.where(
+            ag_soil_rechr > ag_soil_moist, ag_soil_moist, ag_soil_rechr
+        )
+        ssres_stor[:] = np.where(
+            ssres_stor > sat_threshold, sat_threshold, ssres_stor
+        )
+
+        # -- split initial ssres_stor into slow / preferential --
+        slow_stor = refs["slow_stor"]
+        pref_flow_stor = refs["pref_flow_stor"]
+        pref_flow_thrsh = refs["pref_flow_thrsh"]
+        wh_land_or_swale = np.where((hru_type == 1) | (hru_type == _SWALE))
+        slow_stor[wh_land_or_swale] = np.minimum(
+            ssres_stor[wh_land_or_swale], pref_flow_thrsh[wh_land_or_swale]
+        )
+        pref_flow_stor[wh_land_or_swale] = (
+            ssres_stor[wh_land_or_swale] - slow_stor[wh_land_or_swale]
+        )
+
+        refs["soil_lower"][:] = soil_moist - soil_rechr
+        soil_lower_max = refs["soil_lower_max"]
+        wh_soil_lower_stor = np.where(soil_lower_max > 0.0)
+        refs["soil_lower_ratio"][wh_soil_lower_stor] = (
+            refs["soil_lower"][wh_soil_lower_stor]
+            / soil_lower_max[wh_soil_lower_stor]
+        )
+
+        # -- *_prev seeds --
+        refs["soil_rechr_prev"][:] = soil_rechr
+        refs["soil_lower_prev"][:] = refs["soil_lower"]
+        refs["ag_soil_moist_prev"][:] = ag_soil_moist
+        refs["ag_soil_rechr_prev"][:] = ag_soil_rechr
+        refs["pref_flow_stor_prev"][:] = pref_flow_stor
+        refs["slow_stor_prev"][:] = slow_stor
+
     # ------------------------------------------------------------------
     # Computation
     # ------------------------------------------------------------------
@@ -1062,6 +1130,7 @@ class PRMSSoilzoneAg(Process):
     @numba.njit
     def _update_areas(
         # updated in place
+        ag_frac_prev: np.ndarray,
         ag_area: np.ndarray,
         hru_area_perv: np.ndarray,
         hru_frac_perv: np.ndarray,
@@ -1078,11 +1147,25 @@ class PRMSSoilzoneAg(Process):
         hru_type: np.ndarray,
     ) -> None:
         """upstream _update_ag_areas per element (dprst ACTIVE port);
-        np.isclose semantics hand-coded: |a-b| <= 1e-8 + 1e-5*|b|."""
+        np.isclose semantics hand-coded: |a-b| <= 1e-8 + 1e-5*|b|.
+
+        The areas are written from the CURRENT ag_frac. The old areas
+        that upstream reads back from its own arrays are recomputed
+        here from ag_frac_prev, with upstream's arithmetic (so
+        old_ag_frac is (ag_frac_prev * area) / area, upstream's
+        ag_area / hru_area, not ag_frac_prev itself). nan in
+        ag_frac_prev is a cold start: the storages are taken as
+        distributed for the current ag_frac, and nothing moves."""
         for hh in range(hru_area.shape[0]):
             harea = hru_area[hh]
-            old_ag_frac = ag_area[hh] / harea
-            old_perv = hru_area_perv[hh]
+            prev_frac = ag_frac_prev[hh]
+            if np.isnan(prev_frac):
+                prev_frac = ag_frac[hh]
+            old_ag_area = prev_frac * harea
+            old_ag_frac = old_ag_area / harea
+            old_perv = harea - hru_area_imperv[hh]
+            if hru_type[hh] != _INACTIVE:
+                old_perv = old_perv - dprst_frac[hh] * harea - old_ag_area
 
             new_ag_area = ag_frac[hh] * harea
             new_perv = harea - hru_area_imperv[hh]
@@ -1134,6 +1217,7 @@ class PRMSSoilzoneAg(Process):
             hru_area_perv[hh] = new_perv
             if hru_type[hh] != _INACTIVE:
                 hru_frac_perv[hh] = new_perv / harea
+            ag_frac_prev[hh] = ag_frac[hh]
 
     @staticmethod
     @numba.njit
@@ -1735,8 +1819,8 @@ class PRMSSoilzoneAg(Process):
 
     def _build_family_args(self, iter_aet_flag: bool) -> tuple:
         """The family kernel's ~80 arguments, assembled ONCE per flag
-        value at the end of initialize() (see the _family_args note
-        there)."""
+        value at the end of init_from_params() (see the _family_args
+        note there)."""
         refs = self._refs
         if iter_aet_flag:
             aet_external = refs["AET_external"]
@@ -1832,49 +1916,25 @@ class PRMSSoilzoneAg(Process):
         )
 
     def _pre_kernel(self) -> None:
-        """istep0 areas (once) + per-step area update + pre lines."""
+        """Per-step area update + pre lines."""
         self._update_areas(*self._update_areas_args)
         self._pre(*self._pre_args)
 
-    def _istep0_areas(self) -> None:
-        """upstream _initialize_soilzone_ag_data area block: runs at
-        time zero in calculate() (ag_frac now fed); once-only numpy
-        staging."""
+    def _check_ag_frac(self) -> None:
+        """GSFLOW zeroes ag_frac on LAKE and INACTIVE HRUs; upstream
+        (and this port) will NOT edit inputs -- assert instead, on the
+        first step (once-only numpy staging)."""
         refs = self._refs
         hru_type = refs["hru_type"]
-        hru_area = refs["hru_area"]
-
         wh_no_ag = np.where((hru_type == _LAKE) | (hru_type == _INACTIVE))
-        # GSFLOW zeroes ag_frac on this mask; upstream (and this port)
-        # will NOT edit inputs -- assert instead
         assert (refs["ag_frac"][wh_no_ag] == 0.0).all()
-
-        np.multiply(refs["ag_frac"], hru_area, out=refs["ag_area"])
-        hru_area_perv = refs["hru_area_perv"]
-        hru_area_perv[:] = hru_area - refs["hru_area_imperv"]
-        wh_active = np.where(hru_type != _INACTIVE)
-        dprst_area_max = refs["dprst_frac"] * hru_area
-        hru_area_perv[wh_active] = (
-            hru_area_perv[wh_active]
-            - dprst_area_max[wh_active]
-            - refs["ag_area"][wh_active]
-        )
-        refs["hru_frac_perv"][:] = 0.0
-        refs["hru_frac_perv"][wh_active] = (
-            hru_area_perv[wh_active] / hru_area[wh_active]
-        )
-        refs["soil_moist_tot"][:] = (
-            refs["ssres_stor"]
-            + refs["soil_moist"] * refs["hru_frac_perv"]
-            + refs["ag_soil_moist"] * refs["ag_frac"]
-        )
 
     def _post_kernel(self) -> None:
         self._post(*self._post_args)
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         if time.current_index == 0:
-            self._istep0_areas()
+            self._check_ag_frac()
         self._pre_kernel()
         self._calculate_family(iter_aet_flag=False)
         self._post_kernel()
@@ -1971,13 +2031,13 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
         "iter_end_status",
     )
 
-    def initialize(self) -> None:
-        super().initialize()
+    def allocate(self) -> None:
+        super().allocate()
         refs = self._refs
-        for name in self._OBS_ZERO_VARS:
-            refs[name][:] = 0
         # It0 iteration scratch (persistent; prime directive: memory),
-        # one buffer per _IT0_NAMES entry, same order
+        # one buffer per _IT0_NAMES entry, same order. No starting
+        # value matters: calculate() overwrites every buffer from the
+        # live state before reading it.
         nhru = refs["hru_area"].shape[0]
         self._it0 = tuple(np.zeros(nhru, dtype=np.float64) for _ in _IT0_NAMES)
         self._it0_state = self._hold(*_IT0_NAMES)
@@ -1990,9 +2050,19 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
             "ag_frac",
             "transp_on",
         )
-        # parameters are frozen: the iteration caps, read once
+
+    def init_from_params(self) -> None:
+        super().init_from_params()
+        refs = self._refs
+        # the iteration caps, read once per parameter set
         self._max_iter = int(refs["max_soilzone_ag_iter"][0])
         self._converge = float(refs["soilzone_aet_converge"][0])
+
+    def init_state(self, time: Time) -> None:
+        super().init_state(time)
+        refs = self._refs
+        for name in self._OBS_ZERO_VARS:
+            refs[name][:] = 0
 
     @staticmethod
     @numba.njit
@@ -2120,7 +2190,7 @@ class PRMSSoilzoneAgObsET(PRMSSoilzoneAg):
 
     def calculate(self, dt: np.float64, time: Time) -> None:
         if time.current_index == 0:
-            self._istep0_areas()
+            self._check_ag_frac()
         self._pre_kernel()
         refs = self._refs
 

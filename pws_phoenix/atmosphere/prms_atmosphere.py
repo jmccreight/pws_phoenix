@@ -20,7 +20,9 @@ calculation except transpiration is per-day elementwise and folds
 straight into the in-place kernel; the transp_tindex season logic is
 genuinely sequential and becomes per-step STATE (transp_on, tmax_sum,
 and the private check flag), with upstream's "time zero calculations"
-run inside the kernel on the first step (istep0). Per-element
+run in init_state(time) from the START DATE (they read parameters and
+the date only, so they are the cold-start DEFAULT of that state:
+supplied state or a restart overrides them). Per-element
 operation order matches upstream's vectorized expressions, so results
 are unchanged.
 
@@ -35,12 +37,12 @@ Declarations/decisions:
   in-kernel; the "1-month" (annual) cbh-adjustment parameter variant
   upstream supports is NOT ported (nhm domains are monthly) -- the
   declared dims reject it loudly.
-- temp_units is a ('scalar',) parameter consumed in initialize() (the
+- temp_units is a ('scalar',) parameter consumed in init_from_params() (the
   transp_tmax F conversion -- upstream's "candidate for worst code
   lines").
 - hru_cossl and transp_tmax_f are parameter_internal (space,).
 - Southern-hemisphere domains raise NotImplementedError in
-  initialize() (upstream raises inside its is_summer logic).
+  init_from_params() (upstream raises inside its is_summer logic).
 
 Family structure (ADDITIVE; PORTS.md "How variants are done here"):
 upstream's PRMSAtmosphereTranspFrost REPLACES the tindex parameters
@@ -276,7 +278,7 @@ class PRMSAtmosphereBase(Process):
         derivation="compute_soltabs(hru_slope, hru_aspect, hru_lat)",
     )
 
-    # -- derived parameters (initialize(); frozen after) --
+    # -- derived parameters (init_from_params(); frozen after) --
     hru_cossl = DataArrayMeta(
         kind="parameter_internal",
         dims=("space",),
@@ -423,7 +425,19 @@ class PRMSAtmosphereBase(Process):
     # Initialization
     # ------------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def init_from_params(self) -> None:
+        refs = self._refs
+
+        # upstream's is_summer logic assumes the northern hemisphere
+        if not (refs["hru_lat"] > 0.0).any():
+            raise NotImplementedError(
+                "PRMSAtmosphere: southern-hemisphere domains are not "
+                "implemented (upstream raises the same)"
+            )
+
+        refs["hru_cossl"][:] = np.cos(np.arctan(refs["hru_slope"]))
+
+    def init_state(self, time: Time) -> None:
         refs = self._refs
         for name in (
             "tmaxf",
@@ -443,15 +457,6 @@ class PRMSAtmosphereBase(Process):
             "transp_on",
         ):
             refs[name][:] = 0.0
-
-        # upstream's is_summer logic assumes the northern hemisphere
-        if not (refs["hru_lat"] > 0.0).any():
-            raise NotImplementedError(
-                "PRMSAtmosphere: southern-hemisphere domains are not "
-                "implemented (upstream raises the same)"
-            )
-
-        refs["hru_cossl"][:] = np.cos(np.arctan(refs["hru_slope"]))
 
     # ------------------------------------------------------------------
     # Computation
@@ -766,11 +771,9 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
         "private state)",
     )
 
-    def initialize(self) -> None:
-        super().initialize()
+    def init_from_params(self) -> None:
+        super().init_from_params()
         refs = self._refs
-        refs["tmax_sum"][:] = 0.0
-        refs["transp_check"][:] = 0
 
         # transp_tmax units ("candidate for worst code lines" upstream)
         if int(refs["temp_units"][0]) == 0:
@@ -779,6 +782,55 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
             refs["transp_tmax_f"][:] = (
                 refs["transp_tmax"] * (9.0 / 5.0)
             ) + 32.0
+
+    def init_state(self, time: Time) -> None:
+        super().init_state(time)
+        refs = self._refs
+        refs["tmax_sum"][:] = 0.0
+        refs["transp_check"][:] = 0
+        # upstream's "time zero calculations", on the zeros just set
+        # (transp_on by the base class): the season state implied by
+        # the start date
+        self._transp_time_zero(
+            refs["transp_on"],
+            refs["transp_check"],
+            refs["transp_beg"],
+            refs["transp_end"],
+            np.int64(time.month),
+            np.int64(time.day_of_month),
+        )
+
+    @staticmethod
+    @numba.njit(cache=NUMBA_CACHE)
+    def _transp_time_zero(
+        transp_on: np.ndarray,
+        transp_check: np.ndarray,
+        transp_beg: np.ndarray,
+        transp_end: np.ndarray,
+        current_month: np.int64,
+        current_dom: np.int64,
+    ) -> None:
+        # upstream "time zero calculations", verbatim. Formerly the
+        # first block of _transp_tindex, gated on the first step; it
+        # reads only parameters and the start date, so it runs once in
+        # init_state() and the first step sees the same values.
+        for ii in range(transp_on.shape[0]):
+            motmp = current_month + 12
+            if current_month == transp_beg[ii]:
+                if current_dom > 10:
+                    transp_on[ii] = 1.0
+                else:
+                    transp_check[ii] = 1
+            elif transp_end[ii] > transp_beg[ii]:
+                if (current_month > transp_beg[ii]) and (
+                    current_month < transp_end[ii]
+                ):
+                    transp_on[ii] = 1.0
+            else:
+                if (current_month > transp_beg[ii]) or (
+                    motmp < transp_end[ii] + 12
+                ):
+                    transp_on[ii] = 1.0
 
     @staticmethod
     @numba.njit(cache=NUMBA_CACHE)
@@ -792,31 +844,11 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
         transp_tmax_f: np.ndarray,
         current_month: np.int64,
         current_dom: np.int64,
-        istep0: np.int64,
     ) -> None:
         # transp_tindex sequential state, extracted verbatim from the
         # (previously monolithic) atmosphere kernel -- it was the
         # final, self-contained section of the loop
         for ii in range(transp_on.shape[0]):
-            if istep0 == 1:
-                # upstream "time zero calculations" (start = this step)
-                motmp = current_month + 12
-                if current_month == transp_beg[ii]:
-                    if current_dom > 10:
-                        transp_on[ii] = 1.0
-                    else:
-                        transp_check[ii] = 1
-                elif transp_end[ii] > transp_beg[ii]:
-                    if (current_month > transp_beg[ii]) and (
-                        current_month < transp_end[ii]
-                    ):
-                        transp_on[ii] = 1.0
-                else:
-                    if (current_month > transp_beg[ii]) or (
-                        motmp < transp_end[ii] + 12
-                    ):
-                        transp_on[ii] = 1.0
-
             # (state carries between steps via the persistent arrays;
             # upstream's tt-1 copy is implicit)
             if current_dom == 1:
@@ -853,7 +885,6 @@ class PRMSAtmosphere(PRMSAtmosphereBase):
             refs["transp_tmax_f"],
             np.int64(time.month),
             np.int64(time.day_of_month),
-            np.int64(1 if time.current_index == 0 else 0),
         )
 
 
