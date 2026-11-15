@@ -393,12 +393,17 @@ def toy_ds(dimensions, make_toy_input):
     return make_toy_input(dimensions)
 
 
-def _make_model(toy_ds, toy_class, control=None, capacity=None):
+def _make_model(
+    toy_ds, toy_class, control=None, capacity=None, calibration_mode=True
+):
     """Upper -> Lower with SUPPLIED starting state (none when
     `control` restarts), and a bucket that starts from its own
     default, on one grid; budgets judged. `capacity` is the bucket's
-    parameter (the model freezes the array it is given)."""
+    parameter (the model freezes the array it is given).
+    `calibration_mode=False` leaves the key out of the control."""
     control = {"budget": "error"} | (control or {})
+    if calibration_mode:
+        control["calibration_mode"] = True
     n_space = toy_ds.sizes["space"]
     if capacity is None:
         capacity = np.linspace(2.0, 12.0, n_space)
@@ -522,6 +527,26 @@ def test_set_parameters(toy_ds):
         assert_state_equal(
             fresh, stepped, when="in the model whose parameters were set"
         )
+
+
+@pytest.mark.parametrize(
+    "control", [{}, {"calibration_mode": False}], ids=["absent", "false"]
+)
+def test_set_parameters_needs_calibration_mode(toy_ds, control):
+    """Without control["calibration_mode"] = True set_parameters()
+    raises before it writes anything, and the model runs on as
+    built. reset() is not guarded."""
+    with _make_model(
+        toy_ds, ReplayToy, control, calibration_mode=False
+    ) as model:
+        capacity = model.model_dict["bucket"]._refs["capacity"]
+        capacity_built = capacity.copy()
+        for values in ({}, {"capacity": 99.0}):
+            with pytest.raises(RuntimeError, match="calibration_mode"):
+                model.set_parameters(values)
+        np.testing.assert_array_equal(capacity, capacity_built)
+        model.run(DT, N_STEPS_BEFORE_REPLAY)
+        model.reset()
 
 
 def test_set_parameters_raises(toy_ds):
@@ -699,7 +724,8 @@ def test_drb_stream_temp_kit_replays():
     attributes) and the starting state the translation supplies
     (gwres_stor, seg_inflow)."""
     with model_from_control(
-        DRB_DIR / "nhm_stream_temp.control", control={"budget": "error"}
+        DRB_DIR / "nhm_stream_temp.control",
+        control={"budget": "error", "calibration_mode": True},
     ) as model:
         assert model._supplied_state
         snapshot = snapshot_state(model)
@@ -760,7 +786,7 @@ def test_drb_set_parameters():
     fresh build whose parameter datasets hold the new values: every
     array of both grids, bit for bit."""
     control_file = DRB_DIR / "nhm_stream_temp.control"
-    control = {"budget": "error"}
+    control = {"budget": "error", "calibration_mode": True}
     with model_from_control(control_file, control=control) as model:
         new_values = {}
         for name, factor in DRB_PARAMETER_FACTORS.items():
@@ -858,7 +884,10 @@ def test_ucb_starfit_graph_replays(starfit_class):
     nan and only the supplied state fills the reservoir's row."""
     nodes, _ = big_sandy_nodes(starfit_class)
     kit = insert_flow_graph(
-        assemble_from_control(UCB_CONTROL, control={"budget": "error"}),
+        assemble_from_control(
+            UCB_CONTROL,
+            control={"budget": "error", "calibration_mode": True},
+        ),
         nodes,
     )
     with kit.model() as model:

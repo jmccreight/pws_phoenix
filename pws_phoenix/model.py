@@ -62,7 +62,9 @@ class Model:
     right after the build, so it can be run again without a rebuild;
     ``model.set_parameters(values)`` before it gives the next run new
     parameter values (cold starts without a zarr Output only; see
-    both methods). ``control["collect_var_names"]`` keeps the named
+    both methods). set_parameters() raises unless the model was built
+    with ``control["calibration_mode"] = True``.
+    ``control["collect_var_names"]`` keeps the named
     variables in memory for the whole run, as
     ``model.results.values[name]`` (data_io.ResultCollector).
 
@@ -111,6 +113,8 @@ class Model:
         }
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._finalized = False
+        # the guard on set_parameters(): it raises unless this is True
+        self._calibration_mode = bool(control.get("calibration_mode", False))
         # set_parameters() -> True: the state in place belongs to the
         # old parameters, and step() raises until reset()
         self._needs_reset = False
@@ -1178,7 +1182,14 @@ class Model:
         - A parameter owned by a Discretization (tosegment, ...)
           raises: the grid's topological order was built from it.
 
-        Raises where reset() does (a warm start, a zarr Output)."""
+        Raises unless the model was built with
+        control["calibration_mode"] = True (before any other check),
+        and where reset() does (a warm start, a zarr Output)."""
+        if not self._calibration_mode:
+            raise RuntimeError(
+                "set_parameters() is for calibration: build the model "
+                "with control['calibration_mode'] = True to allow it."
+            )
         self._raise_if_not_reusable("set_parameters()")
         targets = []
         for name, value in values.items():
