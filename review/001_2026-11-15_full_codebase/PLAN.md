@@ -62,7 +62,7 @@ For each code finding it asks: why did no test catch this?
 
 | # | Findings file | Paths | Lines | Checklist | Status |
 |---|---|---|---|---|---|
-| 1 | 01_foundations.md | pws_phoenix/{clock,process,units,budget,processes_concrete}.py | 1,247 | A | todo |
+| 1 | 01_foundations.md | pws_phoenix/{clock,process,units,budget,processes_concrete}.py | 1,247 | A | reviewed |
 | 2 | 02_grids_io.md | pws_phoenix/{maps,discretization,data_io}.py | 640 | A | todo |
 | 3 | 03_model.md | pws_phoenix/model.py | 1,890 | A | todo |
 | 4 | 04_config_contract.md | pws_phoenix/{config,model_contract_graph}.py | 595 | A | todo |
