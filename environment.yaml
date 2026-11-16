@@ -93,18 +93,27 @@ dependencies:
   # hdf5) is derived by DELETING this block -- CI does exactly that
   # for its Windows cell. Serial pws_phoenix runs never need it
   # (the mpixarray import is optional).
+  # ---- BEGIN mpi-binaries ---------------------------------------
+  # MPI, parallel HDF5, their python bindings, and the packages that
+  # depend on those bindings. On a machine that provides its own MPI
+  # and parallel HDF5 (README "pwpx on Hovenweep") this sub-block is
+  # deleted: mpi4py and h5py are compiled there against the system
+  # libraries and the three packages after them are pip-installed
+  # afterwards, so conda never puts its own h5py / mpi4py over the
+  # compiled ones.
   - mpich
   - mpi4py
   - hdf5=1.14.*=mpi*  # rev-2 surgery: 2.1.0 -> 1.14.6 (netcdf 4.9 compat)
   - h5py=*=mpi*
-  - h5netcdf
-  - pytest-mpi
+  - h5netcdf  # depends on h5py
+  - hdf5plugin  # depends on h5py (an ecosystem requirement, see below)
+  - pytest-mpi  # kept beside mpi4py
+  # ---- END mpi-binaries -----------------------------------------
   # ecosystem requirements: the union of mpix/requirements.txt and
   # mpixarray/requirements.txt (Oct 2026) not already listed above,
   # floors copied from mpix, so `pip install -e` of the two clones
   # pulls nothing from PyPI (mpix: tiff/las/gpkg file_io readers,
   # prange; mpixarray: netcdf/zarr/tiff file_io)
-  - hdf5plugin
   - imagecodecs>=2024.6.1
   - progressbar2>=4.4.0
   - pyproj>=3.7.0

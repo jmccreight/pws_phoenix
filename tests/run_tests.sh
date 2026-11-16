@@ -8,6 +8,13 @@
 #   ./tests/run_tests.sh --serial-only     # the serial suite alone
 #   ./tests/run_tests.sh --parallel-only   # the MPI files alone
 #   MPI_CMD="srun -n 4" ./tests/run_tests.sh   # HPC (see mpix/detect_hpc.sh)
+#   PWS_TEST_WORKERS=0 ./tests/run_tests.sh --serial-only --pdb
+#
+# The serial suite runs on PWS_TEST_WORKERS pytest-xdist processes
+# (default 4; 125 s -> 46 s on LaNueva, Nov 2026), one test FILE per
+# process (--dist loadfile: a file's module-scoped fixtures are built
+# once). 0 = one process, needed for --pdb and -s. Each process
+# compiles its own kernels (the numba cache is off in tests).
 #
 # MPI files run ONE PER LAUNCH (module-scoped fixtures stay isolated and
 # a failure names its file). Exit code = number of failed suites.
@@ -56,7 +63,8 @@ fi
 failures=0
 
 if [ "${run_serial}" -eq 1 ]; then
-    serial_opts=(--error-for-skips --ignore-glob='tests/*_mpi.py')
+    serial_opts=(--error-for-skips --ignore-glob='tests/*_mpi.py'
+        -n "${PWS_TEST_WORKERS:-4}" --dist loadfile)
     echo "==== serial: pytest tests/ ${serial_opts[*]} ${pytest_opts[*]}"
     pytest tests/ "${serial_opts[@]}" "${pytest_opts[@]}" \
         || failures=$((failures + 1))

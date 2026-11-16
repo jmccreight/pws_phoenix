@@ -5,8 +5,11 @@
   - [Installation](#installation)
     - [Environment (local)](#environment-local)
     - [The mpixarray ecosystem](#the-mpixarray-ecosystem)
+    - [mpixarray on Hovenweep](#mpixarray-on-hovenweep)
+    - [pwpx on Hovenweep](#pwpx-on-hovenweep)
     - [CI setup (one-time, repo admin)](#ci-setup-one-time-repo-admin)
     - [Running tests](#running-tests)
+    - [Run-time switches (environment variables, read at import)](#run-time-switches-environment-variables-read-at-import)
   - [Internal design considerations](#internal-design-considerations)
   - [External design considerations](#external-design-considerations)
     - [mpixarray](#mpixarray)
@@ -57,6 +60,96 @@ requires `mpix` by plain name, so installing `mpix` first makes pip
 take the local clone. Their other requirements are listed in
 `environment.yaml` (the "ecosystem requirements" group inside the
 parallel-io block) so the editable installs pull nothing from PyPI.
+
+### mpixarray on Hovenweep
+
+Hovenweep provides MPI and parallel HDF5 as Cray modules. `mpi4py`
+and `h5py` are compiled against them; everything else comes from pip.
+Recorded Nov 2026 with `main` of both mpix and mpixarray and these
+modules:
+
+- `PrgEnv-gnu` version 8.4.0
+- `cray-mpich` version 8.1.26
+- `cray-hdf5-parallel` version 1.12.2.5
+
+Run from the directory holding the two clones:
+
+```
+module load conda
+conda create --name=mpixr python=3.14
+conda activate mpixr
+
+# mpi4py against cray-mpich (cc is the Cray compiler wrapper)
+export MPICC=cc
+python -m pip install --force-reinstall --no-cache-dir --no-deps \
+    --no-binary=mpi4py mpi4py
+
+# h5py against cray-hdf5-parallel
+module load cray-hdf5-parallel
+export CC=cc
+export HDF5_MPI="ON"
+python -m pip install --force-reinstall --no-cache-dir --no-deps \
+    --no-binary=h5py h5py
+
+# the two packages, in dependency order
+pip install -e "./mpix[all]"
+pip install -e "./mpixarray[all]"
+```
+
+Check the build:
+
+```
+python -c "import h5py; print(h5py.get_config().mpi)"   # True
+ldd "$(python -c 'import h5py.h5; print(h5py.h5.__file__)')"
+# expect libhdf5_parallel_gnu_*.so under /opt/cray/pe/hdf5-parallel
+```
+
+Every later session (login shell or batch script) needs the same
+modules loaded, for example by sourcing a file like this:
+
+```
+module load conda cray-hdf5-parallel
+export OMP_NUM_THREADS=1
+export NUMBA_NUM_THREADS=1
+conda activate mpixr
+```
+
+### pwpx on Hovenweep
+
+The same steps as above, with conda supplying everything except the
+MPI stack. Not yet run on Hovenweep. Run from the directory holding
+the three clones:
+
+```
+module load conda
+sed '/BEGIN mpi-binaries/,/END mpi-binaries/d' \
+    pws_phoenix/environment.yaml > environment_hovenweep.yaml
+conda env create -n pwpx -f environment_hovenweep.yaml
+conda activate pwpx
+
+# mpi4py against cray-mpich (cc is the Cray compiler wrapper)
+export MPICC=cc
+python -m pip install --force-reinstall --no-cache-dir --no-deps \
+    --no-binary=mpi4py mpi4py
+
+# h5py against cray-hdf5-parallel
+module load cray-hdf5-parallel
+export CC=cc
+export HDF5_MPI="ON"
+python -m pip install --force-reinstall --no-cache-dir --no-deps \
+    --no-binary=h5py h5py
+
+# pip only after the two compiled packages, so nothing replaces them
+pip install h5netcdf hdf5plugin pytest-mpi
+pip install -e ./mpix
+pip install -e ./mpixarray
+pip install -e ./pws_phoenix --no-deps
+```
+
+Session setup is the file above with `conda activate pwpx`. Tests:
+`MPI_CMD="srun -n 4" ./tests/run_tests.sh`, with `PWS_TEST_DATA`
+pointing at a populated pywatershed `test_data/` tree (without it the
+data-dependent tests fail; the script allows no skips).
 
 ### CI setup (one-time, repo admin)
 
