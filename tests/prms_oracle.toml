@@ -5,6 +5,9 @@
 # platforms differ -- snow knife-edges). Bumping a key is a reviewed
 # commit: the place where answer changes become visible. Only the
 # answer sets the tests read are pinned; the comment names the control.
+# Every platform's keys come from ONE oracle tree:
+#   python -m prms_oracle.oracle_key --toml
+# (it keys by control stem; here the key is the answer directory).
 
 [inputs]
 drb_2yr = "19f6e77bb6f4b748"
@@ -12,28 +15,37 @@ ucb_2yr = "54cb23af4448606b"
 fgr_ag_2yr = "c3ceb0ae8cb990dc"
 
 [outputs."drb_2yr/output"]  # nhm.control
-macos-arm64 = "a42c5fd3602c0102"
+linux-x86_64 = "ec9cdcd80ebbcb1a"
+macos-arm64 = "c0c95079e581c67d"
 
 [outputs."drb_2yr/output_no_dprst"]  # nhm_no_dprst.control
-macos-arm64 = "c9b9c3f461d6fcae"
+linux-x86_64 = "e015dba94a14f1d8"
+macos-arm64 = "81500b0c10c12527"
 
 [outputs."drb_2yr/output_stream_temp"]  # nhm_stream_temp.control
+linux-x86_64 = "89ab39650d73abab"
 macos-arm64 = "709253b534fbf0cb"
 
 [outputs."drb_2yr/output_stream_temp_seg_humid_matrix"]
-macos-arm64 = "0c13d97572f003e7"
+linux-x86_64 = "61ba578b4a9c7e4f"
+macos-arm64 = "80eb963d95701e14"
 
 [outputs."drb_2yr/output_stream_temp_seg_humid_scalar"]
-macos-arm64 = "3eb24e9339753a8c"
+linux-x86_64 = "db743275738e0ae0"
+macos-arm64 = "58a498123d48b683"
 
 [outputs."ucb_2yr/output"]  # nhm.control
-macos-arm64 = "a78934b2b79900b6"
+linux-x86_64 = "86afc4fb7fab3118"
+macos-arm64 = "dae211ec3f48aa61"
 
 [outputs."ucb_2yr/output_transp_frost"]  # nhm_transp_frost.control
-macos-arm64 = "08a968ec31c0250a"
+linux-x86_64 = "9350c0f3538b253f"
+macos-arm64 = "f3111dfb69131881"
 
 [outputs."fgr_ag_2yr/output_spinup"]  # spinup.control
+linux-x86_64 = "ad2f4a7dfc51af67"
 macos-arm64 = "581d76c6e7a2809f"
 
 [outputs."fgr_ag_2yr/output_analysis"]  # analysis.control
+linux-x86_64 = "1a0fb3db4193c600"
 macos-arm64 = "54a37ba03961d2d3"

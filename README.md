@@ -131,7 +131,8 @@ sed -e '/BEGIN mpi-binaries/,/END mpi-binaries/d' \
     pws_phoenix/environment.yaml > environment_hovenweep.yaml
 conda env create -n pwpx -f environment_hovenweep.yaml
 conda activate pwpx
-conda list | grep -i -E "hdf5|netcdf"   # expect nothing
+# expect nothing from conda (pyPRMS pulls netCDF4 from PyPI: fine)
+conda list | grep -i -E "hdf5|netcdf" | grep -v pypi
 
 # mpi4py against cray-mpich (cc is the Cray compiler wrapper)
 export MPICC=cc
@@ -152,9 +153,15 @@ pip install -e ./mpixarray
 pip install -e ./pws_phoenix --no-deps
 ```
 
-Check the build as for mpixarray above (`h5py.get_config().mpi` is
-True; `ldd` on `h5py.h5` shows Cray's `libhdf5_parallel` and nothing
-under `$CONDA_PREFIX`).
+Check the build:
+
+```
+python -c "import h5py; print(h5py.get_config().mpi)"   # True
+ldd "$(python -c 'import h5py.h5; print(h5py.h5.__file__)')" | grep -i hdf5
+# expect Cray's libhdf5_parallel, nothing under $CONDA_PREFIX
+python -c "import netCDF4, h5py, xarray; print(netCDF4.__version__, h5py.version.hdf5_version)"
+# expect "1.7.3 1.12.2"; this loads both HDF5 users in one process
+```
 
 Session setup is the file above with `conda activate pwpx`. Tests:
 `MPI_CMD="srun -n 4" ./tests/run_tests.sh`, after populating
