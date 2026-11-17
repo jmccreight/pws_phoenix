@@ -155,7 +155,7 @@ def _resolved_fields(cls: type) -> dict[str, DataArrayMeta]:
 
 
 def _budget_fields(
-    cls: type, fields: dict[str, DataArrayMeta]
+    cls: type[Process], fields: dict[str, DataArrayMeta]
 ) -> dict[str, DataArrayMeta]:
     """Generated variables for the class's declared ``budgets``: per
     budget, a ``*_sum`` per present component plus ``residual`` and

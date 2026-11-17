@@ -121,7 +121,7 @@ def inches(value: float) -> pint.Quantity:
     return value * units_mod.quantity("inches")
 
 
-def _body(cls: type, func: Callable | None) -> Callable:
+def _body(cls: type[Any], func: Callable | None) -> Callable:
     """The Python body run on Quantities: `func`, or the kernel's
     py_func."""
     return func if func is not None else cls._calculate.py_func
@@ -171,7 +171,9 @@ def patched(patches: Patches | None) -> Iterator[None]:
 
 
 def run_compiled(
-    cls: type, data: dict[str, np.ndarray], func: Callable | None = None
+    cls: type[Any],
+    data: dict[str, np.ndarray],
+    func: Callable | None = None,
 ) -> dict:
     """The compiled kernel (or plain `func`) on copies of `data`;
     returns the arrays."""

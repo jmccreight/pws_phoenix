@@ -15,6 +15,8 @@ is half capacity here (the NOR-midpoint rule is caller data-prep; the
 structural checks hold for any valid value).
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -64,7 +66,7 @@ drb_skipif = pytest.mark.skipif(
 
 
 def big_sandy_nodes(
-    starfit_class: type = StarfitFlowNode,
+    starfit_class: type[Any] = StarfitFlowNode,
 ) -> tuple[list[NewNode], NewNode]:
     """The Big Sandy chain (PT2 -> STARFIT -> PT3 above 44426, plus a
     lone PT1 above 44409) as NewNodes; returns (collated list, the
@@ -108,6 +110,7 @@ def runs(tmp_path_factory):
         },
     )
     seg_dis = plain.discretizations["nsegment"].parameters
+    assert seg_dis is not None
     tosegment0 = seg_dis["tosegment"].values.astype(np.int64) - 1
     nhm_seg = seg_dis["nhm_seg"].values
 
@@ -253,7 +256,9 @@ def test_supplied_channel_state_carried_to_graph():
     graph's channel rows; the new nodes' rows are zero."""
     kit = assemble_from_control(UCB_CONTROL)
     channel = kit.process_dict["prms_channel"]
-    n_seg = kit.discretizations["nsegment"].parameters.sizes["nsegment"]
+    seg_dis = kit.discretizations["nsegment"].parameters
+    assert seg_dis is not None
+    n_seg = seg_dis.sizes["nsegment"]
     supplied = np.arange(1.0, n_seg + 1.0)
     channel["seg_inflow"] = xr.DataArray(supplied, dims="nsegment")
     nodes, starfit = big_sandy_nodes()

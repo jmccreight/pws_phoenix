@@ -78,7 +78,7 @@ class Input:
     def advance(self) -> None:
         """Advance current_values to the next time step."""
         self._current_index += np.int64(1)
-        if self._in_memory:
+        if self._data_values is not None:
             self._current[:] = self._data_values[self._current_index]
         else:
             self._current[:] = self.data[self._current_index, :].values

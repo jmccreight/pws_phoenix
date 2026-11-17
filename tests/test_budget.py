@@ -52,7 +52,7 @@ class _Bucket(Process):
     def advance(self) -> None:
         self._obj["storage_prev"].values[:] = self._obj["storage"].values
 
-    def _loss(self) -> np.ndarray:
+    def _loss(self) -> float:
         return 0.0
 
     def calculate(self, dt: np.float64, time: Time) -> None:
@@ -74,7 +74,7 @@ class _Bucket(Process):
 class _LeakyBucket(_Bucket):
     """A loss the budget does not account for: imbalanced by 0.1/step."""
 
-    def _loss(self) -> np.ndarray:
+    def _loss(self) -> float:
         return 0.1
 
 
@@ -155,7 +155,7 @@ def _declare(budgets_dict, extra=None):
     }
     body.update(extra or {})
     # type(_Bucket) = the ABC metaclass (bare type() would conflict)
-    cls = type(_Bucket)("_Bad", (_Bucket,), body)
+    cls = type(_Bucket)("_Bad", (_Bucket,), body)  # type: ignore[misc]
     # deliberately invalid: keep it out of the registry that other
     # tests (test_restart.py) introspect wholesale
     Process._registry.pop("_Bad", None)

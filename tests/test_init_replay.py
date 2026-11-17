@@ -838,6 +838,7 @@ def test_drb_result_collector():
         control={"budget": "error", "collect_var_names": names},
     ) as model:
         _step_and_check_rows(model, DT_DAY, N_STEPS_BEFORE_REPLAY)
+        assert model.results is not None
         first = {
             name: array.copy()
             for name, array in model.results.values.items()

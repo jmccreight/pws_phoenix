@@ -37,7 +37,7 @@ LEAK_RANK = MPI.COMM_WORLD.size - 1
 class _RankLeakyBucket(_Bucket):
     """Leaks 0.1/step on LEAK_RANK only; balanced everywhere else."""
 
-    def _loss(self) -> np.ndarray:
+    def _loss(self) -> float:
         return 0.1 if MPI.COMM_WORLD.rank == LEAK_RANK else 0.0
 
 

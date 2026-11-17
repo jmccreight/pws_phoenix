@@ -59,6 +59,7 @@ class TestSynthetic:
     def test_pure_channel(self, toy_dis_seg, toy_channel_params):
         kit = splice_flow_graph(toy_dis_seg, toy_channel_params, [])
         dis = kit.discretization.parameters
+        assert dis is not None
         assert kit.n_seg == kit.n_nodes == N_SEG
         np.testing.assert_array_equal(
             dis["to_graph_index"].values, TOSEGMENT - 1
@@ -76,6 +77,7 @@ class TestSynthetic:
             [NewNode(PassThroughFlowNode, flows_to=30, node_id=999)],
         )
         dis = kit.discretization.parameters
+        assert dis is not None
         # 10, 20 now flow into the new node (row 5), which flows into 30
         np.testing.assert_array_equal(
             dis["to_graph_index"].values, [5, 5, 4, 4, -1, 2]
@@ -116,6 +118,7 @@ class TestSynthetic:
             expected = [7, 7, 4, 4, -1, 2, 5, 6]
         kit = splice_flow_graph(toy_dis_seg, toy_channel_params, nodes)
         dis = kit.discretization.parameters
+        assert dis is not None
         np.testing.assert_array_equal(dis["to_graph_index"].values, expected)
         np.testing.assert_array_equal(
             dis["nnodes"].values[N_SEG:], [nn.node_id for nn in nodes]
@@ -270,15 +273,15 @@ def test_pin_doctest_splice_drb(pyws_domain):
         drb["channel_params_ds"],
         [NewNode(PassThroughFlowNode, flows_to=1829, node_id=-1)],
     )
+    dis = kit.discretization.parameters
+    assert dis is not None
     np.testing.assert_array_equal(
-        kit.discretization.parameters["to_graph_index"].values,
+        dis["to_graph_index"].values,
         _hand_built_doctest_splice(drb["dis_seg_ds"], 1829),
     )
     for vv in ("seg_length", "seg_slope", "seg_depth"):
         hand = np.concatenate([drb["dis_seg_ds"][vv].values, [np.nan]])
-        np.testing.assert_array_equal(
-            kit.discretization.parameters[vv].values, hand
-        )
+        np.testing.assert_array_equal(dis[vv].values, hand)
     for vv in ("mann_n", "x_coef"):
         hand = np.concatenate([drb["channel_params_ds"][vv].values, [np.nan]])
         np.testing.assert_array_equal(kit.parameters[vv].values, hand)
@@ -301,6 +304,7 @@ def test_pin_big_sandy_chain_ucb(pyws_domain):
         [starfit, pt1, pt2, pt3],
     )
     dis = kit.discretization.parameters
+    assert dis is not None
     np.testing.assert_array_equal(
         dis["to_graph_index"].values, _hand_built_big_sandy(ucb["dis_seg_ds"])
     )

@@ -157,7 +157,7 @@ class TestLegacyToParallel:
         aa, bb = mpi_run["decomp"]
         with xr.load_dataset(mpi_run["output_file"]) as ds_nc:
             streamed = {
-                nn[: -len("_out")]
+                str(nn)[: -len("_out")]
                 for nn in ds_nc.data_vars
                 if str(nn).endswith("_out")
             }

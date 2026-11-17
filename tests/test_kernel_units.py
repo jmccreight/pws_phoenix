@@ -33,6 +33,8 @@ post kernel via ``func=``). Harness: tests/kernel_units.py.
 Synthetic data, CI-able.
 """
 
+from typing import Any
+
 import numba
 import numpy as np
 import pint
@@ -295,7 +297,7 @@ CHANNEL_PATCHES = {
 
 
 @pytest.fixture
-def channel_data() -> dict[str, np.ndarray]:
+def channel_data() -> dict[str, Any]:
     """Five segments, one day, every kernel line run (the harness
     enforces it)::
 

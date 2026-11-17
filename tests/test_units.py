@@ -56,7 +56,7 @@ def _declarations():
                 ]
             elif isinstance(node, ast.Dict):
                 calls = [
-                    (kk.value, vv)
+                    (str(kk.value), vv)
                     for kk, vv in zip(node.keys, node.values)
                     if isinstance(kk, ast.Constant)
                     and isinstance(vv, ast.Call)
@@ -68,7 +68,7 @@ def _declarations():
                 if "dtype" not in kw:
                     continue  # a factory (budget.py) -- not a declaration
                 units = kw.get("units")
-                units = (
+                units_literal = (
                     units.value
                     if isinstance(units, ast.Constant)
                     else ("<expr>" if units is not None else None)
@@ -78,7 +78,7 @@ def _declarations():
                     call.lineno,
                     name,
                     ast.unparse(kw["dtype"]),
-                    units,
+                    units_literal,
                 )
 
 
