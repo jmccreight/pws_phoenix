@@ -31,12 +31,13 @@ from pws_phoenix.prms_translate import (
     model_from_control,
 )
 
-# the same data-root rule as tests/conftest.py: the sibling
-# pywatershed clone's test_data (populated from the pws-prms-oracle),
+# the same data-root rule as tests/conftest.py: this repo's test_data/
+# (populated from the pws-prms-oracle by test_data/generate/),
 # PWS_TEST_DATA overriding
-MPIX_ROOT = pl.Path(__file__).resolve().parents[2]
 PWS_TEST_DATA = pl.Path(
-    os.environ.get("PWS_TEST_DATA", MPIX_ROOT / "pywatershed" / "test_data")
+    os.environ.get(
+        "PWS_TEST_DATA", pl.Path(__file__).resolve().parents[1] / "test_data"
+    )
 )
 DRB = PWS_TEST_DATA / "drb_2yr"
 FGR = PWS_TEST_DATA / "fgr_ag_2yr"

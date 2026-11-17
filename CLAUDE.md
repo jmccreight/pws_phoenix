@@ -7,21 +7,20 @@
 - [python assumptions/conventions](#python-assumptionsconventions)
 - [Prime directive: memory](#prime-directive-memory)
 - [pws_phoenix package design notes](#pws_phoenix-package-design-notes)
-  - [Core decision: discretization = the unit of decomposition](#core-decision-discretization--the-unit-of-decomposition)
-  - [Variable taxonomy: parameters vs inputs (by relationship to model time)](#variable-taxonomy-parameters-vs-inputs-by-relationship-to-model-time)
-  - [Serial path (`Model` in `model.py`)](#serial-path-model-in-modelpy)
-  - [MPI path (`ModelMPI` in `model.py`) — single-decomposition streaming](#mpi-path-modelmpi-in-modelpy--single-decomposition-streaming)
-  - [Known mpixarray limits (Phase 1)](#known-mpixarray-limits-phase-1)
-  - [IO is intentionally NOT apples-to-apples](#io-is-intentionally-not-apples-to-apples)
-  - [Global state: `Time` + `Options` (the "Global" split)](#global-state-time--options-the-global-split)
-  - [Units mode (Nov 2026; stages 1 + 2 built, stage 3 piloted)](#units-mode-nov-2026-stages-1--2-built-stage-3-piloted)
-  - [Phase 2 backlog (separable, layered on top)](#phase-2-backlog-separable-layered-on-top)
-  - [Porting pywatershed processes (goal 4; started July 2026)](#porting-pywatershed-processes-goal-4-started-july-2026)
-  - [FlowGraph port: agreed design (July 2026; Stage 1 BUILT + green)](#flowgraph-port-agreed-design-july-2026-stage-1-built--green)
-  - [Container-model unification (implemented)](#container-model-unification-implemented)
-  - [Object model & serial vs MPI](#object-model--serial-vs-mpi)
-  - [Forward design (June 2026 discussion): structure, schedule, open topics](#forward-design-june-2026-discussion-structure-schedule-open-topics)
-  - [Build plan: multi-grid, incremental (June 2026)](#build-plan-multi-grid-incremental-june-2026)
+  - [Object model](#object-model)
+  - [Variable taxonomy: parameters vs inputs](#variable-taxonomy-parameters-vs-inputs)
+  - [Serial path (`Model`)](#serial-path-model)
+  - [MPI path (`ModelMPI`)](#mpi-path-modelmpi)
+  - [Global state: `Time` and options](#global-state-time-and-options)
+  - [Units mode](#units-mode)
+  - [Budgets](#budgets)
+  - [Parameters: owned by a grid, or computed at init](#parameters-owned-by-a-grid-or-computed-at-init)
+  - [Initial state](#initial-state)
+  - [Backlog](#backlog)
+  - [Porting pywatershed processes](#porting-pywatershed-processes)
+  - [FlowGraph](#flowgraph)
+  - [Schedule and Maps](#schedule-and-maps)
+  - [Open design topics](#open-design-topics)
   - [Input structuring: serial vs MPI, multi-file / datatree (June 2026)](#input-structuring-serial-vs-mpi-multi-file--datatree-june-2026)
   - [Prior art: xarray-simlab & Landlab (from the retired xr design summary, Apr 2026)](#prior-art-xarray-simlab--landlab-from-the-retired-xr-design-summary-apr-2026)
 
@@ -100,9 +99,10 @@ branch `1.0.0`, mpix `main`** (Oct 2026; the old `pws` branch API is
 gone). `pwpx` has
 everything: pytest (+-mpi), mypy, ruff, and the pywatershed import-chain
 deps for the parity tests (pywatershed itself is used from the mpix-root
-clone via sys.path). Test data = the pywatershed clone's `test_data/`,
-populated + derived from the pws-prms-oracle by pywatershed's
-`oracle_populate.py` (Oct 2026); `PWS_TEST_DATA` overrides the root
+clone via sys.path). Test data = this repo's `test_data/` (gitignored
+except `generate/`), populated + derived from the pws-prms-oracle by
+`test_data/generate/oracle_populate.py`, STARFIT data by
+`starfit_fetch.py` (Nov 2026); `PWS_TEST_DATA` overrides the root
 (`tests/conftest.py`); answer keys are PINNED in
 `tests/prms_oracle.toml` (macos-arm64 only so far) and checked at
 session start -- a regenerated oracle = a reviewed key bump, never a

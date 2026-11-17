@@ -33,19 +33,17 @@ import xarray as xr
 # precede the first pws_phoenix import (the switch is read at import).
 os.environ["PWS_NUMBA_CACHE"] = "0"
 
-# ---- pywatershed-domain FlowGraph data (shared by
-# test_flow_graph.py [drb_2yr] and test_mixed_channel_starfit.py
-# [ucb_2yr]). GENERATED pywatershed test data; consumer modules carry
-# their own skipifs via pyws_domain_files(). ----
-MPIX_ROOT = pl.Path(__file__).parents[2]
-# the pywatershed source clone (parity tests import it via sys.path)
-PYWS_ROOT = MPIX_ROOT / "pywatershed"
-# A pywatershed test_data tree populated from the pws-prms-oracle AND
-# derived (pywatershed test_data/generate/oracle_populate.py); starfit/
-# is pywatershed-tracked data in the same tree. Default: the sibling
-# clone's; PWS_TEST_DATA overrides (e.g. a fetched copy in CI).
+# ---- the pywatershed source clone at the mpix_meta root ----
+# Not a data root: the parity tests import pywatershed from it via
+# sys.path, and the Ag tests read its utils/prms_dyn_param.py. Goes
+# away when those tests do.
+PYWS_ROOT = pl.Path(__file__).parents[2] / "pywatershed"
+# A test_data tree populated from the pws-prms-oracle AND derived
+# (test_data/generate/oracle_populate.py), plus starfit/
+# (test_data/generate/starfit_fetch.py). Default: this repo's
+# test_data/; PWS_TEST_DATA overrides (e.g. a fetched copy in CI).
 PWS_TEST_DATA = pl.Path(
-    os.environ.get("PWS_TEST_DATA", PYWS_ROOT / "test_data")
+    os.environ.get("PWS_TEST_DATA", pl.Path(__file__).parents[1] / "test_data")
 )
 PYWS_INPUT_VOL_NAMES = ("sroff_vol", "ssres_flow_vol", "gwres_flow_vol")
 

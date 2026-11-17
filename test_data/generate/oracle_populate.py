@@ -156,7 +156,13 @@ def output_dir_name(control_file: pl.Path) -> str:
 def derive(control_file: pl.Path, out_dir: pl.Path) -> None:
     """Write the derived variables into out_dir (the oracle's files are
     linked there, the derived ones are regular)."""
-    derive_all(control_file, out_dir)
+    try:
+        derive_all(control_file, out_dir)
+    except NotImplementedError as err:
+        # a control pws_phoenix cannot translate (sagehen's strmflow):
+        # its answers stay linked, nothing is derived, no .derived_okey
+        print(f"{out_dir}: not derived, {err}")
+        return
     # what the derived files were made from; "unkeyed" when the oracle
     # wrote no marker
     marker = out_dir / ".oracle_okey"

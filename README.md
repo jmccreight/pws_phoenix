@@ -147,9 +147,9 @@ pip install -e ./pws_phoenix --no-deps
 ```
 
 Session setup is the file above with `conda activate pwpx`. Tests:
-`MPI_CMD="srun -n 4" ./tests/run_tests.sh`, with `PWS_TEST_DATA`
-pointing at a populated pywatershed `test_data/` tree (without it the
-data-dependent tests fail; the script allows no skips). The answer
+`MPI_CMD="srun -n 4" ./tests/run_tests.sh`, after populating
+`test_data/` (see "Running tests"; without it the data-dependent tests
+fail, since the script allows no skips). The answer
 keys in `tests/prms_oracle.toml` are pinned per platform and only
 `macos-arm64` is pinned so far: a tree generated on Hovenweep needs
 its `linux-x86_64` keys added there first, or the session aborts.
@@ -169,8 +169,9 @@ windows). It needs:
    repository secret.
 
 Fork PRs do not receive secrets, so the ecosystem jobs run on
-push/internal PRs only. Test data for the pywatershed-validation
-tests are not available in CI; those tests skip cleanly.
+push/internal PRs only. The test data are not available in CI yet (the
+oracle's answers are not published), so the data-dependent tests
+cannot run there.
 
 ### Running tests
 
@@ -180,17 +181,32 @@ tests are not available in CI; those tests skip cleanly.
 ./tests/run_tests.sh --parallel-only # the MPI files alone
 ```
 
-The pywatershed-validation tests read a pywatershed `test_data/` tree
-that has been populated from the
-[pws-prms-oracle](https://github.com/DOI-USGS/pws-prms-oracle) and
-derived (pywatershed's `test_data/generate/oracle_populate.py`; the
-`starfit/` data are tracked in pywatershed itself). By default that is
-the sibling clone's, `../pywatershed/test_data`; set `PWS_TEST_DATA` to
-point at another such tree (pytest prints the resolved path and whether
-it exists in its header). The answer keys the tests expect are pinned
-in `tests/prms_oracle.toml`; a session aborts when the tree's
-`.oracle_ikey` / `.oracle_okey` / `.derived_okey` markers disagree
-with the pins, so a regenerated oracle shows up as a reviewed key bump.
+The data-dependent tests read `test_data/` in this repo (gitignored
+except `test_data/generate/`). Populate it once, from a clone of the
+[pws-prms-oracle](https://github.com/DOI-USGS/pws-prms-oracle) whose
+answers have been generated:
+
+```
+PWS_ORACLE_DIR=<oracle clone>/domains python test_data/generate/oracle_populate.py
+python test_data/generate/starfit_fetch.py
+```
+
+`oracle_populate.py` links each domain's inputs and PRMS answers into
+`test_data/<domain>/` and writes the derived answer variables (the ones
+PRMS does not output) beside them; `--domain` limits it to some
+domains. A control `prms_translate` cannot translate (sagehen's
+`strmflow`) is linked but not derived. `starfit_fetch.py` downloads the
+STARFIT data from pywatershed's 2.0.0 release into `test_data/starfit/`
+and checks its sha256. `test_data/generate/compare_derived.py --root
+test_data` checks the derived files against pywatershed's tree (while
+pywatershed's derive step still exists).
+
+Set `PWS_TEST_DATA` to use another such tree; pytest prints the
+resolved path and whether it exists in its header. The answer keys the
+tests expect are pinned in `tests/prms_oracle.toml`; a session aborts
+when the tree's `.oracle_ikey` / `.oracle_okey` / `.derived_okey`
+markers disagree with the pins, so a regenerated oracle shows up as a
+reviewed key bump.
 
 ### Run-time switches (environment variables, read at import)
 

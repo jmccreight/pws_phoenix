@@ -1,3 +1,36 @@
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+
+- [pws_phoenix performance benchmarks (ASV)](#pws_phoenix-performance-benchmarks-asv)
+  - [1. Strategy](#1-strategy)
+  - [2. Layout in the repo](#2-layout-in-the-repo)
+  - [3. ASV primer](#3-asv-primer)
+    - [What a benchmark is](#what-a-benchmark-is)
+    - [How a timing benchmark runs](#how-a-timing-benchmark-runs)
+    - [The rule that shapes this suite: `setup` re-runs before EVERY timed call](#the-rule-that-shapes-this-suite-setup-re-runs-before-every-timed-call)
+    - [Timing attributes (class attributes on the benchmark; defaults in `time.py:112-116`)](#timing-attributes-class-attributes-on-the-benchmark-defaults-in-timepy112-116)
+    - [Peak memory](#peak-memory)
+    - [Existing environment, commits, and saved results](#existing-environment-commits-and-saved-results)
+  - [4. Model under test and coverage](#4-model-under-test-and-coverage)
+  - [5. Benchmark inventory](#5-benchmark-inventory)
+    - [`benchmarks/_common.py` (no benchmarks)](#benchmarks_commonpy-no-benchmarks)
+    - [`benchmarks/bench_process.py` -- per-process lifecycle costs (the primary set)](#benchmarksbench_processpy----per-process-lifecycle-costs-the-primary-set)
+    - [`benchmarks/bench_model.py` -- whole-model numbers](#benchmarksbench_modelpy----whole-model-numbers)
+    - [`benchmarks/bench_flow_graph.py` -- FlowGraph lifecycle](#benchmarksbench_flow_graphpy----flowgraph-lifecycle)
+    - [`benchmarks/bench_output.py` -- the serial zarr writer alone](#benchmarksbench_outputpy----the-serial-zarr-writer-alone)
+    - [Not in the first cut](#not-in-the-first-cut)
+    - [First numbers (Oct 26, 2026; LaNueva, Apple M4 Pro, env `pwpx2`)](#first-numbers-oct-26-2026-lanueva-apple-m4-pro-env-pwpx2)
+    - [Coverage-run numbers (Oct 27, 2026; same machine/env; commit 574e528)](#coverage-run-numbers-oct-27-2026-same-machineenv-commit-574e528)
+    - [After the `_refs` cache (Oct 27, 2026; `asv compare --factor 1.1 --machine LaNueva 5d8e402 414ff9d`)](#after-the-_refs-cache-oct-27-2026-asv-compare---factor-11---machine-lanueva-5d8e402-414ff9d)
+    - [After the framework cuts (Oct 27, 2026; `--dry-run` runs of `bench_model.(StepBreakdown|ChainStep)`, uncommitted tree)](#after-the-framework-cuts-oct-27-2026---dry-run-runs-of-bench_modelstepbreakdownchainstep-uncommitted-tree)
+    - [Stream shade (Oct 27, 2026; same `--dry-run` method)](#stream-shade-oct-27-2026-same---dry-run-method)
+  - [6. asv.conf.json](#6-asvconfjson)
+  - [7. Running and reading results](#7-running-and-reading-results)
+  - [8. Later](#8-later)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 # pws_phoenix performance benchmarks (ASV)
 
 Design document for the benchmark suite in this directory. Written
@@ -218,7 +251,7 @@ into `~/.asv-machine.json`; otherwise `asv run` prompts).
 ## 4. Model under test and coverage
 
 - **Data root**: the same rule as the tests -- `$PWS_TEST_DATA`, else
-  `<mpix_meta>/pywatershed/test_data` (`tests/conftest.py:40-42`).
+  this repo's `test_data/` (`PWS_TEST_DATA` in `tests/conftest.py`).
   `benchmarks/_common.py` repeats those two lines rather than
   importing `tests/conftest.py` (pytest machinery, and its oracle-pin
   check runs at session start).
@@ -290,7 +323,9 @@ compile; tune after the first run), `timeout = 900`.
 
 ```python
 PWS_TEST_DATA = pl.Path(
-    os.environ.get("PWS_TEST_DATA", MPIX_ROOT / "pywatershed" / "test_data")
+    os.environ.get(
+        "PWS_TEST_DATA", pl.Path(__file__).resolve().parents[1] / "test_data"
+    )
 )
 DRB = PWS_TEST_DATA / "drb_2yr"
 FGR = PWS_TEST_DATA / "fgr_ag_2yr"
@@ -604,7 +639,7 @@ asv machine --yes
 Smoke test (each benchmark called once, nothing saved):
 
 ```
-cd /Users/jamesmcc/usgs/mpix_meta/pws_phoenix2
+cd <pws_phoenix clone>
 asv run --quick --show-stderr
 ```
 
@@ -612,7 +647,7 @@ A real run, saved under the current commit (`git rev-parse HEAD` is
 yours to run):
 
 ```
-cd /Users/jamesmcc/usgs/mpix_meta/pws_phoenix2
+cd <pws_phoenix clone>
 asv run --show-stderr --set-commit-hash <hash>
 ```
 
@@ -621,7 +656,7 @@ section 1; checks out each hash in turn and restores the original
 checkout):
 
 ```
-cd /Users/jamesmcc/usgs/mpix_meta/pws_phoenix2
+cd <pws_phoenix clone>
 benchmarks/asv_run.sh <base-hash> <head-hash>
 asv compare <base-hash> <head-hash> --factor 1.1
 ```
