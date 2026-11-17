@@ -20,6 +20,13 @@ pywatershed at ba3974b (`develop`).
 Method: `/code-review high <paths>`, one slice per session.
 Paths are relative to the repository root.
 
+Code lookup, from slice 5 on: pws_phoenix is indexed by CodeGraph
+(`.codegraph/` at the repository root, created 2026-11-16). Before
+grep or a whole-file read, ask it: the `codegraph_explore` tool, or
+`codegraph explore "<symbol names or question>"`. It returns the
+source of the named symbols and the call paths between them. The
+pywatershed clone is not indexed: read it directly.
+
 ## Phases
 
 0. Serial coverage, measured once: `coverage_serial.txt`.
@@ -41,7 +48,10 @@ Review only: a session edits nothing outside this directory.
    `.git/HEAD` resolves to ba3974b; stop if it does not.
 4. Run `/code-review high <paths>`.
 5. Read the slice against its checklist for anything the command
-   did not report.
+   did not report. Use CodeGraph to follow each function and buffer
+   of the slice to its callers and writers OUTSIDE the slice (the
+   Model, other processes, the MPI path), and to confirm a finding
+   before writing it.
 6. Write the findings (format below), outcome `open`.
 7. Set the slice's status to `reviewed`.
 
@@ -66,7 +76,7 @@ For each code finding it asks: why did no test catch this?
 | 2 | 02_grids_io.md | pws_phoenix/{maps,discretization,data_io}.py | 640 | A | reviewed |
 | 3 | 03_model.md | pws_phoenix/model.py | 1,890 | A | reviewed |
 | 4 | 04_config_contract.md | pws_phoenix/{config,model_contract_graph}.py | 595 | A | reviewed |
-| 5 | 05_flow_graph.md | pws_phoenix/{flow_graph,flow_graph_build}.py, pws_phoenix/hydrology/{obsin,pass_through,prms_channel,source_sink}_flow_node.py | 1,544 | C | todo |
+| 5 | 05_flow_graph.md | pws_phoenix/{flow_graph,flow_graph_build}.py, pws_phoenix/hydrology/{obsin,pass_through,prms_channel,source_sink}_flow_node.py | 1,544 | C | reviewed |
 | 6 | 06_starfit.md | pws_phoenix/hydrology/starfit*_flow_node.py | 1,377 | C | todo |
 | 7 | 07_small_ports.md | pws_phoenix/hydrology/prms_{groundwater,canopy,channel,hydraulic_geometry}.py | 1,772 | B | todo |
 | 8 | 08_runoff.md | pws_phoenix/hydrology/prms_runoff.py | 3,071 | B | todo |
