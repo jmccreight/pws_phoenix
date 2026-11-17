@@ -15,7 +15,9 @@ separate_nhm_params role, contract-driven).
 - Dim conventions fall out of ONE rule: source dims are renamed
   POSITIONALLY onto the declaration's dims, with ``"space"`` resolved
   to the process grid (PRMS ``one -> scalar`` and
-  ``nmonths -> nmonth`` need no special cases).
+  ``nmonths -> nmonth`` need no special cases). The one exception: a
+  parameter given on ``one`` but declared on other dims is filled to
+  the declared shape, as PRMS fills it.
 """
 
 import numpy as np
@@ -33,6 +35,9 @@ INCHES_PER_FOOT = 12.0
 COMPUTED_PARAMETERS = ("soltab_potsw", "soltab_horad_potsw")
 # owned by the Discretization (topo_order derivation), never packaged
 DIS_OWNED_PARAMETERS = ("segment_order",)
+# declared dim -> the PRMS dim of the same extent, where the names
+# differ (sizes for filling a parameter given on `one`)
+_PRMS_DIM_NAMES = {"nmonth": "nmonths"}
 
 # process_dict slot -> grid, for the slots control.resolve_classes
 # emits (the NHM two-grid layout)
@@ -129,6 +134,20 @@ def package_parameters(
                     )
                 das[name] = xr.DataArray(
                     vals.flat[:1].copy(), dims=("scalar",), attrs=src.attrs
+                )
+                continue
+            if tuple(src.dims) == ("one",) and declared != ("scalar",):
+                # PRMS fills an array parameter from a single value
+                # (drb myparam.param: seg_humidity on `one`, declared
+                # (nmonth, space))
+                shape = tuple(
+                    params.sizes[_PRMS_DIM_NAMES.get(dd, dd)]
+                    for dd in declared
+                )
+                das[name] = xr.DataArray(
+                    np.full(shape, src.values[0]),
+                    dims=declared,
+                    attrs=src.attrs,
                 )
                 continue
             if len(src.dims) != len(declared):

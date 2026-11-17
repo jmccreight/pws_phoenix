@@ -18,13 +18,14 @@ files (``*_day``), so the control path is the ONLY required input.
 
 Supported ("many cases"): the NHM mainline configurations -- dprst
 on/off, stream temperature off or on in its dynamic-shade +
-CBH-humidity form (the nhm.control / nhm_stream_temp.control
+CBH-humidity form or its per-segment-humidity form (the
+nhm.control / nhm_stream_temp.control / nhm_stream_temp_seg_humid_*
 shapes), transp_frost (static or dynamic frost dates, incl. the
 multi-param_file controls that carry the frost parameters), and the
 agricultural family (soilzone_ag: spinup and iter_aet/ObsET analysis
-shapes, static or dynamic ag_frac). The constant-shade and
-per-segment-humidity stream-temp leaves RESOLVE (control.py) but
-their assembly is not wired yet and raises here. Everything
+shapes, static or dynamic ag_frac). The constant-shade stream-temp
+leaf RESOLVES (control.py) but its assembly is not wired yet and
+raises here. Everything
 unsupported fails LOUDLY, never silently.
 
 Dynamic parameters follow PRMS semantics: a translated dyn_*_flag
@@ -49,6 +50,7 @@ from pws_phoenix.flow_graph_build import NewNode, splice_flow_graph
 from pws_phoenix.hydrology.prms_stream_temp import (
     AGGREGATION_MAP_SPEC,
     PRMSStreamTemp,
+    PRMSStreamTempSegHumidity,
     derive_aggregation_weights,
 )
 from pws_phoenix.maps import Map
@@ -207,16 +209,21 @@ def assemble_from_control(
         verify_preprocessed(artifacts, params)
 
     stream_temp = "prms_stream_temp" in cfg.classes
+    # the humidity CBH reaches the segments through the hru->segment
+    # humidity Map (PRMSStreamTemp); PRMSStreamTempSegHumidity computes
+    # seg_humid from its seg_humidity parameter instead
+    cbh_humidity = False
     if stream_temp:
         leaf = cfg.classes["prms_stream_temp"]
-        if leaf is not PRMSStreamTemp:
+        if leaf not in (PRMSStreamTemp, PRMSStreamTempSegHumidity):
             raise NotImplementedError(
                 f"assembly for stream-temp leaf {leaf.__name__} is "
-                "not wired (only the dynamic-shade + CBH-humidity "
-                "configuration is): build the kit by hand -- see "
+                "not wired (only the dynamic-shade configurations "
+                "are): build the kit by hand -- see "
                 "examples/01_prms_legacy_translation.py for the recipe."
             )
-        if "humidity_hru" not in cfg.cbh_paths:
+        cbh_humidity = "seg_humid" in leaf.get_inputs()
+        if cbh_humidity and "humidity_hru" not in cfg.cbh_paths:
             raise ValueError(
                 "stream temperature needs the humidity CBH "
                 "(humidity_day) in the control file."
@@ -254,12 +261,13 @@ def assemble_from_control(
         )
 
     # -- process_dict in NHM (resolution) order; the humidity carrier
-    # slots in just before the first segment-grid process --
+    # (CBH humidity only) slots in just before the first segment-grid
+    # process --
     process_dict: dict[str, dict[str, Any]] = {}
     carrier_inserted = False
     for slot, cls in cfg.classes.items():
         grid = SLOT_GRIDS[slot]
-        if stream_temp and not carrier_inserted and grid == "nsegment":
+        if cbh_humidity and not carrier_inserted and grid == "nsegment":
             process_dict["humidity_carrier"] = {
                 "class": HumidityCarrier,
                 "discretization": "nhru",
@@ -268,7 +276,8 @@ def assemble_from_control(
         process_dict[slot] = {"class": cls, "discretization": grid}
 
     # -- Maps: the three lateral volumes always; the ten stream-temp
-    # aggregations (basis-probed weights) when stream temp is on --
+    # aggregations (basis-probed weights) when stream temp is on, nine
+    # without CBH humidity (no seg_humid Map) --
     def _map(source: str, target: str, ww: np.ndarray, derivation: str) -> Map:
         return Map(
             weights=ww,
@@ -326,6 +335,7 @@ def assemble_from_control(
         maps |= {
             target: _map(source, target, agg_weights[wkey], agg_derivation)
             for target, (source, wkey) in AGGREGATION_MAP_SPEC.items()
+            if cbh_humidity or target != "seg_humid"
         }
 
     # -- the contract drives the supply --

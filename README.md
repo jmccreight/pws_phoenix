@@ -149,7 +149,10 @@ pip install -e ./pws_phoenix --no-deps
 Session setup is the file above with `conda activate pwpx`. Tests:
 `MPI_CMD="srun -n 4" ./tests/run_tests.sh`, with `PWS_TEST_DATA`
 pointing at a populated pywatershed `test_data/` tree (without it the
-data-dependent tests fail; the script allows no skips).
+data-dependent tests fail; the script allows no skips). The answer
+keys in `tests/prms_oracle.toml` are pinned per platform and only
+`macos-arm64` is pinned so far: a tree generated on Hovenweep needs
+its `linux-x86_64` keys added there first, or the session aborts.
 
 ### CI setup (one-time, repo admin)
 

@@ -54,7 +54,10 @@ NHM_MODULES = {
 
 _drb_needed = [
     DRB_DIR / "nhm_stream_temp.control",
+    DRB_DIR / "nhm_stream_temp_seg_humid_matrix.control",
+    DRB_DIR / "nhm_stream_temp_seg_humid_scalar.control",
     DRB_DIR / "myparam.param",
+    DRB_DIR / "myparam_seg_humid_matrix.param",
     DRB_DIR / "prcp.cbh",
     DRB_DIR / "rhavg.cbh",
     DRB_DIR / "parameters_PRMSGroundwater.nc",
@@ -347,6 +350,34 @@ def test_assemble_no_stream_temp_kit():
 
 
 @drb_skipif
+@pytest.mark.parametrize("config", ["matrix", "scalar"])
+def test_assemble_seg_humidity_kits(config):
+    """strmtemp_humidity_flag=1: PRMSStreamTempSegHumidity computes
+    seg_humid from its seg_humidity parameter, so no humidity carrier
+    and no seg_humid Map. _scalar's myparam.param gives seg_humidity on
+    `one`: filled to (nmonth, nsegment)."""
+    kit = assemble_from_control(
+        DRB_DIR / f"nhm_stream_temp_seg_humid_{config}.control"
+    )
+    assert "humidity_carrier" not in kit.process_dict
+    assert "seg_humid" not in kit.maps
+    assert len(kit.maps) == 12  # 3 volumes + 9 aggregations
+    seg_humidity = kit.process_dict["prms_stream_temp"]["parameters"][
+        "seg_humidity"
+    ]
+    assert seg_humidity.dims == ("nmonth", "nsegment")
+    assert seg_humidity.shape == (12, 456)
+    if config == "scalar":
+        assert (seg_humidity.values == 0.62718494).all()
+    else:
+        # the matrix varies by segment
+        assert np.unique(seg_humidity.values).size > 1
+    # the kit constructs (construction IS the assembly validation)
+    with kit.model() as model:
+        assert model.ntime == 731
+
+
+@drb_skipif
 def test_model_from_control_runs():
     """The one-liner builds the complete stream-temp model and a
     short run produces the expected finite field."""
@@ -419,16 +450,24 @@ def test_output_var_names_translation(tmp_path):
         assert ds_out.sizes["time"] == 2
 
 
-_seg_humid_control = DRB_DIR / "nhm_stream_temp_seg_humid_matrix.control"
+@drb_skipif
+def test_assemble_unwired_leaf_raises(monkeypatch):
+    """The constant-shade leaf resolves but its assembly is not wired.
+    No control file requests it, so swap it into the resolved
+    classes of nhm_stream_temp.control."""
+    from pws_phoenix.hydrology.prms_stream_temp import (
+        PRMSStreamTempConstantShade,
+    )
+    from pws_phoenix.prms_translate import assemble
 
+    def from_control_constant_shade(ctl, control_path):
+        cfg = from_control(ctl, control_path)
+        cfg.classes["prms_stream_temp"] = PRMSStreamTempConstantShade
+        return cfg
 
-@pytest.mark.skipif(
-    not _seg_humid_control.exists(),
-    reason="seg-humid control file not present",
-)
-def test_assemble_unwired_leaf_raises():
-    with pytest.raises(NotImplementedError, match="SegHumidity"):
-        assemble_from_control(_seg_humid_control)
+    monkeypatch.setattr(assemble, "from_control", from_control_constant_shade)
+    with pytest.raises(NotImplementedError, match="ConstantShade"):
+        assemble_from_control(DRB_DIR / "nhm_stream_temp.control")
 
 
 # ----------------------------------------------------------------------

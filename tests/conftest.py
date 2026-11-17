@@ -98,8 +98,9 @@ def _marker(path: pl.Path) -> str | None:
 def check_oracle_pins(root: pl.Path = PWS_TEST_DATA) -> list[str]:
     """Mismatches between the pinned keys and the markers in root: a
     domain's .oracle_ikey, each pinned answer directory's .oracle_okey
-    (this platform's pin), and its .derived_okey (pywatershed's
-    oracle_populate.py derived the variables from THESE answers). A
+    (this platform's pin) and, where the answers are links, the
+    oracle's own marker beside them, and its .derived_okey
+    (oracle_populate.py derived the variables from THESE answers). A
     pinned directory that does not exist is not a mismatch -- the test
     modules' own skipifs report missing data."""
     pins = tomllib.loads(ORACLE_PINS.read_text())
@@ -121,6 +122,21 @@ def check_oracle_pins(root: pl.Path = PWS_TEST_DATA) -> list[str]:
             problems.append(
                 f"{dir_name}/.oracle_okey is {okey}, pin {by_platform[tag]}"
             )
+        # the answers are symlinks into the oracle and the marker is a
+        # COPY: a regenerated oracle changes the answers under the
+        # links while the copy keeps the old key
+        linked = next(
+            (pp for pp in sorted(out_dir.glob("*.nc")) if pp.is_symlink()),
+            None,
+        )
+        if linked is not None:
+            oracle_okey = _marker(linked.resolve().parent / ".oracle_okey")
+            if oracle_okey is not None and oracle_okey != okey:
+                problems.append(
+                    f"{dir_name}: the linked answers are now key "
+                    f"{oracle_okey}, the copied marker says {okey} "
+                    "(rerun oracle_populate.py)"
+                )
         derived = _marker(out_dir / ".derived_okey")
         if derived != okey:
             problems.append(
