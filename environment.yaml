@@ -38,7 +38,9 @@ dependencies:
   # matches pyPRMS's !=1.7.4 requirement so its pip install does NOT
   # replace the conda build with a PyPI wheel (ABI mismatch with
   # conda numpy -> "numpy.ndarray size changed" RuntimeWarning);
-  # revisit when pyPRMS lands on conda-forge
+  # revisit when pyPRMS lands on conda-forge.
+  # README "pwpx on Hovenweep" deletes these two lines BY PATTERN
+  # ('^  - netCDF4=', '^  - libnetcdf='): keep that form.
   - netCDF4=1.7.3
   - libnetcdf=4.9.*
   - networkx  # Discretization.topological_order (pywatershed-identical)

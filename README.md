@@ -117,15 +117,21 @@ conda activate mpixr
 ### pwpx on Hovenweep
 
 The same steps as above, with conda supplying everything except the
-MPI stack. Not yet run on Hovenweep. Run from the directory holding
-the three clones:
+MPI stack and HDF5. conda must install NO HDF5 here: `h5py` is built
+against Cray's, and conda's `netCDF4` / `libnetcdf` would bring a
+second, serial HDF5 that `h5py` then loads instead (Nov 2026: "Headers
+are 1.12.2, library is 1.14.6", then an abort on `import h5py`). pip
+supplies `netCDF4`; its wheel carries a private HDF5. Run from the
+directory holding the three clones:
 
 ```
 module load conda
-sed '/BEGIN mpi-binaries/,/END mpi-binaries/d' \
+sed -e '/BEGIN mpi-binaries/,/END mpi-binaries/d' \
+    -e '/^  - netCDF4=/d' -e '/^  - libnetcdf=/d' \
     pws_phoenix/environment.yaml > environment_hovenweep.yaml
 conda env create -n pwpx -f environment_hovenweep.yaml
 conda activate pwpx
+conda list | grep -i -E "hdf5|netcdf"   # expect nothing
 
 # mpi4py against cray-mpich (cc is the Cray compiler wrapper)
 export MPICC=cc
@@ -140,11 +146,15 @@ python -m pip install --force-reinstall --no-cache-dir --no-deps \
     --no-binary=h5py h5py
 
 # pip only after the two compiled packages, so nothing replaces them
-pip install h5netcdf hdf5plugin pytest-mpi
+pip install netCDF4==1.7.3 h5netcdf hdf5plugin pytest-mpi
 pip install -e ./mpix
 pip install -e ./mpixarray
 pip install -e ./pws_phoenix --no-deps
 ```
+
+Check the build as for mpixarray above (`h5py.get_config().mpi` is
+True; `ldd` on `h5py.h5` shows Cray's `libhdf5_parallel` and nothing
+under `$CONDA_PREFIX`).
 
 Session setup is the file above with `conda activate pwpx`. Tests:
 `MPI_CMD="srun -n 4" ./tests/run_tests.sh`, after populating
