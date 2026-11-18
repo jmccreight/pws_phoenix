@@ -83,7 +83,7 @@ For each code finding it asks: why did no test catch this?
 | 9 | 09_soilzone.md | pws_phoenix/hydrology/prms_soilzone.py | 2,002 | B | reviewed |
 | 10 | 10_soilzone_ag.md | pws_phoenix/hydrology/prms_soilzone_ag.py | 2,196 | B | reviewed |
 | 11 | 11_snow.md | pws_phoenix/hydrology/prms_snow.py | 2,474 | B | reviewed |
-| 12 | 12_atmosphere.md | pws_phoenix/atmosphere/ | 1,256 | B | todo |
+| 12 | 12_atmosphere.md | pws_phoenix/atmosphere/ | 1,256 | B | reviewed |
 | 13 | 13_stream_temp.md | pws_phoenix/hydrology/prms_stream_{temp,shade}.py | 3,002 | B | todo |
 | 14 | 14_prms_translate.md | pws_phoenix/prms_translate/, pws_phoenix/utils/ | 2,429 | D | todo |
 
