@@ -1,0 +1,232 @@
+"""Translate one PRMS domain ONCE, ahead of any run: a PRMS control
+file -> pws_phoenix input files in a flat domain directory.
+
+    python -m pws_phoenix.prms_translate.translate_domain \\
+        CONTROL_FILE --out DOMAIN_DIR [--cbh-name NAME] \\
+        [--only {cbh,parameters} ...] [--force]
+
+The domain directory is FLAT (the layout of test_data/<domain>/): one
+directory holds the files of every control translated into it, each
+control's own files named by the control file's stem.
+
+    DOMAIN_DIR/
+        cbh.nc                      (or cbh_<NAME>.nc)
+        <stem>.control              a copy of the control file
+        <stem>_parameters.nc
+        <stem>_translation.yaml
+
+- ``cbh.nc``: the control's CBH files in one netCDF
+  (``cbh.write_cbh_netcdf``). Controls that name the same CBH files
+  share it; a control with other CBH files needs its own name
+  (``cbh_name``).
+- ``<stem>_parameters.nc``: everything in the control's parameter
+  file(s), as ``readers.load_parameters`` returns it. Its
+  ``source_files`` attribute holds their resolved paths, one per line.
+- ``<stem>.control``: a byte-for-byte copy. It is a RECORD and the
+  source of OPTIONS (modules, flags, the simulation window, the
+  requested output variables). It is not a runnable PRMS control: its
+  file entries (``param_file``, ``precip_day``, ...) are relative to
+  the ORIGINAL's directory and must never be resolved from the copy.
+- ``<stem>_translation.yaml``: which FILES the control maps to. The
+  products are file names relative to the yaml's own directory (the
+  domain directory can be moved); the files that were read are
+  absolute paths. A run takes its file paths from here and its
+  options from the control copy.
+
+An existing product is reused when it was written from the files the
+control names, and raises when it was written from others (see
+``translate_domain`` for ``force``).
+"""
+
+import argparse
+import hashlib
+import pathlib as pl
+from collections.abc import Sequence
+from typing import Any
+
+import xarray as xr
+import yaml
+
+from pws_phoenix.prms_translate.cbh import (
+    cbh_netcdf_sources,
+    write_cbh_netcdf,
+)
+from pws_phoenix.prms_translate.control import from_control
+from pws_phoenix.prms_translate.readers import load_control, load_parameters
+
+STEPS = ("cbh", "parameters")
+
+
+def _raise_if_other_sources(
+    path: pl.Path, found: Any, wanted: Any, hint: str = ""
+) -> None:
+    if found != wanted:
+        raise FileExistsError(
+            f"{path} exists and was not written from the files this "
+            f"control names. Its sources: {found}. The control's: "
+            f"{wanted}. Rewrite it (include its step and pass "
+            f"force=True, --force){hint}."
+        )
+
+
+def translate_domain(
+    control_file: str | pl.Path,
+    out_dir: str | pl.Path,
+    cbh_name: str | None = None,
+    only: Sequence[str] | None = None,
+    force: bool = False,
+) -> pl.Path:
+    """Translate the files `control_file` names into `out_dir` (see
+    the module docstring for the products). Returns the path of
+    ``<stem>_translation.yaml``.
+
+    `cbh_name`: the forcing file is ``cbh_<cbh_name>.nc`` instead of
+    ``cbh.nc``.
+
+    `only`: the steps to run, of ``STEPS`` (default: all). The control
+    copy and the yaml are written in every case. The yaml lists a
+    product whose file does not exist as null.
+
+    An existing product written from the files the control names is
+    reused, and nothing is parsed for it. One written from OTHER files
+    raises, whether or not its step is selected. ``force=True``
+    rewrites the products of the selected steps.
+
+    An existing control copy that differs from `control_file` (the
+    control file changed since the domain was translated) raises;
+    ``force=True`` replaces the copy."""
+    control_file = pl.Path(control_file).resolve()
+    out_dir = pl.Path(out_dir)
+    steps = STEPS if only is None else tuple(only)
+    unknown = [ss for ss in steps if ss not in STEPS]
+    if unknown:
+        raise ValueError(
+            f"translate_domain: unknown steps {unknown}; the steps are "
+            f"{list(STEPS)}."
+        )
+
+    cfg = from_control(load_control(control_file), control_file)
+    if cfg.dyn_param_paths:
+        raise NotImplementedError(
+            f"{control_file} names dynamic-parameter files "
+            f"({sorted(cfg.dyn_param_paths)}): translate_domain does "
+            "not translate them yet."
+        )
+    stem = control_file.stem
+    out_dir.mkdir(exist_ok=True)
+
+    # -- the control copy --
+    control_bytes = control_file.read_bytes()
+    control_copy = out_dir / f"{stem}.control"
+    # a control file translated inside its own directory is its own
+    # copy
+    if control_copy.resolve() != control_file:
+        differs = (
+            control_copy.exists()
+            and control_copy.read_bytes() != control_bytes
+        )
+        if differs and not force:
+            raise FileExistsError(
+                f"{control_copy} differs from {control_file}: the "
+                "control file changed since this domain was "
+                "translated. Pass force=True (--force) to replace the "
+                "copy."
+            )
+        if differs or not control_copy.exists():
+            control_copy.write_bytes(control_bytes)
+
+    # -- the forcing file --
+    forcing_name = "cbh.nc" if cbh_name is None else f"cbh_{cbh_name}.nc"
+    forcing = out_dir / forcing_name
+    forcing_sources = {name: str(pp) for name, pp in cfg.cbh_paths.items()}
+    rewrite = force and "cbh" in steps
+    if forcing.exists() and not rewrite:
+        _raise_if_other_sources(
+            forcing,
+            cbh_netcdf_sources(forcing),
+            forcing_sources,
+            hint=", or give this control its own forcing file "
+            "(cbh_name, --cbh-name)",
+        )
+    if "cbh" in steps:
+        write_cbh_netcdf(cfg.cbh_paths, forcing, force=force)
+
+    # -- the parameter file --
+    parameters = out_dir / f"{stem}_parameters.nc"
+    parameter_sources = [str(pp) for pp in cfg.param_files]
+    rewrite = force and "parameters" in steps
+    if parameters.exists() and not rewrite:
+        with xr.open_dataset(parameters) as existing:
+            found = existing.attrs.get("source_files")
+        _raise_if_other_sources(
+            parameters, found, "\n".join(parameter_sources)
+        )
+    if "parameters" in steps and (rewrite or not parameters.exists()):
+        ds = load_parameters(cfg.param_files)
+        ds.attrs["source_files"] = "\n".join(parameter_sources)
+        partial = parameters.with_name(parameters.name + ".partial")
+        ds.to_netcdf(partial)
+        partial.replace(parameters)
+
+    # -- the yaml --
+    info = {
+        "control_file": str(control_file),
+        "control_sha256": hashlib.sha256(control_bytes).hexdigest(),
+        "control_copy": control_copy.name,
+        "forcing_file": forcing.name if forcing.exists() else None,
+        "forcing_sources": forcing_sources,
+        "parameter_file": parameters.name if parameters.exists() else None,
+        "parameter_sources": parameter_sources,
+        # the derived parameters and map weights: not written yet
+        "preprocessed_file": None,
+    }
+    yaml_path = out_dir / f"{stem}_translation.yaml"
+    with open(yaml_path, "w") as ff:
+        yaml.safe_dump(info, ff, sort_keys=False)
+    return yaml_path
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="python -m pws_phoenix.prms_translate.translate_domain",
+        description="Translate the files a PRMS control file names "
+        "into pws_phoenix input files in a flat domain directory.",
+    )
+    parser.add_argument("control_file", type=pl.Path)
+    parser.add_argument(
+        "--out",
+        dest="out_dir",
+        type=pl.Path,
+        required=True,
+        help="the domain directory (created if missing)",
+    )
+    parser.add_argument(
+        "--cbh-name",
+        help="write the forcing file as cbh_<CBH_NAME>.nc, not cbh.nc",
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        choices=STEPS,
+        help="the steps to run (default: all)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="rewrite the products of the selected steps, and replace "
+        "a control copy that differs from the control file",
+    )
+    args = parser.parse_args(argv)
+    print(
+        translate_domain(
+            args.control_file,
+            args.out_dir,
+            cbh_name=args.cbh_name,
+            only=args.only,
+            force=args.force,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

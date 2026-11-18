@@ -36,7 +36,7 @@ from pws_phoenix.prms_translate.assemble_mpi import (
     mpi_model_from_control,
     write_mpi_input_file,
 )
-from pws_phoenix.prms_translate.cbh import load_cbh
+from pws_phoenix.prms_translate.cbh import load_cbh, write_cbh_netcdf
 from pws_phoenix.prms_translate.control import (
     PrmsRunConfig,
     from_control,
@@ -78,6 +78,7 @@ __all__ = [
     "seg_inflow_from_segment_flow_init",
     "verify_preprocessed",
     "volume_map_weights",
+    "write_cbh_netcdf",
     "write_mpi_input_file",
     "write_preprocessed",
 ]
