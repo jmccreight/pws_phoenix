@@ -77,8 +77,8 @@ For each code finding it asks: why did no test catch this?
 | 3 | 03_model.md | pws_phoenix/model.py | 1,890 | A | reviewed |
 | 4 | 04_config_contract.md | pws_phoenix/{config,model_contract_graph}.py | 595 | A | reviewed |
 | 5 | 05_flow_graph.md | pws_phoenix/{flow_graph,flow_graph_build}.py, pws_phoenix/hydrology/{obsin,pass_through,prms_channel,source_sink}_flow_node.py | 1,544 | C | reviewed |
-| 6 | 06_starfit.md | pws_phoenix/hydrology/starfit*_flow_node.py | 1,377 | C | todo |
-| 7 | 07_small_ports.md | pws_phoenix/hydrology/prms_{groundwater,canopy,channel,hydraulic_geometry}.py | 1,772 | B | todo |
+| 6 | 06_starfit.md | pws_phoenix/hydrology/starfit*_flow_node.py | 1,377 | C | reviewed |
+| 7 | 07_small_ports.md | pws_phoenix/hydrology/prms_{groundwater,canopy,channel,hydraulic_geometry}.py | 1,772 | B | reviewed |
 | 8 | 08_runoff.md | pws_phoenix/hydrology/prms_runoff.py | 3,071 | B | todo |
 | 9 | 09_soilzone.md | pws_phoenix/hydrology/prms_soilzone.py | 2,002 | B | todo |
 | 10 | 10_soilzone_ag.md | pws_phoenix/hydrology/prms_soilzone_ag.py | 2,196 | B | todo |
