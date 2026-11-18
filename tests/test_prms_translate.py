@@ -570,9 +570,9 @@ def test_load_control_drops_unknown_entries(tmp_path, capsys):
     path.write_text(text)
     ctl = load_control(path)
     assert not ctl.exists("cbh_binary_flag")
-    assert np.datetime64(ctl.get("start_time").values, "D") == np.datetime64(
-        "1979-01-01"
-    )
+    start_time = ctl.get("start_time").values
+    assert isinstance(start_time, np.datetime64)
+    assert start_time.astype("datetime64[D]") == np.datetime64("1979-01-01")
     assert "['cbh_binary_flag']" in capsys.readouterr().out
 
 

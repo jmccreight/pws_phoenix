@@ -154,9 +154,7 @@ class ResultCollector:
                     ref = proc._refs[name]
                     break
             else:
-                raise ValueError(
-                    f"Variable '{name}' not found in any process"
-                )
+                raise ValueError(f"Variable '{name}' not found in any process")
             if not np.issubdtype(ref.dtype, np.floating):
                 raise ValueError(
                     f"Variable '{name}' has dtype {ref.dtype}: only "
@@ -339,7 +337,9 @@ class Output:
         n_written = self.current_time_step
         if n_written < len(self.time_values):
             group = zarr.open_group(self.output_store, mode="r+")
-            group["time"].resize((n_written,))
+            time_array = group["time"]
+            assert isinstance(time_array, zarr.Array)
+            time_array.resize((n_written,))
             for arr in self._arrays.values():
                 arr.resize((n_written,) + arr.shape[1:])
         self._finalized = True

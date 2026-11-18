@@ -166,9 +166,13 @@ def test_tabulated_shade_is_exact():
     # table, then the five (366, nseg) tables
     kk = np.arange(366) + 1.0
     declination = 0.40928 * np.cos(((2.0 * np.pi) / _DAYS_YR) * (172.0 - kk))
-    tables = [np.zeros((366, nseg)) for _ in range(5)]
+    hrsr, hrrh, hrss, sti, totsh = (np.zeros((366, nseg)) for _ in range(5))
     _shade_statics_table(
-        *tables,
+        hrsr,
+        hrrh,
+        hrss,
+        sti,
+        totsh,
         declination,
         seg_lat_rad,
         pp["azrh"],
@@ -182,26 +186,49 @@ def test_tabulated_shade_is_exact():
     for tt, doy in ((0, 274), (91, 1), (182, 92), (273, 183)):
         summer_flag = 1 if 121 <= doy <= 273 else 0
         width = seg_flow_width.values[tt, :]
-        veg = tuple(pp[nn] for nn in names)
         _shade_all(
             seg_shade,
             seg_svi,
             doy - 1,
             float(declination[doy - 1]),
             summer_flag,
-            *tables,
+            hrsr,
+            hrrh,
+            hrss,
+            sti,
+            totsh,
             seg_lat_rad,
             width,
             pp["azrh"],
-            *veg[3:],
+            pp["vce"],
+            pp["voe"],
+            pp["vhe"],
+            pp["vdemx"],
+            pp["vdemn"],
+            pp["vcw"],
+            pp["vow"],
+            pp["vhw"],
+            pp["vdwmx"],
+            pp["vdwmn"],
         )
         shades, svis = _shday_vectorized(
             seg_lat_rad,
             float(declination[doy - 1]),
             width,
-            *veg[:8],
+            pp["azrh"],
+            pp["alte"],
+            pp["altw"],
+            pp["vce"],
+            pp["voe"],
+            pp["vhe"],
+            pp["vdemx"],
+            pp["vdemn"],
             summer_flag,
-            *veg[8:],
+            pp["vcw"],
+            pp["vow"],
+            pp["vhw"],
+            pp["vdwmx"],
+            pp["vdwmn"],
             maxiter,
         )
         np.testing.assert_array_equal(seg_shade, shades)
