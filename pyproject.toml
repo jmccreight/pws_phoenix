@@ -7,7 +7,8 @@ name = "pws_phoenix"
 version = "0.0.1"
 description = "A rewrite of pywatershed on xarray, mpixarray and numba"
 requires-python = ">=3.14"
-# Runtime dependencies come from environment.yaml (conda); none are
+# Runtime dependencies come from environment.yaml (serial) or
+# environment_mpi.yaml (conda); none are
 # declared here so `pip install -e .` never re-solves the conda stack.
 dependencies = []
 

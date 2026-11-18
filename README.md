@@ -6,7 +6,7 @@
     - [Environment (local)](#environment-local)
     - [The mpixarray ecosystem](#the-mpixarray-ecosystem)
     - [mpixarray on Hovenweep](#mpixarray-on-hovenweep)
-    - [pwpx on Hovenweep](#pwpx-on-hovenweep)
+    - [pwpx_mpi on Hovenweep](#pwpx_mpi-on-hovenweep)
     - [CI setup (one-time, repo admin)](#ci-setup-one-time-repo-admin)
     - [Running tests](#running-tests)
     - [Run-time switches (environment variables, read at import)](#run-time-switches-environment-variables-read-at-import)
@@ -27,22 +27,34 @@
 
 ### Environment (local)
 
-`environment.yaml` defines the ONE `pwpx` environment (parallel; a
-serial env is not maintained separately):
+Two environment files:
+
+- `environment.yaml`: the serial `pwpx` environment, the default.
+  Everything except `ModelMPI` runs in it.
+- `environment_mpi.yaml`: the `pwpx_mpi` environment, the same file
+  plus the MPI + parallel-HDF5/NetCDF stack in the marked
+  `BEGIN/END parallel-io` block. Needed only for `ModelMPI` and the
+  MPI tests, together with the mpixarray ecosystem (next section).
+  Windows has no conda-forge mpich / parallel hdf5, so it is serial
+  only.
 
 ```
-conda env create -f environment.yaml   # or: conda env update -n pwpx
+conda env create -f ~/usgs/mpix_meta/pws_phoenix/environment.yaml
 conda activate pwpx
-pip install -e . --no-deps              # the pws_phoenix package itself
+pip install -e ~/usgs/mpix_meta/pws_phoenix --no-deps
 ```
 
-The MPI + parallel-HDF5/NetCDF stack lives in the marked
-`BEGIN/END parallel-io` block of `environment.yaml`. A serial
-environment (e.g. on a platform conda cannot solve the parallel stack
-for -- Windows has no conda-forge mpich/parallel hdf5) is derived by
-deleting that block; CI's Windows job does exactly this. Serial runs
-never need the block (the `mpixarray`
-import is optional).
+or, for MPI:
+
+```
+conda env create -f ~/usgs/mpix_meta/pws_phoenix/environment_mpi.yaml
+conda activate pwpx_mpi
+pip install -e ~/usgs/mpix_meta/pws_phoenix --no-deps
+```
+
+(`conda env update -n <name> -f <file>` updates an existing one.)
+Outside the parallel-io block the two files are identical, which
+`tests/test_environment_files.py` checks: edit them together.
 
 ### The mpixarray ecosystem
 
@@ -58,7 +70,7 @@ pip install -e mpixarray
 The originals live on code.usgs.gov (`arc/py-hpc`). `mpixarray`
 requires `mpix` by plain name, so installing `mpix` first makes pip
 take the local clone. Their other requirements are listed in
-`environment.yaml` (the "ecosystem requirements" group inside the
+`environment_mpi.yaml` (the "ecosystem requirements" group inside the
 parallel-io block) so the editable installs pull nothing from PyPI.
 
 ### mpixarray on Hovenweep
@@ -114,7 +126,7 @@ export NUMBA_NUM_THREADS=1
 conda activate mpixr
 ```
 
-### pwpx on Hovenweep
+### pwpx_mpi on Hovenweep
 
 The same steps as above, with conda supplying everything except the
 MPI stack and HDF5. conda must install NO HDF5 here: `h5py` is built
@@ -128,9 +140,9 @@ directory holding the three clones:
 module load conda
 sed -e '/BEGIN mpi-binaries/,/END mpi-binaries/d' \
     -e '/^  - netCDF4=/d' -e '/^  - libnetcdf=/d' \
-    pws_phoenix/environment.yaml > environment_hovenweep.yaml
-conda env create -n pwpx -f environment_hovenweep.yaml
-conda activate pwpx
+    pws_phoenix/environment_mpi.yaml > environment_hovenweep.yaml
+conda env create -n pwpx_mpi -f environment_hovenweep.yaml
+conda activate pwpx_mpi
 # expect nothing from conda (pyPRMS pulls netCDF4 from PyPI: fine)
 conda list | grep -i -E "hdf5|netcdf" | grep -v pypi
 
@@ -163,7 +175,7 @@ python -c "import netCDF4, h5py, xarray; print(netCDF4.__version__, h5py.version
 # expect "1.7.3 1.12.2"; this loads both HDF5 users in one process
 ```
 
-Session setup is the file above with `conda activate pwpx`. Tests:
+Session setup is the file above with `conda activate pwpx_mpi`. Tests:
 `MPI_CMD="srun -n 4" ./tests/run_tests.sh`, after populating
 `test_data/` (see "Running tests"; without it the data-dependent tests
 fail, since the script allows no skips). The answer

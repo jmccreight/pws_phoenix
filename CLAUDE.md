@@ -89,15 +89,16 @@ If additional context arises about this project which is useful to add, please l
 
 # Environment (tests and tooling)
 
-The env of record is **`pwpx`**, built from `pws_phoenix/environment.yaml`
-(July 2026; previously the meta-repo `mpix` env was used by habit). ONE
-parallel env: the MPI + parallel-IO stack rides in the yaml's marked
-`BEGIN/END parallel-io` block (delete the block = the serial derivation;
-CI's Windows job does this). The mpixarray ecosystem is pip-installed
-into it in dependency order (see README Installation) -- **mpixarray
+Two envs (Nov 17, 2026): **`pwpx`** (serial, the default) from
+`pws_phoenix/environment.yaml`, and **`pwpx_mpi`** from
+`pws_phoenix/environment_mpi.yaml` = the same file plus the MPI +
+parallel-IO stack in its marked `BEGIN/END parallel-io` block
+(`tests/test_environment_files.py` checks they agree outside it: edit
+both together). The full sweep (`tests/run_tests.sh`) needs
+`pwpx_mpi`. The mpixarray ecosystem is pip-installed into `pwpx_mpi`
+in dependency order (see README Installation) -- **mpixarray
 branch `1.0.0`, mpix `main`** (Oct 2026; the old `pws` branch API is
-gone). `pwpx` has
-everything: pytest (+-mpi), mypy, ruff, and the pywatershed import-chain
+gone). Both envs have pytest, mypy, ruff, and the pywatershed import-chain
 deps for the parity tests (pywatershed itself is used from the mpix-root
 clone via sys.path). Test data = this repo's `test_data/` (gitignored
 except `generate/`), populated + derived from the pws-prms-oracle by

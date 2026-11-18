@@ -22,9 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Build the pwpx env from environment.yaml (now includes the
-      # parallel-io block). This fast job runs lint + serial tests only;
-      # the full ecosystem + MPI + platform matrix is ci_ecosystem.yaml.
+      # Build the serial pwpx env from environment.yaml (no MPI
+      # stack). This fast job runs lint + serial tests only; the full
+      # ecosystem + MPI + platform matrix is ci_ecosystem.yaml, which
+      # builds environment_mpi.yaml.
       - name: Set up environment (pwpx)
         uses: mamba-org/setup-micromamba@v2
         with:
