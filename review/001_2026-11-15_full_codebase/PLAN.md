@@ -81,7 +81,7 @@ For each code finding it asks: why did no test catch this?
 | 7 | 07_small_ports.md | pws_phoenix/hydrology/prms_{groundwater,canopy,channel,hydraulic_geometry}.py | 1,772 | B | reviewed |
 | 8 | 08_runoff.md | pws_phoenix/hydrology/prms_runoff.py | 3,071 | B | reviewed |
 | 9 | 09_soilzone.md | pws_phoenix/hydrology/prms_soilzone.py | 2,002 | B | reviewed |
-| 10 | 10_soilzone_ag.md | pws_phoenix/hydrology/prms_soilzone_ag.py | 2,196 | B | todo |
+| 10 | 10_soilzone_ag.md | pws_phoenix/hydrology/prms_soilzone_ag.py | 2,196 | B | reviewed |
 | 11 | 11_snow.md | pws_phoenix/hydrology/prms_snow.py | 2,474 | B | todo |
 | 12 | 12_atmosphere.md | pws_phoenix/atmosphere/ | 1,256 | B | todo |
 | 13 | 13_stream_temp.md | pws_phoenix/hydrology/prms_stream_{temp,shade}.py | 3,002 | B | todo |
