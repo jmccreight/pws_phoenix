@@ -93,7 +93,7 @@ All use checklist T.
 
 | # | Findings file | Paths (under tests/) | Lines | Covers code slices | Status |
 |---|---|---|---|---|---|
-| 15 | 15_tests_harness.md | conftest.py, kernel_units.py, run_tests.sh, test_kernel_units.py | 2,560 | all | todo |
+| 15 | 15_tests_harness.md | conftest.py, kernel_units.py, run_tests.sh, test_kernel_units.py | 2,560 | all | reviewed |
 | 16 | 16_tests_framework.md | test_{budget,discretization,input_spec,model_contract_graph,model_step,output_finalize,process_fields,ref_behaviors,time,two_grid,units,units_check,up_low_regression,benchmark_coverage}*.py | 3,737 | 1-4 | todo |
 | 17 | 17_tests_restart.md | test_restart*.py | 1,784 | 1, 3, 5-13 | todo |
 | 18 | 18_tests_flow_graph.md | test_{flow_graph,flow_graph_build,mixed_channel_starfit,obsin_source_sink_nodes,starfit_daily_parity,starfit_flow_node}.py | 1,791 | 5, 6 | todo |
