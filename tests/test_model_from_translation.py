@@ -60,7 +60,9 @@ def moved_yaml(translation_yaml, tmp_path):
 
 
 def _assert_same_variables(found: xr.Dataset, expected: xr.Dataset):
-    assert sorted(found.variables) == sorted(expected.variables)
+    assert sorted(map(str, found.variables)) == sorted(
+        map(str, expected.variables)
+    )
     for name in expected.variables:
         xr.testing.assert_identical(found[name], expected[name])
 
@@ -134,6 +136,7 @@ def test_kit_equals_control_kit(translation_yaml):
         if disc.parameters is None:
             assert found_disc.parameters is None
         else:
+            assert found_disc.parameters is not None
             _assert_same_variables(found_disc.parameters, disc.parameters)
 
 
@@ -145,6 +148,7 @@ def test_run_equals_control_run(translation_yaml):
     with model_from_control(NHM, control=control) as model:
         assert model.ntime == N_TIME
         model.run(DT, np.int32(N_TIME))
+        assert model.results is not None
         expected = model.results.values
 
     with model_from_translation(translation_yaml, control=control) as model:
@@ -159,6 +163,7 @@ def test_run_equals_control_run(translation_yaml):
             assert inp.data.dtype == np.float32
             assert not inp.data.variable._in_memory
             assert inp.current_values.dtype == np.float64
+        assert model.results is not None
         results = model.results.values
 
     for name in COLLECT_NAMES:

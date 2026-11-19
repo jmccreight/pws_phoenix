@@ -520,9 +520,7 @@ def test_set_parameters(toy_ds):
         model.run(DT, N_STEPS_BEFORE_REPLAY)
         stepped = snapshot_state(model)
 
-    with _make_model(
-        toy_ds, ReplayToy, capacity=new_capacity.copy()
-    ) as fresh:
+    with _make_model(toy_ds, ReplayToy, capacity=new_capacity.copy()) as fresh:
         fresh.run(DT, N_STEPS_BEFORE_REPLAY)
         assert_state_equal(
             fresh, stepped, when="in the model whose parameters were set"
@@ -658,9 +656,7 @@ def test_result_collector(toy_ds, tmp_path):
         for name, array in model.results.values.items():
             assert array is buffers[name]
             np.testing.assert_array_equal(array, first[name], err_msg=name)
-            np.testing.assert_array_equal(
-                array, collected[name], err_msg=name
-            )
+            np.testing.assert_array_equal(array, collected[name], err_msg=name)
 
 
 def test_result_collector_raises(toy_ds):
@@ -840,8 +836,7 @@ def test_drb_result_collector():
         _step_and_check_rows(model, DT_DAY, N_STEPS_BEFORE_REPLAY)
         assert model.results is not None
         first = {
-            name: array.copy()
-            for name, array in model.results.values.items()
+            name: array.copy() for name, array in model.results.values.items()
         }
         for name in names:
             assert np.isfinite(first[name][:N_STEPS_BEFORE_REPLAY]).all()

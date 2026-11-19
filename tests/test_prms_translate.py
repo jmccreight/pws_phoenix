@@ -16,6 +16,7 @@ import xarray as xr
 
 from conftest import PWS_TEST_DATA, PYWS_ROOT
 from pws_phoenix.prms_translate import (
+    assemble,
     assemble_from_control,
     from_control,
     load_cbh,
@@ -24,6 +25,7 @@ from pws_phoenix.prms_translate import (
     load_parameters,
     model_from_control,
     package_parameters,
+    prms_parameter_defaults,
     resolve_classes,
     volume_map_weights,
 )
@@ -600,3 +602,94 @@ def test_cbh_paths_override(tmp_path):
     assert len(consumers) == 1
     expected = load_cbh(DRB_DIR / "prcp.cbh", cfg.start_time, cfg.end_time)
     xr.testing.assert_identical(consumers[0]["prcp"], expected)
+
+
+# ----------------------------------------------------------------------
+# PRMS's rule for a parameter left "not specified"
+# ----------------------------------------------------------------------
+
+
+def _pref_flow_params(pref_flow_infil_frac=None) -> xr.Dataset:
+    """Five hrus: land, lake, swale, inactive, land."""
+    ds = xr.Dataset(
+        {
+            "hru_type": ("nhru", np.array([1, 2, 3, 0, 1])),
+            "pref_flow_den": (
+                "nhru",
+                np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+                {"units": "fraction"},
+            ),
+        }
+    )
+    if pref_flow_infil_frac is not None:
+        ds["pref_flow_infil_frac"] = (
+            "nhru",
+            np.array(pref_flow_infil_frac, dtype=np.float64),
+            {"units": "fraction", "description": "as supplied"},
+        )
+    return ds
+
+
+@pytest.mark.parametrize(
+    "supplied", [None, [-1.0] * 5, [-1.0, -2.0, -1.0, -1.0, -3.0]]
+)
+def test_pref_flow_infil_frac_not_specified(supplied):
+    """Absent, or negative on every hru: pref_flow_den, zero on lake,
+    swale and inactive hrus (what PRMS computes with). pref_flow_den
+    itself is not edited."""
+    params = _pref_flow_params(supplied)
+    found = prms_parameter_defaults(params)
+    np.testing.assert_array_equal(
+        found["pref_flow_infil_frac"].values, [0.1, 0.0, 0.0, 0.0, 0.5]
+    )
+    assert found["pref_flow_infil_frac"].dims == ("nhru",)
+    assert found["pref_flow_infil_frac"].attrs["units"] == "fraction"
+    np.testing.assert_array_equal(
+        params["pref_flow_den"].values, [0.1, 0.2, 0.3, 0.4, 0.5]
+    )
+    assert found["pref_flow_den"].values is params["pref_flow_den"].values
+    # the caller's dataset is not edited
+    if supplied is None:
+        assert "pref_flow_infil_frac" not in params
+    else:
+        np.testing.assert_array_equal(
+            params["pref_flow_infil_frac"].values, supplied
+        )
+
+
+def test_pref_flow_infil_frac_supplied_is_left_alone():
+    params = _pref_flow_params([0.0, 0.7, 0.7, 0.7, 1.0])
+    assert prms_parameter_defaults(params) is params
+
+
+def test_pref_flow_infil_frac_mixed_raises():
+    params = _pref_flow_params([-1.0, 0.2, 0.2, -1.0, 0.2])
+    with pytest.raises(ValueError, match="negative on 2 of 5 hrus"):
+        prms_parameter_defaults(params)
+
+
+@drb_skipif
+def test_pref_flow_infil_frac_not_specified_builds(monkeypatch):
+    """nhm.control with pref_flow_infil_frac at PRMS's default (-1):
+    assembly applies the rule and the Model builds (the soil zone
+    raises on a negative value)."""
+
+    def not_specified(paths):
+        params = load_parameters(paths)
+        return params.assign(
+            pref_flow_infil_frac=xr.full_like(
+                params["pref_flow_infil_frac"], -1.0
+            )
+        )
+
+    monkeypatch.setattr(assemble, "load_parameters", not_specified)
+    kit = assemble_from_control(DRB_DIR / "nhm.control")
+    soil = kit.process_dict["prms_soilzone"]["parameters"]
+    land = soil["hru_type"].values == 1
+    np.testing.assert_array_equal(
+        soil["pref_flow_infil_frac"].values[land],
+        soil["pref_flow_den"].values[land],
+    )
+    assert (soil["pref_flow_infil_frac"].values[~land] == 0.0).all()
+    with kit.model() as model:
+        assert model.ntime == 731

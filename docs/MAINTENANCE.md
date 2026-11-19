@@ -1,3 +1,21 @@
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+
+- [Maintenance ledger](#maintenance-ledger)
+  - [PRMSSnow: `calc_snowevap` hands mass to `pkwater_equiv` but not to `pk_ice` / `freeh2o`](#prmssnow-calc_snowevap-hands-mass-to-pkwater_equiv-but-not-to-pk_ice--freeh2o)
+  - [PRMSCanopy: bare-soil / lake HRUs drop stored water outside the budget](#prmscanopy-bare-soil--lake-hrus-drop-stored-water-outside-the-budget)
+  - [PRMSSoilzone: `compute_interflow` silently gives zero interflow from an inconsistent start state](#prmssoilzone-compute_interflow-silently-gives-zero-interflow-from-an-inconsistent-start-state)
+  - [PRMSRunoffAg: areas from the current step's `ag_frac`, before the kernel (departure #3)](#prmsrunoffag-areas-from-the-current-steps-ag_frac-before-the-kernel-departure-3)
+  - [Report upstream (pywatershed): SourceSinkFlowNode harvests the last substep's outflow](#report-upstream-pywatershed-sourcesinkflownode-harvests-the-last-substeps-outflow)
+  - [Report upstream (pywatershed): `segment_flow_init` is ASSIGNED, not summed, at confluences](#report-upstream-pywatershed-segment_flow_init-is-assigned-not-summed-at-confluences)
+  - [Report upstream (pywatershed): a supplied `pref_flow_infil_frac` is not zeroed on inactive, lake and swale HRUs](#report-upstream-pywatershed-a-supplied-pref_flow_infil_frac-is-not-zeroed-on-inactive-lake-and-swale-hrus)
+  - [Report upstream (mpixarray): the NetCDF writer re-emits a `_FillValue` inherited on a coordinate](#report-upstream-mpixarray-the-netcdf-writer-re-emits-a-_fillvalue-inherited-on-a-coordinate)
+  - [A Model that raises during construction leaves its input files open](#a-model-that-raises-during-construction-leaves-its-input-files-open)
+  - [Idea (later): one-off unit check of a whole configuration with `pint`](#idea-later-one-off-unit-check-of-a-whole-configuration-with-pint)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 # Maintenance ledger
 
 Things to watch for and potentially fix later: known hazards kept
@@ -178,6 +196,39 @@ of the LAST one in index order, not their sum.
 - **Not fixed** because pywatershed's answers carry it; `+=` is the
   one-character fix once upstream agrees.
 - **Status:** not yet reported.
+
+## Report upstream (pywatershed): a supplied `pref_flow_infil_frac` is not zeroed on inactive, lake and swale HRUs
+
+PRMS 5.2.1.1, `soilzone.f90`, in the init HRU loop:
+
+```fortran
+        IF ( Hru_type(i)==INACTIVE .OR. Hru_type(i)==LAKE .OR. Hru_type(i)==SWALE) THEN
+          Pref_flow_den(i) = 0.0
+          Pref_flow_infil_frac(i) = 0.0
+        ENDIF
+```
+
+pywatershed's `PRMSSoilzone` zeroes its copy of `pref_flow_den` where
+the HRU is not land and leaves `pref_flow_infil_frac` as supplied;
+`pws_phoenix/hydrology/prms_soilzone.py` carries that verbatim, and
+its kernel reads `pref_flow_infil_frac` on every HRU.
+
+- **Reachable only if** a parameter file supplies a nonzero
+  `pref_flow_infil_frac` on an inactive, lake or swale HRU. The
+  effect on such an HRU has not been analyzed.
+- **Not reachable** when the file leaves the parameter "not
+  specified" (negative on every HRU):
+  `prms_translate.prms_parameter_defaults` then builds it from
+  `pref_flow_den` WITH PRMS's zeroing.
+- **Also wrong upstream:** pywatershed's `PRMSSoilzone` docstring
+  says zeros for all HRUs equal "not supplying the parameter to
+  PRMS". PRMS uses `pref_flow_den` in that case (`IF (
+  Pref_flow_infil_frac(1)<0.0 ) Pref_flow_infil_frac =
+  Pref_flow_den`); the two agree only where `pref_flow_den` is zero.
+- **Detector:** none.
+- **Not fixed** because pywatershed's answers carry it.
+- **Status:** found Nov 18, 2026 (the CONUS NHM parameter file leaves
+  the parameter at -1); not yet reported.
 
 ## Report upstream (mpixarray): the NetCDF writer re-emits a `_FillValue` inherited on a coordinate
 

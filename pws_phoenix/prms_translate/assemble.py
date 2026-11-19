@@ -179,6 +179,54 @@ def prms_initial_state(params: xr.Dataset) -> dict[str, xr.DataArray]:
     return state
 
 
+# PRMS hru_type codes on which soilzone.f90 sets pref_flow_infil_frac
+# (and pref_flow_den) to zero: inactive, lake, swale
+_HRU_TYPES_WITHOUT_PREF_FLOW = (0, 2, 3)
+
+
+def prms_parameter_defaults(params: xr.Dataset) -> xr.Dataset:
+    """PRMS's own rule for a parameter its file leaves "not
+    specified", which pws_phoenix (like pywatershed) requires:
+    `params` itself when the rule does not apply, else a new Dataset
+    that shares every other array.
+
+    - pref_flow_infil_frac absent, or negative on EVERY hru (PRMS's
+      default is -1.0): pref_flow_den, set to zero on inactive, lake
+      and swale hrus. These are the values PRMS computes with
+      (soilzone.f90: ``IF ( Pref_flow_infil_frac(1)<0.0 )
+      Pref_flow_infil_frac = Pref_flow_den``, then the zeroing in its
+      hru loop). Negative on some hrus but not all raises: PRMS tests
+      only the first hru and would use the mix as it is.
+
+    A file that supplies valid values is left alone, although PRMS
+    zeroes those on inactive, lake and swale hrus too (pywatershed
+    does not; see docs/MAINTENANCE.md)."""
+    if "pref_flow_den" not in params or "hru_type" not in params:
+        # not a soil zone parameter set: nothing to derive from
+        return params
+    name = "pref_flow_infil_frac"
+    attrs = params["pref_flow_den"].attrs
+    if name in params:
+        attrs = params[name].attrs
+        negative = params[name].values < 0.0
+        if not negative.any():
+            return params
+        if not negative.all():
+            raise ValueError(
+                f"{name} is negative on {int(negative.sum())} of "
+                f"{negative.size} hrus. Negative on every hru means "
+                '"not specified" (PRMS then uses pref_flow_den); a mix '
+                "is not translated."
+            )
+    # one (nhru,) array made at assembly: pref_flow_den is a parameter
+    # in its own right and must not be edited
+    values = params["pref_flow_den"].values.copy()
+    values[
+        np.isin(params["hru_type"].values, _HRU_TYPES_WITHOUT_PREF_FLOW)
+    ] = 0.0
+    return params.assign({name: (params["pref_flow_den"].dims, values, attrs)})
+
+
 def assemble_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
@@ -231,6 +279,7 @@ def _assemble(
     given for the CBH input `name` (a key of ``cfg.cbh_paths``): a
     (time, nhru) DataArray, or the path of a file that holds it.
     `control` and `preprocessed` are as in assemble_from_control."""
+    params = prms_parameter_defaults(params)
     artifacts: xr.Dataset | None = None
     if preprocessed is not None:
         from pws_phoenix.prms_translate.preprocess import verify_preprocessed

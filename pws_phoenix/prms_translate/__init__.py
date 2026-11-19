@@ -32,6 +32,7 @@ from pws_phoenix.prms_translate.assemble import (
     model_from_control,
     model_from_translation,
     prms_initial_state,
+    prms_parameter_defaults,
     seg_inflow_from_segment_flow_init,
 )
 from pws_phoenix.prms_translate.assemble_mpi import (
@@ -77,6 +78,7 @@ __all__ = [
     "digest_array",
     "package_parameters",
     "prms_initial_state",
+    "prms_parameter_defaults",
     "prms_metadata",
     "resolve_classes",
     "seg_inflow_from_segment_flow_init",
