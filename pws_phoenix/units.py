@@ -18,12 +18,16 @@ Runtime behavior (the Model boundary; ``control["units"]``):
   ``attrs["units"]`` (or its ``control["units_patch"]`` entry) must be
   a vocabulary key naming the declared quantity (:func:`same`); a Map's
   source and target declarations must agree. Nothing runs per step.
-- ``"convert"``: as "check", but a RESIDENT array (a parameter, an
-  in-memory input) supplied in different-but-compatible units is
-  converted IN PLACE, once, by the affine map :func:`affine` returns
-  (``x_declared = scale * x_supplied + offset``; the offset serves
-  degF -> degC). A streamed/lazy input that would need converting
-  raises -- conversion is never a per-step edit; pre-process the file.
+- ``"convert"``: as "check", but data supplied in
+  different-but-compatible units are converted by the affine map
+  :func:`affine` returns (``x_declared = scale * x_supplied +
+  offset``; the offset serves degF -> degC). A PARAMETER is the
+  model's working buffer and is converted IN PLACE, once
+  (:func:`reconcile`). Anything the model COPIES is converted in the
+  model's copy, and the supplied data are never edited
+  (:func:`conversion`): supplied initial state, restart files, and
+  every INPUT (in memory, file-backed or streamed), whose one-step
+  buffer is converted after each refill.
 - the PRMS boundary is separate: ``prms_translate.prms_units``
   translates PRMS's unit words to vocabulary keys and
   ``package_parameters`` judges them against the declarations.
@@ -199,30 +203,23 @@ def reconcile(
     mode: str | None,
     patch: dict[str, str],
     *,
-    convertible: bool,
     context: str,
 ) -> None:
-    """The Model-boundary check for ONE supplied array (an xr.DataArray
-    whose ``.values`` is the working buffer). No-op for mode None or a
-    unit-less (int/bool) declaration. Otherwise the supplied units
-    (``patch[name]`` wins over ``da.attrs["units"]``) must be a
-    vocabulary key and :func:`same` as `declared`, or -- mode "convert"
-    and `convertible` -- the array is converted in place (the write
-    flag is restored afterwards) and its attrs updated. Everything
-    else raises ValueError naming `context` and `name`."""
+    """The Model-boundary check for ONE supplied array that IS the
+    model's working buffer (a parameter: an xr.DataArray in memory).
+    No-op for mode None or a unit-less (int/bool) declaration.
+    Otherwise the supplied units (``patch[name]`` wins over
+    ``da.attrs["units"]``) must be a vocabulary key and :func:`same`
+    as `declared`, or -- mode "convert" -- the array is converted in
+    place (the write flag is restored afterwards) and its attrs
+    updated. Everything else raises ValueError naming `context` and
+    `name`. Data the model COPIES (inputs, supplied initial state,
+    restart files) are judged by :func:`conversion` instead."""
     conv = conversion(name, da.attrs, declared, mode, patch, context=context)
     if conv is None:
         return
     scale, offset = conv
-    supplied = patch.get(name, da.attrs.get("units"))
     where = f"{context}: '{name}' (declared {declared!r})"
-    if not convertible:
-        raise ValueError(
-            f"{where}: supplied in {supplied!r}, which would need "
-            "converting, but the array is streamed/lazy -- conversion is "
-            "never a per-step edit; pre-process the file to "
-            f"{declared!r} (scale {scale!r}, offset {offset!r})."
-        )
     apply_affine(da.values, scale, offset, where=where)
     da.attrs["units"] = declared
 
@@ -238,7 +235,7 @@ def conversion(
 ) -> tuple[float, float] | None:
     """The JUDGING half of :func:`reconcile`, for a supplied array known
     only by its ``attrs`` (so also for data that is COPIED into a model
-    buffer rather than being one: supplied initial state, restart
+    buffer rather than being one: inputs, supplied initial state, restart
     files). Returns None when nothing is to be done (mode None, a
     unit-less declaration, or supplied units that are :func:`same` as
     `declared`); returns ``(scale, offset)`` (see :func:`affine`) under
@@ -265,7 +262,7 @@ def conversion(
     if mode == "check":
         raise ValueError(
             f"{where}: supplied units are {supplied!r}; control['units'] "
-            "= 'convert' converts resident arrays in place."
+            "= 'convert' converts them."
         )
     return affine(supplied, declared)  # raises if incompatible
 

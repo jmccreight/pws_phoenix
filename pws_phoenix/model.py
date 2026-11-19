@@ -46,6 +46,16 @@ class Model:
     writes output via the Output collector (one zarr store) when the control
     dict requests it.
 
+    Time: the model runs over its inputs' time axis.
+    ``control["start_time"]`` / ``control["end_time"]`` (each optional,
+    both included) restrict it: every input is sliced to them, and a
+    bound that is not a time in an input raises. Inputs: a (time,
+    grid) DataArray, the path of a file that holds it, or the path of
+    ONE file that holds several inputs (each is the variable of its
+    own name; the file is opened once). A file-backed input stays on
+    disk and one time row is read per step, unless
+    ``control["load_all"]`` is set.
+
     Restart: ``model.write_restart(dir)`` after a run saves the
     prognostic state (the ``DataArrayMeta(restart=True)`` variables +
     any ``get_restart_state()`` hook state) to self-locating per-grid
@@ -127,6 +137,7 @@ class Model:
         else:
             self._load_all = load_all
         self._set_budget_options(control)
+        self._set_time_bounds(control)
         self._warm_start = control.get("restart_read") is not None
 
         self._load_paths_to_data()
@@ -513,16 +524,18 @@ class Model:
         """control["units"]: None (default; nothing checked, pint never
         imported), "check" (every supplied parameter/input's units must
         name the declared quantity; Map source/target declarations must
-        agree), or "convert" (as check, but a RESIDENT array in
-        compatible units is converted in place at build; a streamed/lazy
-        one raises). Supplied initial state and the declared variables
-        of a restart_read file are judged the same way; they are copied
-        into the model's buffers, so "convert" converts the model's copy
-        and never the supplied array. control["units_patch"] = {name:
-        vocabulary key} overrides a supplied array's attrs["units"] (a
-        file without the attribute, or with a spelling outside the
-        vocabulary). Build-time only: no per-step cost. See
-        pws_phoenix/units.py."""
+        agree), or "convert" (as check, but data in compatible units
+        are converted). A parameter is the model's working buffer: it
+        is converted in place at build. Whatever the model copies is
+        converted in the model's copy, and the supplied data are never
+        edited: supplied initial state, the declared variables of a
+        restart_read file, and every input (in memory, file-backed or
+        streamed), whose one-step buffer is converted after each
+        refill -- one multiply over the row per converted input per
+        step, nothing when the units agree. control["units_patch"] =
+        {name: vocabulary key} overrides a supplied array's
+        attrs["units"] (a file without the attribute, or with a
+        spelling outside the vocabulary). See pws_phoenix/units.py."""
         mode = control.get("units")
         if mode not in units_mod.MODES:
             raise ValueError(
@@ -533,6 +546,9 @@ class Model:
         self._units_patch: Dict[str, str] = dict(
             control.get("units_patch") or {}
         )
+        # input name -> (first consumer, the units it declares); see
+        # _input_conversion
+        self._input_units: Dict[str, tuple[str, str]] = {}
         if mode is not None:
             units_mod.registry()  # import pint now: fail at build, not later
 
@@ -542,6 +558,58 @@ class Model:
         """units_mod.reconcile with this model's mode + patch."""
         units_mod.reconcile(
             name, da, declared, self._units_mode, self._units_patch, **kw
+        )
+
+    def _input_units_settled(
+        self, name: str, declared: Union[str, None], *, context: str
+    ) -> bool:
+        """Has an earlier consumer of the external input `name` already
+        settled its units (see _input_conversion)? One buffer serves
+        every consumer, so this consumer must declare the same unit:
+        raises when it does not. False when control["units"] is off,
+        the declaration is unit-less, or no consumer came before."""
+        if self._units_mode is None or declared is None:
+            return False
+        first = self._input_units.get(name)
+        if first is None:
+            return False
+        first_proc, first_declared = first
+        if not units_mod.same(first_declared, declared):
+            raise ValueError(
+                f"{context}: '{name}' is declared {declared!r} here and "
+                f"{first_declared!r} by process '{first_proc}': one "
+                "input buffer cannot serve both."
+            )
+        return True
+
+    def _input_conversion(
+        self,
+        proc_name: str,
+        name: str,
+        attrs: Any,
+        declared: Union[str, None],
+        *,
+        context: str,
+    ) -> Union[tuple[float, float], None]:
+        """control["units"] for an external input, at one of its
+        consumers. The FIRST consumer's declaration judges the supplied
+        units (units_mod.conversion): the result is None, or under
+        "convert" the (scale, offset) to apply to the input's one-step
+        buffer. For a later consumer the result is None (nothing more
+        to apply; _input_units_settled raises if it declares another
+        unit)."""
+        if self._units_mode is None or declared is None:
+            return None
+        if self._input_units_settled(name, declared, context=context):
+            return None
+        self._input_units[name] = (proc_name, declared)
+        return units_mod.conversion(
+            name,
+            attrs,
+            declared,
+            self._units_mode,
+            self._units_patch,
+            context=context,
         )
 
     def _check_budgets(self, proc: Any) -> None:
@@ -802,7 +870,6 @@ class Model:
                 pp,
                 source[pp],
                 _resolved_fields(cls)[pp].units,
-                convertible=True,
                 context=f"process '{proc_name}' parameter",
             )
             grid_ds[pp] = source[pp]
@@ -813,24 +880,48 @@ class Model:
         inputs_req = cls.get_inputs()
         for ii in inputs_req + cls.get_mutable_inputs():
             if ii in grid_ds:
-                continue  # produced/added on this grid -> structural share
+                # produced/added on this grid -> structural share. A
+                # later consumer of an external input must declare the
+                # first consumer's units (one buffer serves both).
+                self._input_units_settled(
+                    ii,
+                    _resolved_fields(cls)[ii].units,
+                    context=f"process '{proc_name}' input",
+                )
+                continue
             if ii in init_dict:
                 if ii not in self.inputs_dict:
+                    data = init_dict[ii]
+                    if isinstance(data, xr.Dataset):
+                        # a combined file (or dataset) of several
+                        # inputs: this input is its variable of the
+                        # same name
+                        if ii not in data:
+                            raise KeyError(
+                                f"process '{proc_name}': input '{ii}' "
+                                "was given a dataset with no variable "
+                                f"of that name (it has "
+                                f"{sorted(map(str, data.data_vars))})."
+                            )
+                        data = data[ii]
+                    data = self._time_window(ii, data)
                     self.inputs_dict[ii] = Input(
-                        init_dict[ii],
+                        data,
                         read_only=(ii in inputs_req),
                         load=self._load_all,
                     )
                 inp = self.inputs_dict[ii]
-                # a lazy (file-backed, load=False) input reads one slice
-                # per step: checkable, not convertible
-                self._reconcile_units(
+                # control["units"] = "convert": the one-step buffer is
+                # converted, never the supplied data
+                conversion = self._input_conversion(
+                    proc_name,
                     ii,
-                    inp.data,
+                    inp.data.attrs,
                     _resolved_fields(cls)[ii].units,
-                    convertible=inp.data.variable._in_memory,
                     context=f"process '{proc_name}' input",
                 )
+                if conversion is not None:
+                    inp.set_conversion(*conversion)
                 current = inp.current_values
                 if current.dims != (real_dim,):
                     # A wrong-named spatial dim would silently ride along
@@ -1007,6 +1098,45 @@ class Model:
                     "before it crosses the grid boundary."
                 )
             self._proc_maps[first_consumer].append(mm)
+
+    def _set_time_bounds(self, control: Dict[str, Any]) -> None:
+        """control["start_time"] / control["end_time"]: the first and
+        the last model time step, both included (a date string or a
+        datetime64). One that is absent leaves that end at the inputs'
+        own."""
+        start = control.get("start_time")
+        end = control.get("end_time")
+        self._start_time = None if start is None else np.datetime64(start, "D")
+        self._end_time = None if end is None else np.datetime64(end, "D")
+        if (
+            self._start_time is not None
+            and self._end_time is not None
+            and self._start_time > self._end_time
+        ):
+            raise ValueError(
+                f"control['start_time'] ({self._start_time}) is after "
+                f"control['end_time'] ({self._end_time})."
+            )
+
+    def _time_window(self, name: str, data: xr.DataArray) -> xr.DataArray:
+        """The input `data` between control's start_time and end_time
+        (see _set_time_bounds); `data` itself when the control gives
+        neither. No copy: the slice of an in-memory array is a view of
+        it, and a file-backed array stays on disk."""
+        if self._start_time is None and self._end_time is None:
+            return data
+        times = data["time"].values
+        for key, bound in (
+            ("start_time", self._start_time),
+            ("end_time", self._end_time),
+        ):
+            if bound is not None and not (times == bound).any():
+                raise ValueError(
+                    f"control[{key!r}] = {bound}: input {name!r} has no "
+                    f"such time (its {times.size} times run from "
+                    f"{times[0]} to {times[-1]})."
+                )
+        return data.sel(time=slice(self._start_time, self._end_time))
 
     def _set_time(self) -> None:
         """Set time dimensions from the first input's `time` dim-coordinate."""
@@ -1559,6 +1689,7 @@ class ModelMPI(Model):
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._load_all = True  # serial-grid data are small; keep in memory
         self._set_budget_options(control)
+        self._set_time_bounds(control)
         self._build()
 
     # -- construction ---------------------------------------------------
@@ -1571,6 +1702,13 @@ class ModelMPI(Model):
             raise NotImplementedError(
                 "control['collect_var_names'] (the in-memory "
                 "ResultCollector) is not implemented under MPI."
+            )
+        if self._start_time is not None or self._end_time is not None:
+            # the same control on every rank: all ranks raise
+            raise NotImplementedError(
+                "control['start_time'] / control['end_time'] are not "
+                "implemented under MPI: the stream covers the whole "
+                "time axis of input_file."
             )
         input_file = str(control["input_file"])
         output_parallel_netcdf = str(control["output_parallel_netcdf"])
@@ -1725,10 +1863,13 @@ class ModelMPI(Model):
             )
 
         # Units at the distributed grid's boundary (control["units"]):
-        # static params/ICs are resident (loaded above) -> check or
-        # convert in place, rank-locally (identical metadata on every
-        # rank, so every rank takes the same branch -- no collective
-        # needed and none hidden); streamed inputs are check-only.
+        # identical metadata on every rank, so every rank takes the
+        # same branch -- no collective needed and none hidden. Static
+        # parameters are resident (loaded above): checked, or converted
+        # in place. A streamed input is checked, or its conversion is
+        # kept for run(), which applies it to the one-step buffer
+        # after each refill.
+        self._stream_conversions: Dict[str, tuple[float, float]] = {}
         if self._units_mode is not None:
             for proc_name, cls in mpi_classes.items():
                 fields = _resolved_fields(cls)
@@ -1738,18 +1879,19 @@ class ModelMPI(Model):
                             pp,
                             ds_mpi_stream[pp],
                             fields[pp].units,
-                            convertible=True,
                             context=f"process '{proc_name}' parameter",
                         )
                 for ii in file_input_names:
                     if ii in fields:
-                        self._reconcile_units(
+                        conversion = self._input_conversion(
+                            proc_name,
                             ii,
-                            ds_input[ii],
+                            ds_input[ii].attrs,
                             fields[ii].units,
-                            convertible=False,
                             context=f"process '{proc_name}' streamed input",
                         )
+                        if conversion is not None:
+                            self._stream_conversions[ii] = conversion
 
         # Split requested outputs by OWNING grid (the process declaring the
         # var as a state variable): distributed-grid vars stream via the
@@ -2021,7 +2163,15 @@ class ModelMPI(Model):
             src = step.mpi.src
             # Refill this step's input buffers from the source slab.
             for name in self._file_input_names:
-                step[name].values[:] = src[name].values[0, :]
+                values = step[name].values
+                values[:] = src[name].values[0, :]
+                # control["units"] = "convert": this rank's block of
+                # the one-step buffer, converted after the refill
+                conversion = self._stream_conversions.get(name)
+                if conversion is not None:
+                    values *= conversion[0]
+                    if conversion[1] != 0.0:
+                        values += conversion[1]
             # Serial-grid inputs advance in lockstep with the stream.
             for inp in self.inputs_dict.values():
                 inp.advance()

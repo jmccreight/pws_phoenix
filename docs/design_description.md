@@ -1,3 +1,45 @@
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+
+- [Design descriptions](#design-descriptions)
+  - [Framework](#framework)
+    - [One shared dataset per grid, the same structure in serial and MPI](#one-shared-dataset-per-grid-the-same-structure-in-serial-and-mpi)
+    - [Variables classed by their relation to model time](#variables-classed-by-their-relation-to-model-time)
+    - [Global state split: `Time` passed down, options consumed at build](#global-state-split-time-passed-down-options-consumed-at-build)
+    - [Maps: a per-variable correspondence between grids, applied once per step](#maps-a-per-variable-correspondence-between-grids-applied-once-per-step)
+    - [MPI: one distributed grid, serial grids replicated on every rank](#mpi-one-distributed-grid-serial-grids-replicated-on-every-rank)
+    - [Memory: reference, do not copy; kernels write in place](#memory-reference-do-not-copy-kernels-write-in-place)
+    - [The input contract: `Model.input_spec` and three classes of parameter](#the-input-contract-modelinput_spec-and-three-classes-of-parameter)
+    - [Initial state: the restart variables, supplied under their own names](#initial-state-the-restart-variables-supplied-under-their-own-names)
+    - [Three init hooks: `allocate`, `init_from_params`, `init_state`](#three-init-hooks-allocate-init_from_params-init_state)
+    - [Reuse of a built model: `reset()`, `set_parameters()`, `ResultCollector`](#reuse-of-a-built-model-reset-set_parameters-resultcollector)
+    - [Restart: flagged prognostic state, one file format for serial and MPI](#restart-flagged-prognostic-state-one-file-format-for-serial-and-mpi)
+  - [Ports and variants](#ports-and-variants)
+    - [Port conventions: names verbatim, element-loop kernels, pywatershed's own tolerance](#port-conventions-names-verbatim-element-loop-kernels-pywatersheds-own-tolerance)
+    - [Variants by addition: a minimal base class that variants extend](#variants-by-addition-a-minimal-base-class-that-variants-extend)
+    - [Ag variants: extend on a superset interface, sibling otherwise](#ag-variants-extend-on-a-superset-interface-sibling-otherwise)
+  - [FlowGraph](#flowgraph)
+    - [FlowGraph: node types as data, one kernel calling each type's functions](#flowgraph-node-types-as-data-one-kernel-calling-each-types-functions)
+    - [STARFIT nodes: frozen parameters, unit factors, two time modes](#starfit-nodes-frozen-parameters-unit-factors-two-time-modes)
+  - [IO](#io)
+    - [Output backends differ on purpose: zarr in serial, NetCDF stream under MPI](#output-backends-differ-on-purpose-zarr-in-serial-netcdf-stream-under-mpi)
+    - [Serial output: a pre-sized zarr store written by region](#serial-output-a-pre-sized-zarr-store-written-by-region)
+  - [Checks](#checks)
+    - [Budgets as data in the owning Process](#budgets-as-data-in-the-owning-process)
+    - [Units mode: closed vocabulary, two boundaries, kernel tests](#units-mode-closed-vocabulary-two-boundaries-kernel-tests)
+    - [Tests: no skips, pinned answer keys](#tests-no-skips-pinned-answer-keys)
+  - [Performance](#performance)
+    - [Benchmarks: ASV in the existing environment](#benchmarks-asv-in-the-existing-environment)
+    - [Per-step data access: hold the ndarray, not the Dataset lookup](#per-step-data-access-hold-the-ndarray-not-the-dataset-lookup)
+    - [Numba switches: cache on by default, threading opt-in](#numba-switches-cache-on-by-default-threading-opt-in)
+  - [Translation and migration](#translation-and-migration)
+    - [PRMS translation: one way, pyPRMS only, outside the core](#prms-translation-one-way-pyprms-only-outside-the-core)
+    - [Pre-processing: derived inputs in a stamped file, verified at use](#pre-processing-derived-inputs-in-a-stamped-file-verified-at-use)
+    - [A domain translated ahead of time: files written once, options from the control copy](#a-domain-translated-ahead-of-time-files-written-once-options-from-the-control-copy)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 # Design descriptions
 
 One entry per completed design in pws_phoenix: what was decided and why.
@@ -58,6 +100,7 @@ Terms:
 | Serial output: a pre-sized zarr store written by region | built | Oct 2026 | IO |
 | PRMS translation: one way, pyPRMS only, outside the core | built | Aug 2026 | Translation and migration |
 | Pre-processing: derived inputs in a stamped file, verified at use | built | Aug 2026 | Translation and migration |
+| A domain translated ahead of time: files written once, options from the control copy | built, serial run entry only | Nov 2026 | Translation and migration |
 
 ## Framework
 
@@ -1121,15 +1164,24 @@ Terms:
     words are translated to vocabulary keys, with a by-name table where
     PRMS is wrong or vague. A declared-vs-translated disagreement
     raises: it is a table or declaration bug, never data.
-  - Model boundary (`control["units"]`, build time only): `None`,
+  - Model boundary (`control["units"]`, judged at build): `None`,
     `"check"` or `"convert"`. A missing units attribute is an error;
-    `control["units_patch"]` is the escape hatch. Conversion is never a
-    per-step edit: a resident array is converted in place once, a
-    streamed input that would need converting raises.
-  - Supplied initial state and the declared variables of a restart file
-    are judged like parameters (a restart file is a netCDF file anyone
-    can write). They are copied into the model, so "convert" converts
-    the model's copy.
+    `control["units_patch"]` is the escape hatch.
+  - Where "convert" converts follows from who owns the array. A
+    parameter is the model's working buffer, so it is converted in
+    place once. Whatever the model copies is converted in the model's
+    copy and the supplied data are never edited: supplied initial
+    state, the declared variables of a restart file (a netCDF file
+    anyone can write), and every input.
+  - An input is converted in its one-step buffer after each refill, in
+    memory, file-backed and streamed alike (changed Nov 2026). Before,
+    an in-memory input was converted in place and a streamed one
+    raised ("conversion is never a per-step edit"). The model already
+    copies one row per step, so converting the copy costs one multiply
+    over the row; it lets forcing that never went through PRMS (mm,
+    degC) be used as it is; and it makes a float32 file give the same
+    answers file-backed and loaded, because the row is widened to
+    float64 before it is converted.
   - Kernels: a test runs the kernel's undecorated body on pint Quantity
     arrays built from the declarations and compares magnitudes bit for
     bit with the compiled run. pint alone misses a compatible unit at
@@ -1144,8 +1196,8 @@ Terms:
   - Under `"check"` every supplied array needs `attrs["units"]` naming
     a vocabulary key. A bare ndarray of initial state raises; name its
     units in `control["units_patch"]`.
-  - `"convert"` does not convert streamed forcing files; pre-process
-    them.
+  - `"convert"` never edits a supplied input, state array or forcing
+    file; it edits a supplied parameter array in place.
   - A PRMS file with metric precipitation raises: the kernels are
     imperial.
   - MPI restart files written before Nov 12, 2026 carry no units and
@@ -1376,3 +1428,73 @@ Terms:
 - **Where:** `pws_phoenix/prms_translate/preprocess.py`;
   `examples/02_preprocessing.py`; `tests/test_preprocess.py`.
 - **Left unfinished** (moved from memory Nov 12, 2026): none.
+
+### A domain translated ahead of time: files written once, options from the control copy
+
+- **Status:** built Nov 2026; the serial run entry only.
+- **Why:** `model_from_control` parses the CBH text and the parameter
+  file at every start, and under MPI every rank does. At NHM scale
+  (114,958 hrus, 47 years) one CBH file is 9.87 GB of text and takes
+  6 to 7 minutes and about 100 GB of memory to parse. The files do
+  not change between runs.
+- **Decision:**
+  - `translate_domain(control_file, out_dir)` writes the files a
+    control names ONCE, into a flat domain directory: one combined
+    forcing netCDF (`cbh.nc`: the whole record, float32 where that is
+    exact, no compression, no chunking), `<stem>_parameters.nc`, a
+    byte copy of the control file, and `<stem>_translation.yaml`.
+  - The yaml records FILES only: the products relative to its own
+    directory, the files that were read as absolute paths, and a
+    sha256 of the control file. OPTIONS (classes, the simulation
+    window, output names) are read from the control copy at every
+    run, so an option supported later needs no new translation. The
+    copy's own file entries are never resolved: they are relative to
+    the original's directory.
+  - An existing product is reused when it was written from the files
+    the control names, and raises when it was written from others.
+    Controls that name the same CBH files share one forcing file.
+  - A run takes one argument, the yaml:
+    `model_from_translation(yaml)`, over the kit from
+    `assemble_from_translation(yaml)`. Both share
+    `assemble_from_control`'s assembly; only where the parameters and
+    the forcings are read from differs. PRMS logic and pyPRMS still
+    run at every start (the control file is parsed).
+  - The forcing file belongs to the CBH files, not to one control, so
+    it holds the whole record. The core gained two things for that,
+    both also needed by a native model yaml:
+    `control["start_time"]` / `control["end_time"]`, and an input
+    given as the path of a file that holds several inputs.
+  - A file-backed input stays on disk, one time row read per step,
+    and its per-step buffer is float64 whatever the file holds.
+    Before this, a read-only file-backed input was read whole at
+    build, by the line that set its read-only flag.
+- **For users:**
+  - `python -m pws_phoenix.prms_translate.translate_domain
+    CONTROL_FILE --out DOMAIN_DIR`, then
+    `model_from_translation(DOMAIN_DIR / "<stem>_translation.yaml",
+    control={...})`.
+  - A `start_time` / `end_time` in the caller's control takes
+    precedence over the control file's.
+  - `control["load_all"] = True` reads the forcing into memory at
+    build. With a window it still reads the whole file.
+  - `control["units"] = "convert"` converts a forcing file in other
+    units as it is read, file-backed or loaded.
+  - A control with dynamic-parameter files raises. An edited control
+    copy raises: translate the domain again.
+- **Where:** `pws_phoenix/prms_translate/translate_domain.py` (module
+  docstring), `cbh.write_cbh_netcdf`,
+  `assemble.assemble_from_translation`; `Model._time_window`;
+  `tests/test_translate_domain.py`, `tests/test_cbh_netcdf.py`,
+  `tests/test_model_from_translation.py`, `tests/test_time_window.py`,
+  `tests/test_input.py`.
+- **Left unfinished:**
+  - The `<stem>_preprocessed.nc` step. It waits on map weights that
+    are not a dense matrix (54 GB at 58,489 segments x 114,958 hrus).
+  - The MPI run entry. `ModelMPI` reads one combined file that also
+    holds the hru parameters; whether translation writes such a file
+    or `ModelMPI` takes forcing and parameters separately is
+    undecided. `ModelMPI` raises on the two window keys.
+  - Reads of several days at a time, and the chunk shape of the
+    forcing file.
+  - Translation that writes a native model yaml, so that a run needs
+    no PRMS logic.

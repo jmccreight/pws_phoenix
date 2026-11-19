@@ -60,11 +60,20 @@ class Input:
             self.data = data_or_file
         if load:
             self.data = self.data.load()
-        if read_only:
+        # only an array in memory is flagged: on a file-backed one,
+        # `.values` would read the whole array and keep it
+        if read_only and self.data.variable._in_memory:
             self.data.values.flags.writeable = False
         self._current_index = np.int64(-1)
-        self._current_values = np.nan * self.data[0, :]
+        # float64 whatever the data hold: a float32 forcing file must
+        # not hand the kernels a float32 array (the per-step copy
+        # widens, exactly)
+        self._current_values = (np.nan * self.data[0, :]).astype(
+            np.float64, copy=False
+        )
         self._closed = False
+        # (scale, offset) of a units conversion; see set_conversion
+        self._conversion: tuple[float, float] | None = None
         # the ndarrays behind the per-step copy (DEVELOPER.md "Per-step
         # data access"): a DataArray index + setitem cost ~100 us a step.
         # A lazy (file-backed, load=False) input keeps reading one slice
@@ -75,6 +84,13 @@ class Input:
         )
         self._current: np.ndarray = self._current_values.values
 
+    def set_conversion(self, scale: float, offset: float) -> None:
+        """Serve ``scale * data + offset`` (a units conversion,
+        control["units"] = "convert"). It is applied to the one-step
+        buffer in advance(), after the row is copied in and widened to
+        float64: the data themselves are never edited."""
+        self._conversion = (float(scale), float(offset))
+
     def advance(self) -> None:
         """Advance current_values to the next time step."""
         self._current_index += np.int64(1)
@@ -82,6 +98,11 @@ class Input:
             self._current[:] = self._data_values[self._current_index]
         else:
             self._current[:] = self.data[self._current_index, :].values
+        if self._conversion is not None:
+            scale, offset = self._conversion
+            self._current *= scale
+            if offset != 0.0:
+                self._current += offset
 
     def set_index(self, index: int) -> None:
         """Fast-forward (restart): the NEXT advance() serves `index`.

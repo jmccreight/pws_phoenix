@@ -11,6 +11,11 @@ Two entry points, layered:
   one-liner (builds the kit, constructs the Model; construction runs
   the full assembly validation).
 
+A domain translated ahead of time (``translate_domain``: the CBH text
+and the parameter file written once as netCDF) has the same two
+layers, ``assemble_from_translation`` and ``model_from_translation``.
+They take the path of the domain's ``<stem>_translation.yaml``.
+
 These live HERE and not on Model because the core never imports
 prms_translate -- the dependency rule decides the API home. The
 control file names the parameter file (``param_file``) and the CBH
@@ -36,13 +41,15 @@ PET_cbh_file is deliberately not consumed (see control.py:
 CBH_ENTRY_TO_INPUT).
 """
 
+import hashlib
 import pathlib as pl
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import xarray as xr
+import yaml
 
 from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
 from pws_phoenix.discretization import Discretization
@@ -200,7 +207,30 @@ def assemble_from_control(
             name: pl.Path(path) for name, path in cbh_paths.items()
         }
     params = load_parameters(cfg.param_files)
+    return _assemble(
+        cfg,
+        params,
+        lambda name: load_cbh(
+            cfg.cbh_paths[name], cfg.start_time, cfg.end_time
+        ),
+        control,
+        preprocessed,
+    )
 
+
+def _assemble(
+    cfg: PrmsRunConfig,
+    params: xr.Dataset,
+    forcing: Callable[[str], xr.DataArray | pl.Path],
+    control: dict[str, Any] | None,
+    preprocessed: str | pl.Path | None,
+) -> ModelKit:
+    """A run configuration and its parameters -> a ModelKit: the part
+    of assembly that does not depend on where the parameters and the
+    forcings were read from. `forcing(name)` returns what the Model is
+    given for the CBH input `name` (a key of ``cfg.cbh_paths``): a
+    (time, nhru) DataArray, or the path of a file that holds it.
+    `control` and `preprocessed` are as in assemble_from_control."""
     artifacts: xr.Dataset | None = None
     if preprocessed is not None:
         from pws_phoenix.prms_translate.preprocess import verify_preprocessed
@@ -377,9 +407,7 @@ def assemble_from_control(
             if name in dyn_inputs:
                 process_dict[consumer][name] = dyn_inputs[name]
             elif name in cfg.cbh_paths:
-                process_dict[consumer][name] = load_cbh(
-                    cfg.cbh_paths[name], cfg.start_time, cfg.end_time
-                )
+                process_dict[consumer][name] = forcing(name)
             elif name in params and params[name].dims == ("nhru",):
                 # a time-varying INPUT declaration backed by a STATIC
                 # parameter (PRMS dynamic-parameter default: no dyn
@@ -438,6 +466,96 @@ def model_from_control(
     return assemble_from_control(
         control_file, control, preprocessed=preprocessed, cbh_paths=cbh_paths
     ).model()
+
+
+def assemble_from_translation(
+    translation_yaml: str | pl.Path,
+    control: dict[str, Any] | None = None,
+) -> ModelKit:
+    """A domain translated ahead of time -> a ModelKit.
+    `translation_yaml` is the ``<stem>_translation.yaml`` that
+    ``translate_domain`` wrote; no CBH or parameter text is read.
+
+    - Options (the classes, the simulation window, the requested
+      output names) come from the control copy beside the yaml.
+    - Parameters come from the yaml's ``parameter_file``, and the
+      derived parameters and map weights from its
+      ``preprocessed_file`` when it names one (else they are derived
+      here, as in assemble_from_control).
+    - Each forcing entry of the kit's process_dict is the PATH of the
+      yaml's ``forcing_file``: the Model opens it once and reads one
+      time row per step. That file holds the whole record, so the
+      kit's control carries the control file's ``start_time`` and
+      ``end_time``; ones given in `control` take precedence.
+
+    The kit is otherwise that of assemble_from_control on the original
+    control file. `control` is as there.
+
+    Raises when the control copy is not the control file that was
+    translated (the yaml's ``control_sha256``), and when the yaml
+    names no forcing file or no parameter file (a step that was not
+    run)."""
+    yaml_path = pl.Path(translation_yaml)
+    with open(yaml_path) as ff:
+        info = yaml.safe_load(ff)
+    domain_dir = yaml_path.parent
+
+    control_copy = domain_dir / info["control_copy"]
+    sha256 = hashlib.sha256(control_copy.read_bytes()).hexdigest()
+    if sha256 != info["control_sha256"]:
+        raise ValueError(
+            f"{control_copy} is not the control file that {yaml_path} "
+            f"was written from (sha256 {sha256}, the yaml records "
+            f"{info['control_sha256']}): translate the domain again."
+        )
+    not_run = [
+        key for key in ("forcing_file", "parameter_file") if info[key] is None
+    ]
+    if not_run:
+        raise FileNotFoundError(
+            f"{yaml_path} names no {' and no '.join(not_run)}: run "
+            "translate_domain with those steps."
+        )
+
+    cfg = from_control(load_control(control_copy), control_copy)
+    if cfg.dyn_param_paths:
+        raise NotImplementedError(
+            f"{control_copy} names dynamic-parameter files "
+            f"({sorted(cfg.dyn_param_paths)}): a translated domain "
+            "does not hold them yet."
+        )
+    # from_control resolved the copy's file entries against the copy's
+    # directory, but they are relative to the ORIGINAL's: the files
+    # that were read are the ones the yaml records
+    cfg.param_files = [pl.Path(pp) for pp in info["parameter_sources"]]
+    cfg.cbh_paths = {
+        name: pl.Path(pp) for name, pp in info["forcing_sources"].items()
+    }
+
+    params = xr.load_dataset(domain_dir / info["parameter_file"])
+    forcing_file = domain_dir / info["forcing_file"]
+    preprocessed = info.get("preprocessed_file")
+    kit_control = {
+        "start_time": cfg.start_time,
+        "end_time": cfg.end_time,
+    } | (control or {})
+    return _assemble(
+        cfg,
+        params,
+        lambda name: forcing_file,
+        kit_control,
+        None if preprocessed is None else domain_dir / preprocessed,
+    )
+
+
+def model_from_translation(
+    translation_yaml: str | pl.Path,
+    control: dict[str, Any] | None = None,
+) -> Model:
+    """The one-liner: a domain translated ahead of time -> a
+    constructed (and thereby validated) pws_phoenix Model. See
+    assemble_from_translation for the kit underneath."""
+    return assemble_from_translation(translation_yaml, control).model()
 
 
 def insert_flow_graph(

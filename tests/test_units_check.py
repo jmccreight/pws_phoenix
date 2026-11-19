@@ -9,7 +9,7 @@ import pytest
 import xarray as xr
 from pws_phoenix.maps import Map
 from pws_phoenix.model import Model
-from pws_phoenix.process import DataArrayMeta
+from pws_phoenix.process import DataArrayMeta, Process
 from pws_phoenix.processes_concrete import Lower, Upper
 from pws_phoenix.units import affine, reconcile, same
 
@@ -124,7 +124,7 @@ def test_reconcile_converts_in_place_and_restores_flag():
         np.array([32.0, 212.0]), dims=["x"], attrs={"units": "degF"}
     )
     da.values.flags.writeable = False
-    reconcile("t", da, "degC", "convert", {}, convertible=True, context="test")
+    reconcile("t", da, "degC", "convert", {}, context="test")
     np.testing.assert_allclose(da.values, [0.0, 100.0], atol=1e-12)
     assert da.attrs["units"] == "degC"
     assert not da.values.flags.writeable
@@ -133,37 +133,19 @@ def test_reconcile_converts_in_place_and_restores_flag():
 def test_reconcile_messages():
     da = xr.DataArray(np.ones(2), dims=["x"])
     with pytest.raises(ValueError, match="has no units"):
-        reconcile(
-            "v", da, "inches", "check", {}, convertible=True, context="c"
-        )
+        reconcile("v", da, "inches", "check", {}, context="c")
     da.attrs["units"] = "inch"
     with pytest.raises(ValueError, match="not in the pws_phoenix vocabulary"):
-        reconcile(
-            "v", da, "inches", "check", {}, convertible=True, context="c"
-        )
+        reconcile("v", da, "inches", "check", {}, context="c")
     da.attrs["units"] = "feet"
     with pytest.raises(ValueError, match="'convert' converts"):
-        reconcile(
-            "v", da, "inches", "check", {}, convertible=True, context="c"
-        )
-    with pytest.raises(ValueError, match="streamed/lazy"):
-        reconcile(
-            "v", da, "inches", "convert", {}, convertible=False, context="c"
-        )
+        reconcile("v", da, "inches", "check", {}, context="c")
     # the patch wins over the attribute
-    reconcile(
-        "v",
-        da,
-        "inches",
-        "check",
-        {"v": "inches"},
-        convertible=True,
-        context="c",
-    )
+    reconcile("v", da, "inches", "check", {"v": "inches"}, context="c")
     # mode None: nothing looked at
-    reconcile("v", da, "inches", None, {}, convertible=False, context="c")
+    reconcile("v", da, "inches", None, {}, context="c")
     # unit-less declaration: nothing looked at
-    reconcile("v", da, None, "check", {}, convertible=False, context="c")
+    reconcile("v", da, None, "check", {}, context="c")
 
 
 # ----------------------------------------------------------------------
@@ -233,21 +215,20 @@ def test_convert_reproduces_declared_units_run(toy, two_grid_weights, n_time):
     got = _run(other, two_grid_weights, {"units": "convert"}, n_time)
     np.testing.assert_allclose(got["flow"], answers["flow"], rtol=1e-12)
     np.testing.assert_allclose(got["storage"], answers["storage"], rtol=1e-12)
-    # the conversion happened IN PLACE on the caller's arrays (zero-copy
-    # rule) and the attrs now say so
-    assert other["forcing_up"].attrs["units"] == "inches"
-    np.testing.assert_allclose(
-        other["forcing_up"].values, toy["forcing_up"].values
+    # the input was converted in the model's one-step buffer: the
+    # caller's array still holds feet, and says so
+    assert other["forcing_up"].attrs["units"] == "feet"
+    np.testing.assert_array_equal(
+        other["forcing_up"].values, toy["forcing_up"].values / 12.0
     )
+    # the parameter IS the model's working buffer: converted in place
     assert up["param_up_0"].attrs["units"] == "fraction"
 
 
 def test_convert_file_input(toy, two_grid_weights, n_time, tmp_path: pl.Path):
-    """A file-backed read-only input is converted too: Input.__init__
-    sets the read-only flag through `.values`, which materializes the
-    lazily opened array (pre-existing behavior), so it is resident at
-    the time of the check. (The streamed, never-resident case is the
-    MPI input_file -- test_units_check_mpi.py.)"""
+    """A file-backed input in other units: "check" raises; "convert"
+    converts the one-step buffer every step while the input stays on
+    disk; control["load_all"] gives the same answers."""
     answers = _run(_stamp(toy), two_grid_weights, {"units": "check"}, n_time)
     stamped = _stamp(toy)
     path = tmp_path / "forcing_up_feet.nc"
@@ -261,8 +242,93 @@ def test_convert_file_input(toy, two_grid_weights, n_time, tmp_path: pl.Path):
             {"units": "check"},
             maps=_maps(two_grid_weights),
         )
-    got = _run(stamped, two_grid_weights, {"units": "convert"}, n_time)
-    np.testing.assert_allclose(got["flow"], answers["flow"], rtol=1e-12)
+    with Model(
+        _process_dict(stamped),
+        {"units": "convert"},
+        maps=_maps(two_grid_weights),
+    ) as model:
+        model.run(np.float64(1.0), np.int32(n_time))
+        assert not model.inputs_dict["forcing_up"].data.variable._in_memory
+        flow = model.model_dict["upper"]["flow"].values.copy()
+    np.testing.assert_allclose(flow, answers["flow"], rtol=1e-12)
+    got = _run(
+        stamped,
+        two_grid_weights,
+        {"units": "convert", "load_all": True},
+        n_time,
+    )
+    np.testing.assert_array_equal(got["flow"], flow)
+
+
+def test_convert_float32_input_in_float64(
+    toy, two_grid_weights, n_time, tmp_path: pl.Path
+):
+    """A float32 input is widened to float64 BEFORE it is converted,
+    in memory and file-backed alike: both give the answers of the same
+    values supplied as float64."""
+    stamped = _stamp(toy)
+    feet32 = (
+        (stamped["forcing_up"] / 12.0)
+        .astype(np.float32)
+        .assign_attrs(units="feet")
+        .rename("forcing_up")
+    )
+    path = tmp_path / "forcing_up_feet32.nc"
+    feet32.to_netcdf(path)
+    control = {"units": "convert"}
+
+    stamped["forcing_up"] = feet32.astype(np.float64).assign_attrs(
+        units="feet"
+    )
+    expected = _run(stamped, two_grid_weights, control, n_time)
+    stamped["forcing_up"] = feet32
+    in_memory = _run(stamped, two_grid_weights, control, n_time)
+    stamped["forcing_up"] = path
+    file_backed = _run(stamped, two_grid_weights, control, n_time)
+
+    np.testing.assert_array_equal(in_memory["flow"], expected["flow"])
+    np.testing.assert_array_equal(file_backed["flow"], expected["flow"])
+    # the caller's array is not edited
+    assert feet32.dtype == np.float32
+    assert feet32.attrs["units"] == "feet"
+
+
+class _ForcingUpInFeet(Process):
+    """A second consumer of Upper's forcing_up, declaring it in feet."""
+
+    forcing_up = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        units="feet",
+        description="Upper's forcing, declared in feet",
+    )
+
+    def advance(self) -> None:
+        pass
+
+    def calculate(self, dt, time) -> None:
+        pass
+
+
+def test_consumers_declaring_different_units_raise(toy, two_grid_weights):
+    """One buffer serves every consumer of an input, so two consumers
+    that declare different units for it cannot both be served."""
+    stamped = _stamp(toy)
+    process_dict = _process_dict(stamped)
+    process_dict["feet_reader"] = {
+        "class": _ForcingUpInFeet,
+        "discretization": "hru",
+        "forcing_up": stamped["forcing_up"],
+    }
+    match = (
+        "'forcing_up' is declared 'feet' here and 'inches' by process 'upper'"
+    )
+    for mode in ("check", "convert"):
+        with pytest.raises(ValueError, match=match):
+            Model(process_dict, {"units": mode}, maps=_maps(two_grid_weights))
+    # units mode off: declarations are not compared
+    Model(process_dict, {}, maps=_maps(two_grid_weights)).finalize()
 
 
 # ----------------------------------------------------------------------

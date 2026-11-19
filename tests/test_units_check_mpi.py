@@ -1,7 +1,8 @@
 """units mode at the DISTRIBUTED grid's boundary (ModelMPI._build):
 static params in the input_file are checked/converted in place per
-rank; a streamed input in the wrong units raises on every rank. Two-grid
-toy (distributed hru -> MapMPI -> replicated segment), 'convert' mode.
+rank; a streamed input in other units is converted in each rank's
+block of the one-step buffer. Two-grid toy (distributed hru -> MapMPI
+-> replicated segment), 'convert' mode.
 
 Run: mpirun -n 4 pytest --with-mpi tests/test_units_check_mpi.py
 """
@@ -52,8 +53,8 @@ def data_dir():
 
 def _write_input_file(path, toy, *, param_up_0_percent, forcing_in_feet):
     """Rank 0 writes the distributed grid's input file with units attrs;
-    optionally param_up_0 x100 as 'percent' (resident: convertible) and
-    forcing_up /12 as 'feet' (streamed: never convertible)."""
+    optionally param_up_0 x100 as 'percent' (resident: converted in place) and
+    forcing_up /12 as 'feet' (streamed: converted every step)."""
     up = toy["up_params"]
     param_up_0 = up["param_up_0"]
     forcing_up = toy["forcing_up"]
@@ -159,12 +160,14 @@ def test_convert_static_parameter(
 
 
 @pytest.mark.mpi(min_size=2)
-def test_streamed_input_mismatch_raises_everywhere(
-    data_dir, two_grid_toy, two_grid_weights
+def test_streamed_input_converted(
+    data_dir, two_grid_toy, two_grid_weights, answers
 ):
-    """forcing_up streamed as 'feet': not convertible -> every rank
-    raises at build (same metadata on every rank, so no rank is left
-    waiting in a collective)."""
+    """forcing_up streamed as 'feet': 'check' raises on every rank at
+    build (same metadata on every rank, so no rank is left waiting in
+    a collective); 'convert' converts each rank's block of the
+    one-step buffer after every refill -> the declared-units
+    answers."""
     comm = MPI.COMM_WORLD
     path = data_dir / "hru_input_feet.nc"
     if comm.rank == 0:
@@ -172,13 +175,31 @@ def test_streamed_input_mismatch_raises_everywhere(
             path, two_grid_toy, param_up_0_percent=False, forcing_in_feet=True
         )
     comm.Barrier()
-    with pytest.raises(ValueError, match="streamed input.*'forcing_up'"):
-        _build(data_dir, two_grid_toy, two_grid_weights, "feet")
+    with pytest.raises(
+        ValueError, match="streamed input.*'forcing_up'.*'feet'"
+    ):
+        _build(
+            data_dir,
+            two_grid_toy,
+            two_grid_weights,
+            "feet_check",
+            mode="check",
+            file="feet",
+        )
     raised_everywhere = comm.allgather(True)
     assert all(raised_everywhere)
-    # ... and 'check' mode names the mismatch the same way
-    with pytest.raises(ValueError, match="'forcing_up'.*'feet'"):
-        _build(data_dir, two_grid_toy, two_grid_weights, "feet", mode="check")
+    model, control = _build(data_dir, two_grid_toy, two_grid_weights, "feet")
+    model.run(np.float64(1.0))
+    storage_final = model.discretizations["segment"].dataset["storage"].values
+    np.testing.assert_allclose(
+        storage_final, answers["storage"][-1], rtol=1e-12
+    )
+    model.finalize()
+    comm.Barrier()
+    if comm.rank == 0:
+        with xr.load_dataset(control["output_parallel_netcdf"]) as ds_out:
+            flow_out = ds_out["flow_out"].values
+        np.testing.assert_allclose(flow_out, answers["flow"], rtol=1e-12)
 
 
 @pytest.mark.mpi(min_size=2)

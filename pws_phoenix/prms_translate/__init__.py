@@ -27,8 +27,10 @@ release; see readers.py/dyn_param.py for the details):
 from pws_phoenix.prms_translate.assemble import (
     ModelKit,
     assemble_from_control,
+    assemble_from_translation,
     insert_flow_graph,
     model_from_control,
+    model_from_translation,
     prms_initial_state,
     seg_inflow_from_segment_flow_init,
 )
@@ -62,9 +64,11 @@ __all__ = [
     "ModelKit",
     "PrmsRunConfig",
     "assemble_from_control",
+    "assemble_from_translation",
     "from_control",
     "insert_flow_graph",
     "model_from_control",
+    "model_from_translation",
     "load_cbh",
     "load_control",
     "load_dynamic_parameter",

@@ -294,6 +294,17 @@ Rules:
 - An unresolved process input raises at assembly
   (`Model._validate_inputs_resolved`). Execution order is the order
   of `process_dict`.
+- A time-varying input is given as a `(time, grid)` DataArray, the
+  path of a file that holds it, or the path of ONE file that holds
+  several inputs (each is the variable of its own name; the file is
+  opened once). A file-backed input stays on disk and one time row is
+  read per step, unless `control["load_all"]` is set. The per-step
+  buffer is float64 whatever the data hold.
+- `control["start_time"]` / `control["end_time"]` (each optional,
+  both included) restrict the run: every input is sliced to them (a
+  view, not a copy), and a bound that is not a time in an input
+  raises. Without them the run covers the inputs' whole time axis.
+  `ModelMPI` raises on either key (not implemented).
 - `Process._registry` (filled by `__init_subclass__`) resolves a
   process class named as a string; `config.load_model_yaml` uses it
   (import the defining module first).
@@ -411,15 +422,24 @@ Two boundaries, deliberately separate:
   declaration and the translation disagree: a table or declaration
   bug, never data. Metric precipitation raises (the kernels are
   imperial).
-- Model boundary (`control["units"]`, build time only): `None`
+- Model boundary (`control["units"]`, judged at build): `None`
   (default; pint is never imported) | `"check"` | `"convert"`.
-  "convert" converts a RESIDENT array in place at build. A streamed
-  or lazy input that would need converting RAISES: pre-process the
-  file. `control["units_patch"] = {name: key}` overrides a supplied
+  `control["units_patch"] = {name: key}` overrides a supplied
   array's attrs.
-- Supplied initial state and restart files are judged the same way,
-  but converted in the MODEL's copy. Restart state held in python
-  attributes is not checked.
+- What "convert" converts, and where:
+  - A PARAMETER is the model's working buffer: converted in place,
+    once, at build (`units.reconcile`).
+  - Anything the model COPIES is converted in the model's copy, and
+    the supplied data are never edited (`units.conversion`): supplied
+    initial state, restart files, and every INPUT (in memory,
+    file-backed, or streamed under MPI).
+  - An input's one-step buffer is converted after each refill
+    (`Input.advance`, `ModelMPI.run`): the row is widened to float64
+    first, then one multiply (and one add for a temperature) per
+    converted input per step. Nothing runs when the units agree.
+  - One buffer serves every consumer of an input: consumers that
+    declare different units for it raise at build.
+- Restart state held in python attributes is not checked.
 - Budget units are compared as strings, which is exact with a closed
   vocabulary.
 
