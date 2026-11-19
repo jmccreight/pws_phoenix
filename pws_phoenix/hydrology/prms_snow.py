@@ -60,7 +60,7 @@ in parameters_PRMSSnow.nc.
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -2002,7 +2002,7 @@ class PRMSSnow(Process):
         refs["pk_ice_prev"][:] = refs["pk_ice"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         # in/out state + outputs (written in place)
         ai: np.ndarray,

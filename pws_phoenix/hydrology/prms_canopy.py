@@ -49,7 +49,7 @@ deliberately unused, see above).
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -357,7 +357,7 @@ class PRMSCanopy(Process):
         refs["hru_intcpstor_old"][:] = refs["hru_intcpstor"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         # in/out state + outputs (written in place)
         net_ppt: np.ndarray,

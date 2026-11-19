@@ -32,7 +32,7 @@
   - [Performance](#performance)
     - [Benchmarks: ASV in the existing environment](#benchmarks-asv-in-the-existing-environment)
     - [Per-step data access: hold the ndarray, not the Dataset lookup](#per-step-data-access-hold-the-ndarray-not-the-dataset-lookup)
-    - [Numba switches: cache on by default, threading opt-in](#numba-switches-cache-on-by-default-threading-opt-in)
+    - [Numba: cache on by default, threaded kernels held to 1 thread](#numba-cache-on-by-default-threaded-kernels-held-to-1-thread)
   - [Translation and migration](#translation-and-migration)
     - [PRMS translation: one way, pyPRMS only, outside the core](#prms-translation-one-way-pyprms-only-outside-the-core)
     - [Pre-processing: derived inputs in a stamped file, verified at use](#pre-processing-derived-inputs-in-a-stamped-file-verified-at-use)
@@ -95,7 +95,7 @@ Terms:
 | Restart: flagged prognostic state, one file format for serial and MPI | built | Aug 2026 | Framework |
 | Benchmarks: ASV in the existing environment | built; not in CI | Oct 2026 | Performance |
 | Per-step data access: hold the ndarray, not the Dataset lookup | built | Oct 2026 | Performance |
-| Numba switches: cache on by default, threading opt-in | built; threading not measured | Nov 2026 | Performance |
+| Numba: cache on by default, threaded kernels held to 1 thread | built; threads measured on CONUS, not on ucb_2yr | Nov 2026 | Performance |
 | Output backends differ on purpose: zarr in serial, NetCDF stream under MPI | built | Jun 2026 | IO |
 | Serial output: a pre-sized zarr store written by region | built | Oct 2026 | IO |
 | PRMS translation: one way, pyPRMS only, outside the core | built | Aug 2026 | Translation and migration |
@@ -1355,10 +1355,11 @@ Terms:
   - `Output` still makes one DataArray call per output variable per
     step.
 
-### Numba switches: cache on by default, threading opt-in
+### Numba: cache on by default, threaded kernels held to 1 thread
 
 - **Status:** cache built Oct 28, 2026; threading Oct 30 - Nov 2,
-  2026; on develop.
+  2026; on develop. The thread count moved to the control Nov 19,
+  2026.
 - **Why:** the first step of a run was about 4 s of compilation. And
   the hru loop of every hru-grid kernel is independent per element.
 - **Decision:**
@@ -1366,18 +1367,36 @@ Terms:
     opts in only when every jitted function and constant it uses is
     in its own file, because numba's cache does not see a change in
     another file.
-  - `PWS_NUMBA_PARALLEL`, default off: `prange` on the one
-    per-element loop of each hru-grid kernel. Off, `prange` is plain
-    `range`, so the default path is unchanged; on, results are bit
-    for bit the same, because nothing crosses elements.
+  - Threading: `prange` on the one per-element loop of each hru-grid
+    kernel, ALWAYS compiled threaded (`parallel=True`); the Model
+    holds numba at `control["numba_n_threads"]` threads, default 1.
+    Results are bit for bit the same at any count, because nothing
+    crosses elements.
+  - Changed Nov 19, 2026 from a switch read at import
+    (`PWS_NUMBA_PARALLEL`, default off, which chose between two
+    kernels): numba's cache does not tell a threaded kernel from an
+    unthreaded one, so a threaded run loaded the unthreaded kernels
+    an earlier run had saved. One kind of kernel removes the case,
+    and a threaded kernel held to 1 thread measured no slower. The
+    cost is a compile about twice as long.
+  - The count is a control key because every run has a control, and
+    `numba.set_num_threads` must be called after numba is imported:
+    the `NUMBA_NUM_THREADS` environment variable is read at numba's
+    import, before any control exists, and is only the maximum.
+  - No warning on the default of 1 (every build would warn). The
+    build warns only when `NUMBA_NUM_THREADS` is set above 1 and the
+    control key is absent: the one case where the user asked for
+    threads and does not get them.
   - Not threaded: light helper loops (a thread launch costs more),
     loops that carry a counter, the segment and FlowGraph kernels
     (sequential order), budget sums (float order).
 - **For users:**
-  - Both are environment variables read at import.
-  - Under `mpirun` every rank starts its own thread pool, by default
-    one thread per core: set `NUMBA_NUM_THREADS` so ranks x threads
-    fit the machine.
+  - `PWS_NUMBA_CACHE` is an environment variable read at import;
+    the thread count is `control["numba_n_threads"]`.
+  - Under `mpirun` the count is per rank: ranks x threads must fit
+    the machine.
+  - A count above numba's maximum for the process raises at build
+    (collectively under MPI).
 - **Where:** `DEVELOPER.md` "Numba cache" and "Numba threading";
   `README.md` "Run-time switches".
 - **Left unfinished** (moved from memory Nov 12, 2026):

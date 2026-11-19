@@ -389,6 +389,15 @@ Known mpixarray limits:
   plays this role; there is no `Options` class yet.
   `config.load_model_yaml` is a first probe of reading it from a
   file.
+- Threads: the main kernel of every hru-grid process is ALWAYS
+  compiled `parallel=True` (one kind of kernel, so the numba cache
+  cannot serve the other kind). `control["numba_n_threads"]` (default
+  1; per rank under MPI) is the count: the Model calls
+  `numba.set_num_threads` at build and at the top of `run()`, and
+  does not restore it. The `NUMBA_NUM_THREADS` environment variable
+  is only the maximum; a count above it raises (collectively under
+  MPI). A kernel called without a Model runs on whatever was last
+  set. Rules and numbers: `DEVELOPER.md` "Numba threading".
 
 ## Units mode
 

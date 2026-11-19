@@ -1,3 +1,24 @@
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+
+- [Developer notes](#developer-notes)
+  - [Per-step data access: hold the ndarray, not the Dataset lookup](#per-step-data-access-hold-the-ndarray-not-the-dataset-lookup)
+    - [What a process step cost before](#what-a-process-step-cost-before)
+    - [The decision](#the-decision)
+    - [The invariant it relies on](#the-invariant-it-relies-on)
+    - [Rules this imposes](#rules-this-imposes)
+    - [Outcome (Oct 27, 2026)](#outcome-oct-27-2026)
+  - [Numba cache: on for users, off for tests, opt-in per kernel](#numba-cache-on-for-users-off-for-tests-opt-in-per-kernel)
+    - [What invalidates the cache (numba 0.64, `numba/core/caching.py`)](#what-invalidates-the-cache-numba-064-numbacorecachingpy)
+    - [MPI: no barrier](#mpi-no-barrier)
+    - [Measured](#measured)
+  - [Numba threading: `prange` over the HRU loop, 1 thread unless asked](#numba-threading-prange-over-the-hru-loop-1-thread-unless-asked)
+    - [Threads vs ranks](#threads-vs-ranks)
+    - [Where it pays (estimate; measurement pending)](#where-it-pays-estimate-measurement-pending)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 # Developer notes
 
 Design decisions with their evidence, and the invariants they impose on
@@ -218,18 +239,55 @@ The warm 1.9 s still held the uncached atmosphere (since opted in,
 Oct 30, 2026: its `solf` table moved in-file) and stream-temperature
 compiles plus the data loading and assembly.
 
-## Numba threading: `prange` over the HRU loop, opt-in
+## Numba threading: `prange` over the HRU loop, 1 thread unless asked
 
-`pws_phoenix.NUMBA_PARALLEL` (read once at import from
-`PWS_NUMBA_PARALLEL`; default off) feeds `parallel=NUMBA_PARALLEL` on
-the main `_calculate` of every hru-grid process -- atmosphere, canopy,
+The main `_calculate` of every hru-grid process -- atmosphere, canopy,
 snow, runoff (+Ag, +NoDprst), soilzone (+Ag, +NoDprst), groundwater
-(+NoDprst) -- whose single per-element loop is `numba.prange`. With the
-flag off `prange` is plain `range`, so the default kernel is the
-unthreaded one byte for byte. Results are bit-identical either way:
-nothing crosses elements, so there is no reduction and no float
-reordering (the serial suite is green with the flag on; the snow MPI
-test is pinned at `NUMBA_NUM_THREADS=3 mpirun -n 4`).
+(+NoDprst) -- is ALWAYS compiled `@numba.njit(parallel=True)`, and its
+single per-element loop is `numba.prange`. The Model sets how many
+threads they run on: `control["numba_n_threads"]`, default 1
+(`Model._set_numba_threads`, which calls `numba.set_num_threads` at
+build and again at the top of `run()`). Results are bit-identical at
+any count: nothing crosses elements, so there is no reduction and no
+float reordering (`tests/test_numba_threads.py` compares every
+variable of the drb NHM model on 1 and on 3 threads).
+
+Why always threaded (Nov 19, 2026): the earlier switch
+(`PWS_NUMBA_PARALLEL`, read at import) compiled one of two kernels,
+and numba's cache does not tell them apart -- a threaded run loaded
+the unthreaded kernels an earlier run had saved (CONUS, Hovenweep:
+first step 0.6 s, no kernel faster than unthreaded). With one kind of
+kernel there is nothing to mix up. A threaded kernel held to 1 thread
+costs nothing measurable:
+
+| kernels (median ms per step, model without channel) | drb, 765 hrus (LaNueva) | 32 processes of 3,592 hrus (Hovenweep) |
+| --- | --- | --- |
+| unthreaded | 0.185 to 0.188 | 1.51 |
+| threaded, held to 1 thread | 0.177 to 0.188 | 1.51 to 1.53 |
+| threaded, all 14 threads | 0.79 to 0.80 | -- |
+
+The price is the compile: about twice as long (drb first step 7.3 s
+against 3.7 s with the cache off), paid once per machine with the
+cache on and by every test process.
+
+Rules that follow from `numba.set_num_threads`:
+
+- The maximum is numba's thread pool, `numba.config.NUMBA_NUM_THREADS`,
+  fixed when numba is imported: the `NUMBA_NUM_THREADS` environment
+  variable when set, else the cores the process may use (a process
+  bound to one core by `srun -c 1` gets 1). A
+  `control["numba_n_threads"]` above it raises at build; under MPI the
+  ranks agree first (the smallest maximum), then all raise.
+- So `NUMBA_NUM_THREADS` is only a ceiling. Set above 1 with no
+  `control["numba_n_threads"]`, the run is on 1 thread and the build
+  warns (rank 0 only under MPI).
+- The count belongs to the calling thread of the process and is not
+  restored: other numba code run after a Model is built gets the
+  Model's count.
+- A kernel called WITHOUT a Model runs on whatever was last set --
+  every core in a fresh process. `tests/conftest.py` calls
+  `numba.set_num_threads(1)` at session start for that reason
+  (`tests/kernel_units.py` builds no Model).
 
 Deliberately NOT threaded:
 
@@ -245,13 +303,21 @@ Deliberately NOT threaded:
 
 ### Threads vs ranks
 
-Numba's thread count is `NUMBA_NUM_THREADS`, default every logical
-core (14 on LaNueva). Under `mpirun` each rank starts its own pool, so
-ranks x threads must fit the machine (`NUMBA_NUM_THREADS=3 mpirun -n
-4`). MPI already divides the HRUs, so threads help under MPI only when
-the rank count is limited by memory, not cores. For an ensemble
+Under MPI `control["numba_n_threads"]` is PER RANK, and each rank
+starts its own pool of `NUMBA_NUM_THREADS` threads (default every
+logical core, 14 on LaNueva), of which it uses the count; the rest
+stay idle (measured on Hovenweep, Nov 19, 2026: 128 idle threads in
+each of 32 processes cost nothing). ranks x threads must fit the
+cores. MPI already divides the HRUs, so threads help under MPI only
+when the rank count is limited by memory, not cores. For an ensemble
 (calibration), independent processes beat threads: no launch cost,
 perfect scaling.
+
+Measured on CONUS (114,958 hrus, Hovenweep, Nov 19, 2026; the six hru
+kernels of one step): 72.4 ms on 1 core, 18.0 ms on 8 threads, 14.1 on
+32, 11.0 on 128 -- 3.2 times at 8 threads, 5.2 times at 128. The same
+hrus as 64 independent processes without the channel: 0.96 ms per
+step.
 
 ### Where it pays (estimate; measurement pending)
 
@@ -264,7 +330,6 @@ cost (~0.1 ms) does not shrink with threads, so the chain-level gain
 lags the kernel-level one until ~10k HRUs; M-series efficiency cores
 finish their slice last and lengthen every region.
 
-**To be measured (Nov 2026):** ucb_2yr full run, flag off vs
-`PWS_NUMBA_PARALLEL=1` at `NUMBA_NUM_THREADS` = 1, 4, 10, 14 (the
-1-thread row isolates the launch overhead; 14 shows the efficiency-core
-tail). Record the five numbers here.
+**To be measured (Nov 2026):** ucb_2yr full run at
+`control["numba_n_threads"]` = 1, 4, 10, 14 (14 shows the
+efficiency-core tail). Record the four numbers here.

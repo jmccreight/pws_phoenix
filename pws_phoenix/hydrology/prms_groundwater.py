@@ -51,7 +51,7 @@ ride in the combined input file instead.
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -187,9 +187,9 @@ class PRMSGroundwaterNoDprst(Process):
 
     def init_state(self, time: Time) -> None:
         """Cold-start default: gwres_stor = 2.0 inches, PRMS's declared
-        default for gwstor_init (gwflow.f90 declparam, 5.2.1 and
-        5.2.1.1; pywatershed declares none). A domain's own value is
-        SUPPLIED gwres_stor (prms_translate renames gwstor_init),
+        default for gwstor_init (gwflow.f90 declparam, PRMS 5.2.1 and
+        PRMS 5.2.1.1; pywatershed declares none). A domain's own value
+        is SUPPLIED gwres_stor (prms_translate renames gwstor_init),
         written after this hook."""
         self._refs["gwres_stor"][:] = 2.0
 
@@ -197,7 +197,7 @@ class PRMSGroundwaterNoDprst(Process):
         self._refs["gwres_stor_old"][:] = self._refs["gwres_stor"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         gwres_stor: np.ndarray,
         gwres_flow: np.ndarray,
@@ -276,7 +276,7 @@ class PRMSGroundwater(PRMSGroundwaterNoDprst):
     }
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         gwres_stor: np.ndarray,
         gwres_flow: np.ndarray,

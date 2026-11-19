@@ -18,11 +18,13 @@ its processes' field specs and binds the process instances to it); there is no
 separate process-agnostic orchestrator layer.
 """
 
+import os
 import pathlib as pl
 import warnings
 from collections.abc import Mapping
 from typing import Any, Dict, List, Literal, Union
 
+import numba
 import numpy as np
 import xarray as xr
 
@@ -77,6 +79,9 @@ class Model:
     ``control["collect_var_names"]`` keeps the named
     variables in memory for the whole run, as
     ``model.results.values[name]`` (data_io.ResultCollector).
+
+    Threads: ``control["numba_n_threads"]`` (default 1) is the number
+    of numba threads the hru kernels run on (see _set_numba_threads).
 
     Usage:
         with Model(process_dict, control) as model:
@@ -136,6 +141,7 @@ class Model:
             self._load_all = control.get("load_all", False)
         else:
             self._load_all = load_all
+        self._set_numba_threads(control)
         self._set_budget_options(control)
         self._set_time_bounds(control)
         self._warm_start = control.get("restart_read") is not None
@@ -498,6 +504,46 @@ class Model:
         self._run_initialize_hooks()
         self._apply_supplied_state()
         self._resolve_maps()
+
+    def _set_numba_threads(self, control: Dict[str, Any]) -> None:
+        """control["numba_n_threads"] (default 1): the number of numba
+        threads the hru kernels run on. The kernels are always compiled
+        threaded (parallel=True); this holds numba at the count with
+        numba.set_num_threads, here at build and again at the top of
+        run(). The setting belongs to the calling thread of this
+        process and is NOT restored: other numba code run afterwards
+        gets the same count. The maximum is numba's thread pool,
+        numba.config.NUMBA_NUM_THREADS, fixed when numba was imported
+        (the NUMBA_NUM_THREADS environment variable, else the cores
+        the process may use): a count above it raises."""
+        n_threads = int(control.get("numba_n_threads", 1))
+        n_max = int(numba.config.NUMBA_NUM_THREADS)
+        self._raise_if_bad_numba_threads(n_threads, n_max)
+        if "numba_n_threads" not in control:
+            self._warn_if_numba_threads_ignored(n_max)
+        self._numba_n_threads = n_threads
+        numba.set_num_threads(n_threads)
+
+    def _raise_if_bad_numba_threads(self, n_threads: int, n_max: int) -> None:
+        if not 1 <= n_threads <= n_max:
+            raise ValueError(
+                f"control['numba_n_threads'] = {n_threads}: must be "
+                f"between 1 and numba's maximum for this process, "
+                f"{n_max} (the NUMBA_NUM_THREADS environment variable "
+                f"when set, else the cores granted to the process)."
+            )
+
+    def _warn_if_numba_threads_ignored(self, n_max: int) -> None:
+        """The user set NUMBA_NUM_THREADS above 1 and gave no
+        control["numba_n_threads"]: say that the run uses 1 thread."""
+        if "NUMBA_NUM_THREADS" in os.environ and n_max > 1:
+            warnings.warn(
+                f"NUMBA_NUM_THREADS={n_max} is set but "
+                f"control['numba_n_threads'] is not: the kernels run "
+                f"on 1 thread. Set control['numba_n_threads'] (up to "
+                f"{n_max}) to use more.",
+                UserWarning,
+            )
 
     def _set_budget_options(self, control: Dict[str, Any]) -> None:
         """control["budget"]: None (default; budgets are still computed
@@ -1203,6 +1249,9 @@ class Model:
         """Run n_steps timesteps, continuing from the last step taken
         (the restart resume point when warm-started; time zero
         otherwise)."""
+        # this model's thread count: another Model built in this
+        # process since may have set a different one
+        numba.set_num_threads(self._numba_n_threads)
         for _ in range(int(n_steps)):
             self.step(dt)
 
@@ -1630,6 +1679,9 @@ class ModelMPI(Model):
                           output vars are requested
         time_chunk_size   serial-grid Output time chunking (default 365)
         mpi_grid          name of the distributed grid/dim (default "space")
+        numba_n_threads   numba threads PER RANK for the hru kernels
+                          (default 1; see Model._set_numba_threads).
+                          ranks x threads must fit the cores.
         restart_read      directory of write_restart() files to warm-start
                           from: saved state restores over the cold init
                           and the stream is time-sliced to BEGIN at the
@@ -1800,6 +1852,8 @@ class ModelMPI(Model):
         ds_mpi = self.discretizations[mpi_grid].decompose(ds_source)
         comm = self.discretizations[mpi_grid].comm  # parallelize may refine
         self._comm = comm
+        # here, not in __init__: the check agrees across ranks first
+        self._set_numba_threads(control)
 
         # ---- Stream over time. as_iterable windows the time-dimensioned
         #      input vars to one step (they stay on the dataset, lazy; the
@@ -2142,6 +2196,7 @@ class ModelMPI(Model):
         every step (no rank branches -- serial grids are replicated)."""
         if self._finalized:
             raise RuntimeError("Cannot run a finalized Model.")
+        numba.set_num_threads(self._numba_n_threads)
         ds_mpi_stream = self._ds_mpi_stream
         mpi_grid = self._mpi_grid
         mpi_procs = [
@@ -2198,6 +2253,21 @@ class ModelMPI(Model):
             # Serial-grid output: rank 0 only (collective-free branch).
             if self.output is not None:
                 self.output.collect_current_timestep(gtt)
+
+    def _raise_if_bad_numba_threads(self, n_threads: int, n_max: int) -> None:
+        """Agree across ranks before raising: numba's maximum can
+        differ by rank (the cores each rank was granted), so the
+        count is judged against the smallest one (one Allreduce(MIN))
+        and every rank raises together."""
+        from mpi4py import MPI
+
+        n_max = self._comm.allreduce(int(n_max), op=MPI.MIN)
+        super()._raise_if_bad_numba_threads(n_threads, n_max)
+
+    def _warn_if_numba_threads_ignored(self, n_max: int) -> None:
+        """Rank 0 only: one warning for the run, not one per rank."""
+        if self._comm.rank == 0:
+            super()._warn_if_numba_threads_ignored(n_max)
 
     def _raise_if_imbalanced(self, n_bad: int, proc: Any) -> None:
         """Agree across ranks before raising: one scalar Allreduce(MAX) of

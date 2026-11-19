@@ -72,7 +72,7 @@ values).
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -466,7 +466,7 @@ class PRMSAtmosphereBase(Process):
         pass  # transp_on/tmax_sum/transp_check persist; no *_prev vars
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         # outputs + state (written in place)
         tmaxf: np.ndarray,

@@ -145,6 +145,14 @@ def check_oracle_pins(root: pl.Path = PWS_TEST_DATA) -> list[str]:
 
 
 def pytest_sessionstart(session):
+    # The hru kernels are compiled threaded; a Model holds numba at
+    # control["numba_n_threads"] (default 1). A kernel called without
+    # a Model (tests/kernel_units.py) would otherwise run on every
+    # core. Not NUMBA_NUM_THREADS=1: that caps numba's maximum, and
+    # tests/test_numba_threads.py runs a model on several threads.
+    import numba
+
+    numba.set_num_threads(1)
     if not PWS_TEST_DATA.is_dir():
         return
     problems = check_oracle_pins()

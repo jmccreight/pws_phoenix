@@ -6,9 +6,9 @@ import os
 # PWS_NUMBA_CACHE=0 turns it off for every kernel (tests/conftest.py does).
 NUMBA_CACHE = os.environ.get("PWS_NUMBA_CACHE", "1") != "0"
 
-# numba threading over the hru element loops (prange): OFF by default;
-# PWS_NUMBA_PARALLEL=1 turns it on. Results are bit-identical (no
-# reductions cross elements). Threads x MPI ranks must fit the cores:
-# numba defaults to every core per process, so set NUMBA_NUM_THREADS
-# under mpirun.
-NUMBA_PARALLEL = os.environ.get("PWS_NUMBA_PARALLEL", "0") == "1"
+# numba threading over the hru element loops (prange): the main kernel
+# of every hru-grid process is ALWAYS compiled threaded (parallel=True),
+# and the Model holds numba at control["numba_n_threads"] threads,
+# default 1 (Model._set_numba_threads; DEVELOPER.md "Numba threading").
+# There is no switch here: one kind of kernel is ever compiled, so the
+# on-disk cache cannot serve the other kind.

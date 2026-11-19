@@ -85,7 +85,7 @@ values, one shared field per grid).
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -1183,7 +1183,7 @@ class PRMSSoilzoneNoDprst(Process):
         refs["slow_stor_prev"][:] = refs["slow_stor"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         # in/out state + outputs (written in place)
         cap_infil_tot: np.ndarray,
@@ -1639,7 +1639,7 @@ class PRMSSoilzone(PRMSSoilzoneNoDprst):
     # ------------------------------------------------------------------
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         # in/out state + outputs (written in place)
         cap_infil_tot: np.ndarray,

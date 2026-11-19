@@ -10,6 +10,7 @@
     - [CI setup (one-time, repo admin)](#ci-setup-one-time-repo-admin)
     - [Running tests](#running-tests)
     - [Run-time switches (environment variables, read at import)](#run-time-switches-environment-variables-read-at-import)
+    - [Threads (a control key, not an environment variable)](#threads-a-control-key-not-an-environment-variable)
   - [Internal design considerations](#internal-design-considerations)
   - [External design considerations](#external-design-considerations)
     - [mpixarray](#mpixarray)
@@ -122,7 +123,6 @@ modules loaded, for example by sourcing a file like this:
 ```
 module load conda cray-hdf5-parallel
 export OMP_NUM_THREADS=1
-export NUMBA_NUM_THREADS=1
 conda activate mpixr
 ```
 
@@ -243,15 +243,22 @@ reviewed key bump.
   beside the source, so a second Python process (a notebook, each MPI
   rank) skips the compile. `0` turns it off; the tests always run with
   it off. Rules and what invalidates it: `DEVELOPER.md` "Numba cache".
-- `PWS_NUMBA_PARALLEL` (default `0`): `1` threads the per-HRU element
-  loops with numba `prange` (every hru-grid process's main kernel:
-  atmosphere, canopy, snow, runoff, soilzone, groundwater and the
-  NoDprst/Ag variants; light helper loops and the sequential segment
-  kernels stay single-threaded). Results are bit-identical. The thread count is numba's `NUMBA_NUM_THREADS`, which
-  defaults to every logical core; under `mpirun` set it so that
-  ranks x threads fits the machine, e.g. `NUMBA_NUM_THREADS=3 mpirun -n
-  4 ...` on 14 cores. Pays off only for large domains (thousands of
-  HRUs per process); measurements: `DEVELOPER.md` "Numba threading".
+
+### Threads (a control key, not an environment variable)
+
+`control["numba_n_threads"]` (default `1`) is the number of numba
+threads the per-HRU kernels run on (every hru-grid process's main
+kernel: atmosphere, canopy, snow, runoff, soilzone, groundwater and
+the NoDprst/Ag variants; light helper loops and the sequential segment
+kernels stay single-threaded). Results are bit-identical at any count.
+Under MPI the count is per rank: ranks x threads must fit the cores.
+
+numba's `NUMBA_NUM_THREADS` environment variable is only the maximum
+(default: every core the process may use): a count above it raises,
+and setting the variable alone does not thread a run (the Model warns
+when it is set above 1 and the control key is absent). Pays off only
+for large domains (thousands of HRUs per process); measurements:
+`DEVELOPER.md` "Numba threading".
 
 ## Internal design considerations
 

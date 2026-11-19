@@ -120,8 +120,6 @@ Port notes (upstream quirks preserved verbatim)
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_PARALLEL
-
 from pws_phoenix.clock import Time
 from pws_phoenix.hydrology.prms_soilzone import (
     _INACTIVE,
@@ -1259,7 +1257,7 @@ class PRMSSoilzoneAg(Process):
             slow_stor_redistribution[hh] = slow_stor[hh] - slow_stor_prev[hh]
 
     @staticmethod
-    @numba.njit(parallel=NUMBA_PARALLEL)
+    @numba.njit(parallel=True)
     def _calculate(
         # options
         iter_aet_flag: bool,

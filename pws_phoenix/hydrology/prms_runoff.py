@@ -72,7 +72,7 @@ parameters_PRMSRunoff.nc.
 import numba
 import numpy as np
 
-from pws_phoenix import NUMBA_CACHE, NUMBA_PARALLEL
+from pws_phoenix import NUMBA_CACHE
 from pws_phoenix.clock import Time
 from pws_phoenix.process import DataArrayMeta, Process
 
@@ -1376,7 +1376,7 @@ class PRMSRunoffNoDprst(Process):
         refs["hru_impervstor_old"][:] = refs["hru_impervstor"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -2112,7 +2112,7 @@ class PRMSRunoff(PRMSRunoffNoDprst):
         refs["dprst_stor_hru_old"][:] = refs["dprst_stor_hru"]
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
@@ -2671,7 +2671,7 @@ class PRMSRunoffAg(PRMSRunoff):
     # ------------------------------------------------------------------
 
     @staticmethod
-    @numba.njit(cache=NUMBA_CACHE, parallel=NUMBA_PARALLEL)
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
     def _calculate(
         # in/out state + outputs (written in place)
         contrib_fraction: np.ndarray,
