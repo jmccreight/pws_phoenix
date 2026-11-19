@@ -48,7 +48,7 @@ Model's ``grid_ds[name] = source[name]`` assignments never realign.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, overload
 
 import numpy as np
 import xarray as xr
@@ -56,6 +56,7 @@ import xarray as xr
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.flow_graph import FlowGraphBase, make_flow_graph
 from pws_phoenix.hydrology.prms_channel_flow_node import PRMSChannelFlowNode
+from pws_phoenix.maps import SparseWeights
 from pws_phoenix.process import _resolved_fields
 
 # the segment dis variables that are TOPOLOGY, not per-node properties
@@ -112,14 +113,33 @@ class FlowGraphKit:
     # process_dict entry)
     initial_state: dict[str, xr.DataArray] = field(default_factory=dict)
 
-    def pad_weights(self, weights: np.ndarray) -> np.ndarray:
+    @overload
+    def pad_weights(self, weights: np.ndarray) -> np.ndarray: ...
+
+    @overload
+    def pad_weights(self, weights: SparseWeights) -> SparseWeights: ...
+
+    def pad_weights(
+        self, weights: np.ndarray | SparseWeights
+    ) -> np.ndarray | SparseWeights:
         """``(n_seg, n_hru)`` hru->segment weights -> ``(n_nodes,
         n_hru)``: zero rows for the new nodes (no lateral inflow --
-        pywatershed's own limitation, stated in its helper docstring)."""
+        pywatershed's own limitation, stated in its helper docstring).
+        Returns the form it was given (a dense array, or a
+        ``SparseWeights``)."""
         if weights.shape[0] != self.n_seg:
             raise ValueError(
                 f"weights have {weights.shape[0]} rows; the channel "
                 f"network has {self.n_seg} segments"
+            )
+        if isinstance(weights, SparseWeights):
+            # the new nodes are rows with no entries: only the shape
+            # changes
+            return SparseWeights(
+                weights.rows,
+                weights.cols,
+                weights.vals,
+                (self.n_nodes, weights.shape[1]),
             )
         padded = np.zeros(
             (self.n_nodes, weights.shape[1]), dtype=weights.dtype

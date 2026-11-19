@@ -166,11 +166,12 @@ class TestInsertFlowGraph:
             mm = graph.maps[name]
             assert mm.target_grid == "nnodes"
             assert mm.target_var == f"node_{mm.source_var}"
-            assert mm.weights.shape == (runs["n_seg"] + 4, n_hru)
+            padded = mm.weights.dense()
+            assert padded.shape == (runs["n_seg"] + 4, n_hru)
             np.testing.assert_array_equal(
-                mm.weights[: runs["n_seg"]], plain.maps[name].weights
+                padded[: runs["n_seg"]], plain.maps[name].weights.dense()
             )
-            assert (mm.weights[runs["n_seg"] :] == 0.0).all()
+            assert (padded[runs["n_seg"] :] == 0.0).all()
             assert "spliced" in mm.derivation
         # node ids label the grid
         np.testing.assert_array_equal(

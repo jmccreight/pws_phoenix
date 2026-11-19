@@ -69,7 +69,14 @@ def _assert_same_variables(found: xr.Dataset, expected: xr.Dataset):
 
 def test_kit_equals_control_kit(translation_yaml):
     domain_dir = translation_yaml.parent
-    expected = assemble_from_control(NHM)
+    # the translated domain holds a preprocessed file, so its derived
+    # parameters carry that file's stamps: the control kit to compare
+    # with is the one given the same file
+    info = yaml.safe_load(translation_yaml.read_text())
+    assert info["preprocessed_file"] == "nhm_preprocessed.nc"
+    expected = assemble_from_control(
+        NHM, preprocessed=domain_dir / "nhm_preprocessed.nc"
+    )
     kit = assemble_from_translation(translation_yaml)
 
     # -- the run configuration: options from the control copy, the
@@ -124,7 +131,9 @@ def test_kit_equals_control_kit(translation_yaml):
     assert list(kit.maps) == list(expected.maps)
     for name, mm in expected.maps.items():
         found_map = kit.maps[name]
-        np.testing.assert_array_equal(found_map.weights, mm.weights)
+        np.testing.assert_array_equal(
+            found_map.weights.dense(), mm.weights.dense()
+        )
         for attr in ("source_grid", "target_grid", "source_var", "target_var"):
             assert getattr(found_map, attr) == getattr(mm, attr)
 
@@ -188,6 +197,36 @@ def test_moved_domain_and_callers_window(moved_yaml):
         assert model.ntime == 10
         assert model.times.values[0] == start
         assert model.times.values[-1] == end
+
+
+def test_without_preprocessed_file_derives(moved_yaml):
+    """A domain translated without the preprocessed step: the derived
+    parameters are computed at assembly, as assemble_from_control
+    computes them."""
+    info = yaml.safe_load(moved_yaml.read_text())
+    info["preprocessed_file"] = None
+    moved_yaml.write_text(yaml.safe_dump(info, sort_keys=False))
+    kit = assemble_from_translation(moved_yaml)
+    expected = assemble_from_control(NHM)
+    for slot, entry in expected.process_dict.items():
+        _assert_same_variables(
+            kit.process_dict[slot]["parameters"], entry["parameters"]
+        )
+    segment_dis = kit.discretizations["nsegment"].parameters
+    expected_dis = expected.discretizations["nsegment"].parameters
+    assert segment_dis is not None and expected_dis is not None
+    _assert_same_variables(segment_dis, expected_dis)
+
+
+def test_stale_preprocessed_file_raises(moved_yaml):
+    """The parameter file rewritten without its preprocessed file: the
+    run that reads the pair raises."""
+    parameters = moved_yaml.parent / "nhm_parameters.nc"
+    params = xr.load_dataset(parameters)
+    params["hru_slope"] = params["hru_slope"] * 1.0001
+    params.to_netcdf(parameters)
+    with pytest.raises(ValueError, match="STALE.*hru_slope"):
+        assemble_from_translation(moved_yaml)
 
 
 def test_edited_control_copy_raises(moved_yaml):

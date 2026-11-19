@@ -195,11 +195,15 @@ Terms:
 
 ### Maps: a per-variable correspondence between grids, applied once per step
 
-- **Status:** built July 2026; on develop.
+- **Status:** built July 2026; on develop. Weights held as their
+  nonzero entries since Nov 2026.
 - **Why:** pywatershed aggregates hru values to segments inside its
   channel and stream temperature processes, which makes them two-grid
   processes without saying so. Coupling grids needs one explicit
-  concept with one MPI treatment.
+  concept with one MPI treatment. A full weight matrix does not fit a
+  large domain: 58,489 segments x 114,958 hrus x 8 bytes is 54 GB,
+  for 114,958 entries that are not zero. The first serial run of that
+  domain peaked at 51.5 GB, nearly all of it this matrix.
 - **Decision:**
   - A Map carries one variable from a source grid to a target grid
     through static weights; a rename or a static factor is part of
@@ -219,14 +223,37 @@ Terms:
   - Fluxes are mapped separately and summed in the consumer's kernel.
   - Weights for a pywatershed aggregation are derived by probing its
     kernel with basis vectors.
+  - A Map holds only the nonzero entries of its weights
+    (`maps.SparseWeights`: row index, column index and value of each
+    entry, plus the shape). A full matrix is still accepted, and is
+    converted at construction and not kept. The entries are held
+    sorted by (row, column), the order the full matrix gives, so the
+    sums are the same bit for bit; a zero value is dropped and a
+    repeated (row, column) raises.
+  - One form in a file, for the pre-processing file and for a weights
+    file of the model yaml: three 1-D variables, `<name>_rows`,
+    `<name>_cols`, `<name>_vals`. Our own small class, not
+    `scipy.sparse`: `maps.py` imports only numpy, xarray and numba.
 - **For users:**
   - `Map(weights=..., grid={"hru": "segment"},
-    variable={"flow": "flow"})`. An unused Map or a weights shape
-    that does not fit the grids raises at build.
+    variable={"flow": "flow"})`, with `weights` a full
+    `(n_target, n_source)` array or a `SparseWeights(rows, cols,
+    vals, shape)`. An unused Map or a weights shape that does not fit
+    the grids raises at build.
+  - `mm.weights.dense()` builds the full matrix (a new array at every
+    call): for inspection and small domains.
+  - A map's `weights:` file in the model yaml holds the full matrix
+    as its one variable, or `weights_rows` / `weights_cols` /
+    `weights_vals` (`SparseWeights.to_dataset("weights")`).
 - **Where:** `CLAUDE.md` "Schedule and Maps";
   `pws_phoenix/maps.py` (docstring); `Model._resolve_maps`;
-  `docs/PORTS.md` "The stream-temperature chain".
+  `tests/test_maps.py`; `docs/PORTS.md` "The stream-temperature
+  chain".
 - **Left unfinished:**
+  - `derive_aggregation_weights` (stream temperature) still fills four
+    full matrices in memory before they are converted. It needs to
+    collect each probe's nonzero entries before a large domain can
+    run stream temperature.
   - No Map from a serial grid to the distributed grid.
   - One Map carrying several variables through the same weights (one
     batched product).
@@ -1422,9 +1449,17 @@ Terms:
   - `verify_preprocessed` checks the digests at use. A stale or
     edited variable raises, naming the variable, the input and the
     remedy.
+  - A weight matrix is stored as its nonzero entries (Nov 2026; see
+    "Maps"): three variables, each with the stamp. A file from before
+    that, with a full matrix, raises on read and is written again.
+  - `derive_preprocessed(params, stream_temp)` does the deriving, from
+    parameters already in memory; `write_preprocessed` and
+    `translate_domain` both call it.
 - **For users:**
   - `model_from_control(control_file, preprocessed=path)`.
   - Rewrite the file after changing any parameter a derivation reads.
+  - A domain translated ahead of time gets this file from
+    `translate_domain` (the next entry).
 - **Where:** `pws_phoenix/prms_translate/preprocess.py`;
   `examples/02_preprocessing.py`; `tests/test_preprocess.py`.
 - **Left unfinished** (moved from memory Nov 12, 2026): none.
@@ -1441,8 +1476,14 @@ Terms:
   - `translate_domain(control_file, out_dir)` writes the files a
     control names ONCE, into a flat domain directory: one combined
     forcing netCDF (`cbh.nc`: the whole record, float32 where that is
-    exact, no compression, no chunking), `<stem>_parameters.nc`, a
-    byte copy of the control file, and `<stem>_translation.yaml`.
+    exact, no compression, no chunking), `<stem>_parameters.nc`,
+    `<stem>_preprocessed.nc`, a byte copy of the control file, and
+    `<stem>_translation.yaml`.
+  - `<stem>_preprocessed.nc` (the previous entry's file) is derived
+    from `<stem>_parameters.nc`, not from the parameter text: a run
+    verifies its stamps against that file's arrays. It is written
+    again whenever the parameter file is written. A run whose yaml
+    names none derives at build, as `model_from_control` does.
   - The yaml records FILES only: the products relative to its own
     directory, the files that were read as absolute paths, and a
     sha256 of the control file. OPTIONS (classes, the simulation
@@ -1481,15 +1522,22 @@ Terms:
     units as it is read, file-backed or loaded.
   - A control with dynamic-parameter files raises. An edited control
     copy raises: translate the domain again.
+  - `--only parameters --force` rewrites the parameter file and
+    leaves the preprocessed file as it was. The next run then raises
+    "STALE": run `--only preprocessed --force`.
 - **Where:** `pws_phoenix/prms_translate/translate_domain.py` (module
   docstring), `cbh.write_cbh_netcdf`,
+  `preprocess.derive_preprocessed`,
   `assemble.assemble_from_translation`; `Model._time_window`;
   `tests/test_translate_domain.py`, `tests/test_cbh_netcdf.py`,
   `tests/test_model_from_translation.py`, `tests/test_time_window.py`,
   `tests/test_input.py`.
 - **Left unfinished:**
-  - The `<stem>_preprocessed.nc` step. It waits on map weights that
-    are not a dense matrix (54 GB at 58,489 segments x 114,958 hrus).
+  - `translate_domain` does not verify an existing preprocessed file
+    against the parameter file (the run does).
+  - For a control with stream temperature the preprocessed step
+    builds four full weight matrices in memory (see "Maps", left
+    unfinished): not possible at NHM scale.
   - The MPI run entry. `ModelMPI` reads one combined file that also
     holds the hru parameters; whether translation writes such a file
     or `ModelMPI` takes forcing and parameters separately is

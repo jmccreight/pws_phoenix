@@ -474,7 +474,7 @@ node_inputs = {}
 for name, mm in kit_nhm.maps.items():
     if mm.target_grid != "nsegment":
         continue
-    weights = graph.pad_weights(mm.weights)  # (nnodes, nhru)
+    weights = graph.pad_weights(mm.weights).dense()  # (nnodes, nhru)
     hru_vol = nhm_out[mm.source_var]  # (time, nhru)
     node_inputs[f"node_{mm.source_var}"] = xr.DataArray(
         hru_vol.values @ weights.T,
@@ -664,7 +664,7 @@ if PYWS_NB_OUTPUT_DIR.exists():
     for name, mm in kit_nhm.maps.items():
         if mm.target_grid != "nsegment":
             continue
-        weights = graph.pad_weights(mm.weights)
+        weights = graph.pad_weights(mm.weights).dense()
         hru_vol = xr.load_dataarray(pyws_nhm_dir / f"{mm.source_var}.nc")
         hru_vol = hru_vol.rename({"nhm_id": "nhru"})
         node_inputs_pyws[f"node_{mm.source_var}"] = xr.DataArray(

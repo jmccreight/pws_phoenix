@@ -21,6 +21,7 @@ from pws_phoenix.hydrology.pass_through_flow_node import PassThroughFlowNode
 from pws_phoenix.hydrology.prms_channel_flow_node import PRMSChannelFlowNode
 from pws_phoenix.hydrology.source_sink_flow_node import SourceSinkFlowNode
 from pws_phoenix.hydrology.starfit_flow_node import StarfitFlowNode
+from pws_phoenix.maps import SparseWeights
 
 # -- a toy network: 10 -> 30, 20 -> 30, 30 -> 50, 40 -> 50, 50 = outlet
 NHM_SEG = np.array([10, 20, 30, 40, 50], dtype=np.int64)
@@ -153,6 +154,12 @@ class TestSynthetic:
         assert (padded[N_SEG] == 0.0).all()
         with pytest.raises(ValueError, match="rows"):
             kit.pad_weights(weights[:-1])
+        # the sparse form: the same matrix, returned sparse
+        sparse = kit.pad_weights(SparseWeights.from_dense(weights))
+        assert isinstance(sparse, SparseWeights)
+        np.testing.assert_array_equal(sparse.dense(), padded)
+        with pytest.raises(ValueError, match="rows"):
+            kit.pad_weights(SparseWeights.from_dense(weights[:-1]))
 
     def test_errors(self, toy_dis_seg, toy_channel_params):
         with pytest.raises(ValueError, match="intercept nhm_seg 30"):

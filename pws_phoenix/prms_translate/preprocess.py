@@ -38,6 +38,7 @@ import xarray as xr
 from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.hydrology.prms_stream_temp import derive_aggregation_weights
+from pws_phoenix.maps import SparseWeights
 from pws_phoenix.prms_translate.control import from_control
 from pws_phoenix.prms_translate.parameters import (
     derive_hru_in_to_cf,
@@ -73,21 +74,31 @@ def _stamp(
     return da
 
 
-def write_preprocessed(
-    control_file: str | pl.Path, path: str | pl.Path
-) -> pl.Path:
-    """Execute the configuration's derivations and save the artifacts
-    to ONE stamped NetCDF: the derivable parameters (solar tables,
-    segment_order, hru_in_to_cf) and the map-weights matrices (the
-    lateral-volume 0/1 matrix; the stream-temperature aggregation
-    matrices when the control enables stream temperature). Returns
-    `path`. Consume with ``assemble_from_control(...,
-    preprocessed=path)`` -- stamps are verified there."""
-    control_file = pl.Path(control_file)
-    ctl = load_control(control_file)
-    cfg = from_control(ctl, control_file)
-    params = load_parameters(cfg.param_files)
+def _stamp_weights(
+    out: xr.Dataset,
+    name: str,
+    weights: SparseWeights,
+    derivation: str,
+    inputs: dict[str, np.ndarray],
+) -> None:
+    """Add a map-weights matrix to `out` in its file form
+    (``SparseWeights.to_dataset``: ``<name>_rows``, ``<name>_cols``,
+    ``<name>_vals``), each of the three variables stamped."""
+    for var_name, da in weights.to_dataset(name).data_vars.items():
+        out[var_name] = _stamp(da, derivation, inputs)
 
+
+def derive_preprocessed(params: xr.Dataset, stream_temp: bool) -> xr.Dataset:
+    """Execute the derivations on `params` and return the stamped
+    artifacts (no file is written): the derivable parameters (solar
+    tables, segment_order, hru_in_to_cf) and the map-weights matrices
+    (the lateral-volume 0/1 matrix; with `stream_temp`, the
+    stream-temperature aggregation matrices), each matrix as its
+    nonzero entries (``SparseWeights.to_dataset``).
+
+    The stamps hold digests of `params`' arrays, so derive from the
+    parameters a run will be given: ``verify_preprocessed`` compares
+    against those."""
     out = xr.Dataset()
 
     soltabs = compute_soltabs(
@@ -122,14 +133,16 @@ def write_preprocessed(
         {"tosegment": params["tosegment"].values},
     )
 
-    out["weights_vol"] = _stamp(
-        xr.DataArray(volume_map_weights(params), dims=("nsegment", "nhru")),
+    _stamp_weights(
+        out,
+        "weights_vol",
+        volume_map_weights(params),
         "prms_translate.volume_map_weights(params): 0/1 assignment "
         "matrix from hru_segment",
         {"hru_segment": params["hru_segment"].values},
     )
 
-    if "prms_stream_temp" in cfg.classes:
+    if stream_temp:
         agg_inputs = {
             "hru_segment": params["hru_segment"].values,
             "hru_area": params["hru_area"].values,
@@ -145,18 +158,37 @@ def write_preprocessed(
             params["seg_close"].values,
         )
         for key in _AGG_WEIGHTS:
-            out[f"weights_{key}"] = _stamp(
-                xr.DataArray(agg[key], dims=("nsegment", "nhru")),
+            _stamp_weights(
+                out,
+                f"weights_{key}",
+                SparseWeights.from_dense(agg[key]),
                 "derive_aggregation_weights(hru_segment, hru_area, "
                 "tosegment, segment_order, seg_close)",
                 agg_inputs,
             )
 
-    out.attrs["control_file"] = str(control_file)
     out.attrs["note"] = (
         "prms_translate preprocessed artifacts; stamps verified at "
         "assembly (see prms_translate/preprocess.py)"
     )
+    return out
+
+
+def write_preprocessed(
+    control_file: str | pl.Path, path: str | pl.Path
+) -> pl.Path:
+    """Execute the derivations of the configuration `control_file`
+    names (``derive_preprocessed`` on its parameter file(s)) and save
+    the artifacts to ONE stamped NetCDF. Returns `path`. Consume with
+    ``assemble_from_control(..., preprocessed=path)`` -- stamps are
+    verified there. A domain translated ahead of time gets this file
+    from ``translate_domain`` instead."""
+    control_file = pl.Path(control_file)
+    ctl = load_control(control_file)
+    cfg = from_control(ctl, control_file)
+    params = load_parameters(cfg.param_files)
+    out = derive_preprocessed(params, "prms_stream_temp" in cfg.classes)
+    out.attrs["control_file"] = str(control_file)
     path = pl.Path(path)
     out.to_netcdf(path)
     return path
@@ -198,6 +230,8 @@ def verify_preprocessed(artifacts: xr.Dataset, params: xr.Dataset) -> None:
                     f"preprocessed artifact {name!r} is STALE: its "
                     f"derivation input {input_name!r} differs from "
                     "the one it was derived from. Regenerate with "
-                    "write_preprocessed(), or use the in-chain "
-                    "default (no preprocessed= argument)."
+                    "write_preprocessed() (for a translated domain: "
+                    "translate_domain --only preprocessed --force), or "
+                    "use the in-chain default (no preprocessed= "
+                    "argument)."
                 )

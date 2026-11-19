@@ -60,7 +60,7 @@ from pws_phoenix.hydrology.prms_stream_temp import (
     PRMSStreamTempSegHumidity,
     derive_aggregation_weights,
 )
-from pws_phoenix.maps import Map
+from pws_phoenix.maps import Map, SparseWeights
 from pws_phoenix.model import Model
 from pws_phoenix.process import DataArrayMeta, Process
 from pws_phoenix.prms_translate.cbh import load_cbh
@@ -357,7 +357,12 @@ def _assemble(
     # -- Maps: the three lateral volumes always; the ten stream-temp
     # aggregations (basis-probed weights) when stream temp is on, nine
     # without CBH humidity (no seg_humid Map) --
-    def _map(source: str, target: str, ww: np.ndarray, derivation: str) -> Map:
+    def _map(
+        source: str,
+        target: str,
+        ww: np.ndarray | SparseWeights,
+        derivation: str,
+    ) -> Map:
         return Map(
             weights=ww,
             grid={"nhru": "nsegment"},
@@ -370,7 +375,7 @@ def _assemble(
         "matrix from hru_segment"
     )
     vol_weights = (
-        artifacts["weights_vol"].values
+        SparseWeights.from_dataset(artifacts, "weights_vol")
         if artifacts is not None
         else volume_map_weights(params)
     )
@@ -392,9 +397,10 @@ def _assemble(
         ),
     }
     if stream_temp:
+        agg_weights: dict[str, Any]
         if artifacts is not None:
             agg_weights = {
-                kk: artifacts[f"weights_{kk}"].values
+                kk: SparseWeights.from_dataset(artifacts, f"weights_{kk}")
                 for kk in ("flow", "swrad", "met", "humid")
             }
         else:

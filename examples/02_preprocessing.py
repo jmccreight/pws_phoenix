@@ -100,8 +100,8 @@ np.testing.assert_array_equal(
     ].values,
 )
 np.testing.assert_array_equal(
-    kit_pre.maps["seg_tave_air"].weights,
-    kit_chain.maps["seg_tave_air"].weights,
+    kit_pre.maps["seg_tave_air"].weights.dense(),
+    kit_chain.maps["seg_tave_air"].weights.dense(),
 )
 print("preprocessed and in-chain assemblies are bit-identical")
 

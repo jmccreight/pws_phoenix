@@ -688,6 +688,17 @@ correspondence between grids, applied once per step".
   declared writer on the source grid (a `mutable_input` declarer
   included) precedes the first consumer. There is no run-time
   tracking.
+- A Map HOLDS only the nonzero entries of its weights:
+  `maps.SparseWeights(rows, cols, vals, shape)`, the row index,
+  column index and value of each entry. `weights=` takes that or a
+  full `(n_target, n_source)` array, which is converted at
+  construction and not kept. Never build the full matrix for a real
+  domain (54 GB for the NHM): `mm.weights.dense()` is for tests and
+  small domains.
+- Weights in a file are three 1-D variables, `<name>_rows` /
+  `<name>_cols` / `<name>_vals` (`SparseWeights.to_dataset`): in the
+  pre-processing file, and accepted beside a full matrix by the
+  model yaml's `weights:`.
 - `_resolve_maps` also raises on a weights shape that does not fit
   the grid sizes, an unknown grid, a missing source variable, and an
   unused Map.
@@ -696,7 +707,8 @@ correspondence between grids, applied once per step".
 - A mapped flux has a NEW name on the target grid (`seg_sroff_vol`).
   Fluxes are mapped separately and summed in the consumer's kernel.
 - Weights for a pywatershed aggregation are derived by probing its
-  kernel with basis vectors (`derive_aggregation_weights`).
+  kernel with basis vectors (`derive_aggregation_weights`). It still
+  fills full matrices: not usable on a large domain yet.
 
 ## Open design topics
 

@@ -300,7 +300,7 @@ def test_package_parameters():
     for ii in range(hru_segment.shape[0]):
         if hru_segment[ii] > 0:
             expected[hru_segment[ii] - 1, ii] = 1.0
-    np.testing.assert_array_equal(weights, expected)
+    np.testing.assert_array_equal(weights.dense(), expected)
 
 
 @drb_skipif

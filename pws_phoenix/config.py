@@ -15,7 +15,11 @@ cannot hold classes or arrays, so:
     registers them);
   - a map entry's ``class:`` is ``"Map"`` or ``"MapMPI"``; its
     ``weights:`` is either an inline (nested-list) matrix or a path to a
-    single-variable NetCDF (opened, loaded, closed);
+    NetCDF (loaded, closed). The file holds the full matrix as its one
+    variable, or the matrix's nonzero entries as ``weights_rows`` /
+    ``weights_cols`` / ``weights_vals``
+    (``SparseWeights.to_dataset("weights")``): which one is read off
+    the file's variables;
   - a discretization entry gives the grid's ``dims`` and, optionally,
     its ``parameters`` file (the dis dataset) and a ``topo_order``
     mapping (+ ``topo_one_based``) -- the ``Discretization``
@@ -73,7 +77,7 @@ import xarray as xr
 import yaml
 
 from pws_phoenix.discretization import Discretization
-from pws_phoenix.maps import Map, MapMPI
+from pws_phoenix.maps import Map, MapMPI, SparseWeights
 from pws_phoenix.process import Process
 
 _MAP_CLASSES: dict[str, type] = {"Map": Map, "MapMPI": MapMPI}
@@ -90,13 +94,27 @@ def _resolve_path(value: str, base_dir: pl.Path) -> pl.Path:
     return path if path.is_absolute() else base_dir / path
 
 
-def _load_weights(spec: Any, base_dir: pl.Path) -> np.ndarray:
-    """Map weights: an inline nested list, or a path to a single-variable
-    NetCDF."""
-    if isinstance(spec, str):
-        with xr.open_dataarray(_resolve_path(spec, base_dir)) as da:
-            return da.load().values
-    return np.asarray(spec)
+def _load_weights(spec: Any, base_dir: pl.Path) -> np.ndarray | SparseWeights:
+    """Map weights: an inline nested list (the full matrix), or the path
+    of a NetCDF (loaded, closed) that holds either form, told apart by
+    its variables: one variable = the full ``(n_target, n_source)``
+    matrix; ``weights_rows`` / ``weights_cols`` / ``weights_vals`` = the
+    nonzero entries (``SparseWeights.to_dataset("weights")``)."""
+    if not isinstance(spec, str):
+        return np.asarray(spec)
+    path = _resolve_path(spec, base_dir)
+    ds = xr.load_dataset(path)
+    if "weights_vals" in ds:
+        return SparseWeights.from_dataset(ds, "weights")
+    if len(ds.data_vars) == 1:
+        (da,) = ds.data_vars.values()
+        return da.values
+    raise ValueError(
+        f"{path}: a Map weights file holds one variable (the full "
+        "(n_target, n_source) matrix) or weights_rows / weights_cols / "
+        "weights_vals (the nonzero entries); found "
+        f"{sorted(str(nn) for nn in ds.data_vars)}."
+    )
 
 
 def _load_discretizations(

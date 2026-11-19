@@ -270,10 +270,12 @@ prcp
 from pws_phoenix.prms_translate import volume_map_weights
 
 vol_weights = volume_map_weights(params)
-np.testing.assert_array_equal(vol_weights, kit.maps["sroff_vol"].weights)
+np.testing.assert_array_equal(
+    vol_weights.dense(), kit.maps["sroff_vol"].weights.dense()
+)
 print(
     f"volume weights: {vol_weights.shape} (segments x HRUs), "
-    f"{int(vol_weights.sum())} HRUs assigned; "
+    f"{int(vol_weights.vals.sum())} HRUs assigned; "
     f"kit maps: {len(kit.maps)} total"
 )
 

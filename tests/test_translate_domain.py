@@ -1,6 +1,6 @@
 """prms_translate.translate_domain: a PRMS control file -> the flat
-domain directory (forcing netCDF, parameters netCDF, control copy,
-translation yaml)."""
+domain directory (forcing netCDF, parameters netCDF, preprocessed
+netCDF, control copy, translation yaml)."""
 
 import hashlib
 import shutil
@@ -10,7 +10,11 @@ import xarray as xr
 import yaml
 
 from conftest import PWS_TEST_DATA
-from pws_phoenix.prms_translate import cbh, load_parameters
+from pws_phoenix.prms_translate import (
+    cbh,
+    load_parameters,
+    verify_preprocessed,
+)
 from pws_phoenix.prms_translate import translate_domain as module
 from pws_phoenix.prms_translate.translate_domain import main, translate_domain
 
@@ -43,6 +47,7 @@ def test_products(domain):
         "cbh.nc",
         "nhm.control",
         "nhm_parameters.nc",
+        "nhm_preprocessed.nc",
         "nhm_translation.yaml",
     }
     assert not [nn for nn in names if nn.endswith(".partial")]
@@ -54,7 +59,7 @@ def test_products(domain):
         "forcing_sources": NHM_CBH,
         "parameter_file": "nhm_parameters.nc",
         "parameter_sources": [str((DRB_DIR / "myparam.param").resolve())],
-        "preprocessed_file": None,
+        "preprocessed_file": "nhm_preprocessed.nc",
     }
     assert (domain / "nhm.control").read_bytes() == NHM.read_bytes()
     assert cbh.cbh_netcdf_sources(domain / "cbh.nc") == NHM_CBH
@@ -67,11 +72,25 @@ def test_products(domain):
         written, load_parameters(DRB_DIR / "myparam.param")
     )
 
+    # the preprocessed file: its stamps fit the parameter FILE, which
+    # is what a run reads; nhm.control has no stream temperature, so
+    # the lateral-volume weights are the only matrix
+    artifacts = xr.load_dataset(domain / "nhm_preprocessed.nc")
+    assert artifacts.attrs["source_files"] == str(
+        (DRB_DIR / "myparam.param").resolve()
+    )
+    verify_preprocessed(
+        artifacts, xr.load_dataset(domain / "nhm_parameters.nc")
+    )
+    assert "weights_vol_vals" in artifacts
+    assert "weights_met_vals" not in artifacts
+
 
 def test_rerun_parses_nothing(domain, monkeypatch):
     before = (domain / "nhm_translation.yaml").read_text()
     monkeypatch.setattr(cbh, "load_cbh", _no_parse)
     monkeypatch.setattr(module, "load_parameters", _no_parse)
+    monkeypatch.setattr(module, "derive_preprocessed", _no_parse)
     yaml_path = translate_domain(NHM, domain)
     assert yaml_path.read_text() == before
 
@@ -89,6 +108,10 @@ def test_control_with_other_cbh_files(domain):
     info = yaml.safe_load(yaml_path.read_text())
     assert info["forcing_file"] == "cbh_humid.nc"
     assert info["parameter_file"] == "nhm_stream_temp_parameters.nc"
+    # stream temperature: its aggregation weights are derived too
+    assert info["preprocessed_file"] == "nhm_stream_temp_preprocessed.nc"
+    artifacts = xr.load_dataset(domain / info["preprocessed_file"])
+    assert "weights_met_vals" in artifacts
     assert sorted(cbh.cbh_netcdf_sources(domain / "cbh_humid.nc")) == [
         "humidity_hru",
         "prcp",
@@ -116,6 +139,7 @@ def test_only_parameters_control_guard_and_force(tmp_path, monkeypatch):
         (source_dir / "prcp.cbh").resolve()
     )
     assert info["parameter_file"] == "nhm_parameters.nc"
+    assert info["preprocessed_file"] is None
     assert not (out_dir / "cbh.nc").exists()
 
     # the control file changes (its first line is a free-text header)
@@ -145,10 +169,59 @@ def test_only_parameters_control_guard_and_force(tmp_path, monkeypatch):
     )
 
 
+def test_preprocessed_step(tmp_path, monkeypatch):
+    """The preprocessed file is derived from the parameter file:
+    derived when missing, with force, and whenever the parameter file
+    is written; reused otherwise."""
+    out_dir = tmp_path / "domain"
+    derived = []
+    real = module.derive_preprocessed
+
+    def counting(params, stream_temp):
+        derived.append(stream_temp)
+        return real(params, stream_temp)
+
+    monkeypatch.setattr(module, "derive_preprocessed", counting)
+    both = ["parameters", "preprocessed"]
+    preprocessed = out_dir / "nhm_preprocessed.nc"
+
+    yaml_path = translate_domain(NHM, out_dir, only=both)
+    assert derived == [False]  # nhm.control: no stream temperature
+    info = yaml.safe_load(yaml_path.read_text())
+    assert info["preprocessed_file"] == preprocessed.name
+
+    # the step alone, the parameter file in place: reused
+    translate_domain(NHM, out_dir, only=["preprocessed"])
+    assert len(derived) == 1
+    translate_domain(NHM, out_dir, only=["preprocessed"], force=True)
+    assert len(derived) == 2
+    # the parameter file written again: derived again
+    translate_domain(NHM, out_dir, only=both, force=True)
+    assert len(derived) == 3
+    # the file removed: derived again
+    preprocessed.unlink()
+    translate_domain(NHM, out_dir, only=["preprocessed"])
+    assert len(derived) == 4
+    assert not [pp for pp in out_dir.iterdir() if pp.suffix == ".partial"]
+
+    # one derived from other parameter files raises, whether or not
+    # its step is selected
+    artifacts = xr.load_dataset(preprocessed)
+    artifacts.attrs["source_files"] = "elsewhere/myparam.param"
+    artifacts.to_netcdf(preprocessed)
+    for only in (["parameters"], ["preprocessed"]):
+        with pytest.raises(FileExistsError, match="was not written from"):
+            translate_domain(NHM, out_dir, only=only)
+    assert len(derived) == 4
+
+
 def test_raises_before_writing(tmp_path):
     out_dir = tmp_path / "domain"
     with pytest.raises(ValueError, match="unknown steps"):
         translate_domain(NHM, out_dir, only=["weights"])
+    # the preprocessed step alone needs the parameter file
+    with pytest.raises(FileNotFoundError, match="parameters step"):
+        translate_domain(NHM, out_dir, only=["preprocessed"])
     # fgr_ag_2yr's analysis control sets three dyn_*_flag entries
     with pytest.raises(NotImplementedError, match="dynamic-parameter"):
         translate_domain(FGR_DIR / "analysis.control", out_dir)

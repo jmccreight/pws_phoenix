@@ -10,6 +10,7 @@ import pytest
 import xarray as xr
 
 from conftest import PWS_TEST_DATA
+from pws_phoenix.maps import SparseWeights
 from pws_phoenix.prms_translate import (
     assemble_from_control,
     load_parameters,
@@ -51,11 +52,11 @@ def test_write_verify_and_bit_identity(artifacts_path):
         "soltab_horad_potsw",
         "hru_in_to_cf",
         "segment_order",
-        "weights_vol",
-        "weights_flow",
-        "weights_swrad",
-        "weights_met",
-        "weights_humid",
+    } | {
+        # each weights matrix as its nonzero entries
+        f"weights_{key}_{part}"
+        for key in ("vol", "flow", "swrad", "met", "humid")
+        for part in ("rows", "cols", "vals")
     }
     assert set(artifacts.data_vars) == expected
     # a stamp: the derivation + one digest per named input + own digest
@@ -74,12 +75,19 @@ def test_write_verify_and_bit_identity(artifacts_path):
         ].values,
     )
     np.testing.assert_array_equal(
-        artifacts["weights_vol"].values, kit.maps["sroff_vol"].weights
+        SparseWeights.from_dataset(artifacts, "weights_vol").dense(),
+        kit.maps["sroff_vol"].weights.dense(),
     )
     np.testing.assert_array_equal(
-        artifacts["weights_met"].values,
-        kit.maps["seg_tave_air"].weights,
+        SparseWeights.from_dataset(artifacts, "weights_met").dense(),
+        kit.maps["seg_tave_air"].weights.dense(),
     )
+    # a stamp on each of a matrix's three variables
+    for part in ("rows", "cols", "vals"):
+        attrs = artifacts[f"weights_vol_{part}"].attrs
+        assert "volume_map_weights" in attrs["derivation"]
+        assert attrs["derived_from_hru_segment"].startswith("sha256:")
+        assert attrs["digest"].startswith("sha256:")
 
 
 def test_assemble_with_preprocessed_is_the_same_model(artifacts_path):
@@ -97,7 +105,7 @@ def test_assemble_with_preprocessed_is_the_same_model(artifacts_path):
             )
     for name in pre.maps:
         np.testing.assert_array_equal(
-            pre.maps[name].weights, plain.maps[name].weights
+            pre.maps[name].weights.dense(), plain.maps[name].weights.dense()
         )
     pre_dis = pre.discretizations["nsegment"].parameters
     plain_dis = plain.discretizations["nsegment"].parameters

@@ -3,7 +3,7 @@ file -> pws_phoenix input files in a flat domain directory.
 
     python -m pws_phoenix.prms_translate.translate_domain \\
         CONTROL_FILE --out DOMAIN_DIR [--cbh-name NAME] \\
-        [--only {cbh,parameters} ...] [--force]
+        [--only {cbh,parameters,preprocessed} ...] [--force]
 
 The domain directory is FLAT (the layout of test_data/<domain>/): one
 directory holds the files of every control translated into it, each
@@ -13,6 +13,7 @@ control's own files named by the control file's stem.
         cbh.nc                      (or cbh_<NAME>.nc)
         <stem>.control              a copy of the control file
         <stem>_parameters.nc
+        <stem>_preprocessed.nc
         <stem>_translation.yaml
 
 - ``cbh.nc``: the control's CBH files in one netCDF
@@ -22,6 +23,13 @@ control's own files named by the control file's stem.
 - ``<stem>_parameters.nc``: everything in the control's parameter
   file(s), as ``readers.load_parameters`` returns it. Its
   ``source_files`` attribute holds their resolved paths, one per line.
+- ``<stem>_preprocessed.nc``: what a run would otherwise derive from
+  the parameters at every start (solar tables, segment order,
+  ``hru_in_to_cf``, the map weights), stamped
+  (``preprocess.derive_preprocessed``). It is derived from
+  ``<stem>_parameters.nc``, the arrays a run verifies the stamps
+  against, and is written again whenever that file is. It carries the
+  same ``source_files`` attribute.
 - ``<stem>.control``: a byte-for-byte copy. It is a RECORD and the
   source of OPTIONS (modules, flags, the simulation window, the
   requested output variables). It is not a runnable PRMS control: its
@@ -52,9 +60,10 @@ from pws_phoenix.prms_translate.cbh import (
     write_cbh_netcdf,
 )
 from pws_phoenix.prms_translate.control import from_control
+from pws_phoenix.prms_translate.preprocess import derive_preprocessed
 from pws_phoenix.prms_translate.readers import load_control, load_parameters
 
-STEPS = ("cbh", "parameters")
+STEPS = ("cbh", "parameters", "preprocessed")
 
 
 def _raise_if_other_sources(
@@ -88,9 +97,16 @@ def translate_domain(
     product whose file does not exist as null.
 
     An existing product written from the files the control names is
-    reused, and nothing is parsed for it. One written from OTHER files
-    raises, whether or not its step is selected. ``force=True``
-    rewrites the products of the selected steps.
+    reused, and nothing is parsed or derived for it. One written from
+    OTHER files raises, whether or not its step is selected.
+    ``force=True`` rewrites the products of the selected steps.
+
+    The ``preprocessed`` step derives from ``<stem>_parameters.nc``:
+    selected without that file and without the ``parameters`` step it
+    raises, and it runs again whenever this call writes the parameter
+    file. A preprocessed file left behind by a later rewrite of the
+    parameter file alone is NOT detected here: the run that reads it
+    raises (``preprocess.verify_preprocessed``).
 
     An existing control copy that differs from `control_file` (the
     control file changed since the domain was translated) raises;
@@ -113,6 +129,16 @@ def translate_domain(
             "not translate them yet."
         )
     stem = control_file.stem
+    parameters = out_dir / f"{stem}_parameters.nc"
+    if (
+        "preprocessed" in steps
+        and "parameters" not in steps
+        and not parameters.exists()
+    ):
+        raise FileNotFoundError(
+            f"{parameters} does not exist and the preprocessed step "
+            "derives from it: run the parameters step too."
+        )
     out_dir.mkdir(exist_ok=True)
 
     # -- the control copy --
@@ -152,7 +178,6 @@ def translate_domain(
         write_cbh_netcdf(cfg.cbh_paths, forcing, force=force)
 
     # -- the parameter file --
-    parameters = out_dir / f"{stem}_parameters.nc"
     parameter_sources = [str(pp) for pp in cfg.param_files]
     rewrite = force and "parameters" in steps
     if parameters.exists() and not rewrite:
@@ -161,12 +186,35 @@ def translate_domain(
         _raise_if_other_sources(
             parameters, found, "\n".join(parameter_sources)
         )
-    if "parameters" in steps and (rewrite or not parameters.exists()):
+    parameters_written = "parameters" in steps and (
+        rewrite or not parameters.exists()
+    )
+    if parameters_written:
         ds = load_parameters(cfg.param_files)
         ds.attrs["source_files"] = "\n".join(parameter_sources)
         partial = parameters.with_name(parameters.name + ".partial")
         ds.to_netcdf(partial)
         partial.replace(parameters)
+
+    # -- the preprocessed file: derived from the parameter FILE (the
+    # arrays a run verifies its stamps against), so written again
+    # whenever that file is --
+    preprocessed = out_dir / f"{stem}_preprocessed.nc"
+    rewrite = (force or parameters_written) and "preprocessed" in steps
+    if preprocessed.exists() and not rewrite:
+        with xr.open_dataset(preprocessed) as existing:
+            found = existing.attrs.get("source_files")
+        _raise_if_other_sources(
+            preprocessed, found, "\n".join(parameter_sources)
+        )
+    if "preprocessed" in steps and (rewrite or not preprocessed.exists()):
+        ds = derive_preprocessed(
+            xr.load_dataset(parameters), "prms_stream_temp" in cfg.classes
+        )
+        ds.attrs["source_files"] = "\n".join(parameter_sources)
+        partial = preprocessed.with_name(preprocessed.name + ".partial")
+        ds.to_netcdf(partial)
+        partial.replace(preprocessed)
 
     # -- the yaml --
     info = {
@@ -177,8 +225,9 @@ def translate_domain(
         "forcing_sources": forcing_sources,
         "parameter_file": parameters.name if parameters.exists() else None,
         "parameter_sources": parameter_sources,
-        # the derived parameters and map weights: not written yet
-        "preprocessed_file": None,
+        "preprocessed_file": (
+            preprocessed.name if preprocessed.exists() else None
+        ),
     }
     yaml_path = out_dir / f"{stem}_translation.yaml"
     with open(yaml_path, "w") as ff:

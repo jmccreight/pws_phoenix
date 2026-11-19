@@ -23,6 +23,7 @@ separate_nhm_params role, contract-driven).
 import numpy as np
 import xarray as xr
 
+from pws_phoenix.maps import SparseWeights
 from pws_phoenix.prms_translate import prms_units
 from pws_phoenix.process import _dict_of_kind
 
@@ -164,13 +165,16 @@ def package_parameters(
     return out
 
 
-def volume_map_weights(params: xr.Dataset) -> np.ndarray:
+def volume_map_weights(params: xr.Dataset) -> SparseWeights:
     """The 0/1 hru->segment weights for the three lateral-volume Maps
-    (from ``hru_segment``; hru_segment == 0 -> no segment)."""
+    (from ``hru_segment``; hru_segment == 0 -> no segment): one entry
+    of 1.0 per hru that has a segment. The dense ``(nsegment, nhru)``
+    matrix is never built (54 GB for the conterminous United States)."""
     hru_segment = params["hru_segment"].values
-    n_seg = params.sizes["nsegment"]
-    weights = np.zeros((n_seg, hru_segment.shape[0]))
-    for ii in range(hru_segment.shape[0]):
-        if hru_segment[ii] > 0:
-            weights[hru_segment[ii] - 1, ii] = 1.0
-    return weights
+    cols = np.nonzero(hru_segment > 0)[0]
+    return SparseWeights(
+        rows=hru_segment[cols] - 1,
+        cols=cols,
+        vals=np.ones(cols.shape[0]),
+        shape=(params.sizes["nsegment"], hru_segment.shape[0]),
+    )
