@@ -364,8 +364,9 @@ would build a prng and write `seed.json` on rank 0):
   zarr `Output`), the same method `finalize()` calls. A new resource
   opened in `_build` is closed THERE, reached through an attribute
   set before anything after it can raise
-  (`tests/test_bad_build_mpi.py`). The serial `Model` does not do
-  this yet.
+  (`tests/test_bad_build_mpi.py`). The serial `Model.__init__` does
+  the same (`Model._release()`, `tests/test_bad_build.py`). Both
+  assign `self.output` only once its zarr store exists.
 - `control["progress"]` (default False) turns on mpixarray's rank-0
   progress bar. It counts windows, not steps.
 

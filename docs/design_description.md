@@ -283,7 +283,8 @@ Terms:
     NetCDF writer), in `ModelMPI.__init__` (Nov 19, 2026): a
     constructor that raises returns no object, so neither
     `finalize()` nor a `with` block can. The closes are collective,
-    which the rule above makes safe.
+    which the rule above makes safe. The serial `Model.__init__` does
+    the same (Nov 19, 2026).
   - FlowGraph needs no MPI code: its grid sits where the segment grid
     sits.
   - This is interim; mpixarray's planned streaming DataTree is
@@ -301,8 +302,6 @@ Terms:
     (mpixarray decomposes every dimension).
   - The distributed grid's inputs are one combined file; structured
     input is undecided.
-  - The serial `Model` does not close its file-backed inputs when
-    its constructor raises (`ModelMPI` does).
 
 ### Memory: reference, do not copy; kernels write in place
 

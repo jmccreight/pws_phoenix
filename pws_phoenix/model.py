@@ -137,17 +137,6 @@ class Model:
         # finished init_from_params() (one raised): reset() raises
         self._parameters_incomplete = False
 
-        if load_all is None:
-            self._load_all = control.get("load_all", False)
-        else:
-            self._load_all = load_all
-        self._set_numba_threads(control)
-        self._set_budget_options(control)
-        self._set_time_bounds(control)
-        self._warm_start = control.get("restart_read") is not None
-
-        self._load_paths_to_data()
-
         self.model_dict: Dict[str, Any] = {}
         self.inputs_dict: Dict[str, Input] = {}
         # (grid, name) -> the caller's supplied initial-state array
@@ -158,66 +147,98 @@ class Model:
         self._supplied_state_affine: Dict[
             tuple[str, str], tuple[float, float]
         ] = {}
-        self._initialize_inputs_and_proceses()
-        del self._process_dict
+        # set below once built; None until then (and when not requested)
+        self.output: Union[Output, None] = None
+        self.results: Union[ResultCollector, None] = None
 
-        # Warm start (construction-time option): restore the flagged
-        # prognostic state written by write_restart() and resume AFTER
-        # the file's state time. Cold start: _start_index = 0; the state
-        # is the init hooks' defaults overridden by any supplied state.
-        self._start_index = 0
-        restart_read = control.get("restart_read")
-        if restart_read is not None:
-            self._raise_if_supplied_state_with_restart()
-            self._read_restart(pl.Path(restart_read))
-        self._check_initial_state()
-
-        # the step cursor: step()/run() continue from here
-        self._next_index = self._start_index
-        self.current_time_index = np.array([self._start_index], dtype=np.int32)
-        self.current_time = np.array(
-            [self.times[self._start_index].values], dtype="datetime64[D]"
-        )
-
-        # Optional output collector (serial path). Created when the control
-        # dict requests output. The MPI path streams output via mpixarray and
-        # overrides __init__, so it never reaches this block.
-        self.output = None
-        if "output_var_names" in control or "output_serial_zarr" in control:
-            if (
-                "output_var_names" not in control
-                or "output_serial_zarr" not in control
-            ):
-                raise ValueError(
-                    "output_var_names and output_serial_zarr must both be "
-                    "specified in the control dict."
-                )
-            if "time_chunk_size" in control:
-                time_chunk_size = control["time_chunk_size"]
+        try:
+            if load_all is None:
+                self._load_all = control.get("load_all", False)
             else:
-                time_chunk_size = 365
-                warnings.warn(
-                    "time_chunk_size not specified in control dict, using "
-                    "default value of 365.",
-                    UserWarning,
-                )
-            self.output = Output(
-                time_chunk_size=time_chunk_size,
-                variable_names=control["output_var_names"],
-                output_store=pl.Path(control["output_serial_zarr"]),
-                time_values=self.times.values,
-            )
-            self.output.initialize_variable_tracking(self.model_dict)
+                self._load_all = load_all
+            self._set_numba_threads(control)
+            self._set_budget_options(control)
+            self._set_time_bounds(control)
+            self._warm_start = control.get("restart_read") is not None
 
-        # Optional collector of results in memory (serial path): one
-        # (n_time, space) array per named variable, allocated here.
-        self.results = None
-        if "collect_var_names" in control:
-            self.results = ResultCollector(
-                list(control["collect_var_names"]),
-                self.model_dict,
-                self.ntime,
+            self._load_paths_to_data()
+
+            self._initialize_inputs_and_proceses()
+            del self._process_dict
+
+            # Warm start (construction-time option): restore the
+            # flagged prognostic state written by write_restart() and
+            # resume AFTER the file's state time. Cold start:
+            # _start_index = 0; the state is the init hooks' defaults
+            # overridden by any supplied state.
+            self._start_index = 0
+            restart_read = control.get("restart_read")
+            if restart_read is not None:
+                self._raise_if_supplied_state_with_restart()
+                self._read_restart(pl.Path(restart_read))
+            self._check_initial_state()
+
+            # the step cursor: step()/run() continue from here
+            self._next_index = self._start_index
+            self.current_time_index = np.array(
+                [self._start_index], dtype=np.int32
             )
+            self.current_time = np.array(
+                [self.times[self._start_index].values], dtype="datetime64[D]"
+            )
+
+            # Optional output collector (serial path). Created when the
+            # control dict requests output. The MPI path streams output
+            # via mpixarray and overrides __init__, so it never reaches
+            # this block.
+            if (
+                "output_var_names" in control
+                or "output_serial_zarr" in control
+            ):
+                if (
+                    "output_var_names" not in control
+                    or "output_serial_zarr" not in control
+                ):
+                    raise ValueError(
+                        "output_var_names and output_serial_zarr must "
+                        "both be specified in the control dict."
+                    )
+                if "time_chunk_size" in control:
+                    time_chunk_size = control["time_chunk_size"]
+                else:
+                    time_chunk_size = 365
+                    warnings.warn(
+                        "time_chunk_size not specified in control dict, "
+                        "using default value of 365.",
+                        UserWarning,
+                    )
+                output = Output(
+                    time_chunk_size=time_chunk_size,
+                    variable_names=control["output_var_names"],
+                    output_store=pl.Path(control["output_serial_zarr"]),
+                    time_values=self.times.values,
+                )
+                # assigned only once its store exists: _release()
+                # finalizes self.output, and a store never created
+                # cannot be finalized
+                output.initialize_variable_tracking(self.model_dict)
+                self.output = output
+
+            # Optional collector of results in memory (serial path):
+            # one (n_time, space) array per named variable, allocated
+            # here.
+            if "collect_var_names" in control:
+                self.results = ResultCollector(
+                    list(control["collect_var_names"]),
+                    self.model_dict,
+                    self.ntime,
+                )
+        except BaseException:
+            # A constructor that raises never reaches __exit__, so
+            # what it opened is released here (as in ModelMPI).
+            self._release()
+            self._finalized = True
+            raise
 
     def _load_paths_to_data(self) -> None:
         """Convert file paths in process_dict to xarray objects."""
@@ -1612,16 +1633,24 @@ class Model:
         if affine is not None:
             units_mod.apply_affine(buffer, *affine, where=f"state '{name}'")
 
+    def _release(self) -> None:
+        """Close what the build opened: the inputs, the files opened
+        from paths, and the zarr Output. Called by finalize(), and by
+        __init__ when the build raises (each is empty or None until
+        it exists). After a raise the zarr store is left with no time
+        steps."""
+        for inp in self.inputs_dict.values():
+            inp.close()
+        for ff in self._opened_files:
+            ff.close()
+        if self.output is not None:
+            self.output.finalize()
+
     def finalize(self) -> None:
         """Close all file handles opened during initialization."""
         if self._finalized:
             return
-        for inp in self.inputs_dict.values():
-            inp.close()
-        for f in self._opened_files:
-            f.close()
-        if self.output is not None:
-            self.output.finalize()
+        self._release()
         self._finalized = True
 
     def __enter__(self) -> "Model":
@@ -1747,6 +1776,8 @@ class ModelMPI(Model):
         ] = {}
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
         self._load_all = True  # serial-grid data are small; keep in memory
+        # the rank-0 zarr Output, set in _build() once its store exists
+        self.output: Union[Output, None] = None
         self._set_budget_options(control)
         self._set_time_bounds(control)
         try:
@@ -2163,7 +2194,6 @@ class ModelMPI(Model):
         #      replicated grids mean everyone computes, one writes. The
         #      rank branch is safe by construction: Output holds NO
         #      collectives (local buffering + disk IO only).
-        self.output = None
         if serial_out_names:
             if "output_serial_zarr" not in control:
                 raise ValueError(
@@ -2172,7 +2202,7 @@ class ModelMPI(Model):
                     "is required for the rank-0 zarr Output."
                 )
             if comm.rank == 0:
-                self.output = Output(
+                output = Output(
                     time_chunk_size=control.get("time_chunk_size", 365),
                     variable_names=serial_out_names,
                     output_store=pl.Path(control["output_serial_zarr"]),
@@ -2181,13 +2211,15 @@ class ModelMPI(Model):
                 # Track serial-grid processes only: their _obj is
                 # persistent. (Distributed-grid procs are rebound to each
                 # step, so refs captured here would go stale.)
-                self.output.initialize_variable_tracking(
+                output.initialize_variable_tracking(
                     {
                         kk: proc
                         for kk, proc in self.model_dict.items()
                         if self._proc_grid[kk] != mpi_grid
                     }
                 )
+                # assigned only once its store exists (see Model)
+                self.output = output
 
         # ---- Restart (warm start), part 2 of 2: full validation +
         #      the state restore, AFTER the init hooks so the saved
@@ -2485,19 +2517,13 @@ class ModelMPI(Model):
     # -- finalize -------------------------------------------------------
 
     def _release(self) -> None:
-        """Close what the build opened: the serial-grid inputs and
-        files, the rank-0 zarr Output, the stream (with its NetCDF
-        writer) and the input dataset. Called by finalize(), and by
-        __init__ when _build() raises: a build can stop before the
-        last three exist, so each is looked up with a default. After
-        a failed build the zarr store is left with no time steps."""
-        for inp in self.inputs_dict.values():
-            inp.close()
-        for ff in self._opened_files:
-            ff.close()
-        output = getattr(self, "output", None)
-        if output is not None:
-            output.finalize()
+        """Close what the build opened: what Model._release() closes
+        (the serial-grid inputs and files, the rank-0 zarr Output),
+        then the stream (with its NetCDF writer) and the input
+        dataset. Called by finalize(), and by __init__ when _build()
+        raises: a build can stop before the last two exist, so each
+        is looked up with a default."""
+        super()._release()
         for attr in ("_ds_mpi_stream", "_ds_input"):
             dataset = getattr(self, attr, None)
             if dataset is not None:
