@@ -33,6 +33,7 @@
     - [Benchmarks: ASV in the existing environment](#benchmarks-asv-in-the-existing-environment)
     - [Per-step data access: hold the ndarray, not the Dataset lookup](#per-step-data-access-hold-the-ndarray-not-the-dataset-lookup)
     - [Numba: cache on by default, threaded kernels held to 1 thread](#numba-cache-on-by-default-threaded-kernels-held-to-1-thread)
+    - [MPI window depth: one read and one write per window](#mpi-window-depth-one-read-and-one-write-per-window)
   - [Translation and migration](#translation-and-migration)
     - [PRMS translation: one way, pyPRMS only, outside the core](#prms-translation-one-way-pyprms-only-outside-the-core)
     - [Pre-processing: derived inputs in a stamped file, verified at use](#pre-processing-derived-inputs-in-a-stamped-file-verified-at-use)
@@ -96,6 +97,7 @@ Terms:
 | Benchmarks: ASV in the existing environment | built; not in CI | Oct 2026 | Performance |
 | Per-step data access: hold the ndarray, not the Dataset lookup | built | Oct 2026 | Performance |
 | Numba: cache on by default, threaded kernels held to 1 thread | built; threads measured on CONUS, not on ucb_2yr | Nov 2026 | Performance |
+| MPI window depth: one read and one write per window | built; not timed on a large domain | Nov 2026 | Performance |
 | Output backends differ on purpose: zarr in serial, NetCDF stream under MPI | built | Jun 2026 | IO |
 | Serial output: a pre-sized zarr store written by region | built | Oct 2026 | IO |
 | PRMS translation: one way, pyPRMS only, outside the core | built | Aug 2026 | Translation and migration |
@@ -277,6 +279,11 @@ Terms:
     written by rank 0.
   - A raise is collective: the ranks agree first, then all raise. One
     rank raising alone hangs the others.
+  - A build that raises closes what it opened (the input file, the
+    NetCDF writer), in `ModelMPI.__init__` (Nov 19, 2026): a
+    constructor that raises returns no object, so neither
+    `finalize()` nor a `with` block can. The closes are collective,
+    which the rule above makes safe.
   - FlowGraph needs no MPI code: its grid sits where the segment grid
     sits.
   - This is interim; mpixarray's planned streaming DataTree is
@@ -294,6 +301,8 @@ Terms:
     (mpixarray decomposes every dimension).
   - The distributed grid's inputs are one combined file; structured
     input is undecided.
+  - The serial `Model` does not close its file-backed inputs when
+    its constructor raises (`ModelMPI` does).
 
 ### Memory: reference, do not copy; kernels write in place
 
@@ -1402,6 +1411,56 @@ Terms:
 - **Left unfinished** (moved from memory Nov 12, 2026):
   - The threading payoff is an estimate (break-even at 100-500 hrus);
     the ucb_2yr sweep has not been run.
+
+### MPI window depth: one read and one write per window
+
+- **Status:** built Nov 19, 2026. Checked on drb_2yr against depth 1;
+  not timed on a large domain.
+- **Why:** the goal is CONUS under MPI without output, as a
+  calibration run needs it. With a window of one step, every day
+  costs a file read on every rank (17,167 reads for the CONUS
+  record). Without any read in the time loop, 64 independent
+  processes measured 0.96 ms per CONUS step (no channel). A window
+  over the whole record takes the file out of the time loop and
+  keeps `ModelMPI`: the decomposition, the parallel read and the
+  output writer. The alternative considered, one serial `Model` per
+  rank, would have been a second MPI path.
+- **Decision:**
+  - `control["mpi_window_steps"]` is the depth of mpixarray's time
+    window (`as_iterable(chunk_size=)`): default 1, `None` for the
+    whole stream.
+  - `ModelMPI.run` reads each streamed input once per window, runs
+    the window's steps in an inner loop that copies one row per step
+    into the input's `(grid,)` buffer, and writes the streamed
+    outputs once per window.
+  - mpixarray has one window, so the read and the write have the
+    same depth: a streamed output variable holds one window of rows
+    in memory until the write.
+  - The answers do not depend on the depth, bit for bit.
+- **For users:**
+  - `control["mpi_window_steps"]`: 1 (default), an integer up to the
+    number of streamed steps, or `None` for all of them. Anything
+    else raises at build.
+  - Memory per rank: depth x the rank's block, for every streamed
+    input (the file's dtype) and every streamed output (float64). A
+    run without streamed output can take the whole record; a run
+    with it wants a smaller depth (for CONUS one output variable
+    over the whole record is 15.8 GB summed over the ranks).
+  - The progress bar counts windows.
+- **Where:** `ModelMPI._build` and `ModelMPI.run` in
+  `pws_phoenix/model.py`; `CLAUDE.md` "MPI path";
+  `tests/test_window_depth_mpi.py` (depths 7 and the whole record
+  against depth 1, and the three raises).
+- **Left unfinished:**
+  - No timing on a large domain. A rank's whole-record block read
+    from the unchunked `(time, nhru)` CONUS forcing file is 17,167
+    separate pieces per variable: measure it before choosing a chunk
+    shape or a transposed layout.
+  - At a depth between 1 and the whole stream, each window's read
+    allocates a new array. A reused buffer needs a read into a
+    preallocated array, which `.values` does not offer.
+  - `ModelMPI.reset()`: with the whole record in one window, a reset
+    could restart the inner loop without reading again. Not built.
 
 ## Translation and migration
 

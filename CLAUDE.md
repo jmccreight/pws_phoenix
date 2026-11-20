@@ -333,11 +333,21 @@ would build a prng and write `seed.json` on rank 0):
   then `Allreduce(SUM)`. A Map from a serial grid to the distributed
   grid is not implemented.
 - Processes bind directly (`cls(ds_mpi)`) and are rebound to each
-  `step` in the loop.
-- Inputs: a time-dimensioned file variable is windowed to one step by
-  `as_iterable` and shadowed by a `(grid,)` buffer refilled each step
-  from `step.mpi.src`. Static parameters stay whole on `ds_mpi`,
-  loaded into memory so their buffers are shared by reference.
+  window the loop yields.
+- `control["mpi_window_steps"]` (default 1; `None` = the whole
+  stream) is the depth of the time window, passed to `as_iterable`
+  as `chunk_size`. mpixarray has ONE window: it is the depth of the
+  read AND of the write. `run` reads each streamed input once per
+  window, runs the window's steps in an inner loop, and writes the
+  streamed outputs once per window. Each rank holds depth x its
+  block of every streamed input (the file's dtype) and of every
+  streamed output (float64). The answers are bit for bit the same at
+  any depth (`tests/test_window_depth_mpi.py`).
+- Inputs: a time-dimensioned file variable is windowed by
+  `as_iterable` and shadowed by a `(grid,)` buffer, refilled each
+  step with one row of the window read from `step.mpi.src`. Static
+  parameters stay whole on `ds_mpi`, loaded into memory so their
+  buffers are shared by reference.
 - Initial state is NOT in the input file (see "Initial state").
 - Output is routed by OWNING grid. Distributed-grid variables stream
   through the mpixarray NetCDF writer
@@ -349,8 +359,15 @@ would build a prng and write `seed.json` on rank 0):
 - A raise must be collective: the ranks agree first (Allreduce), then
   all raise. One rank raising alone hangs the others at the next
   collective.
+- A build that raises closes what it opened: `ModelMPI.__init__`
+  calls `_release()` (the input file, the NetCDF writer, the rank-0
+  zarr `Output`), the same method `finalize()` calls. A new resource
+  opened in `_build` is closed THERE, reached through an attribute
+  set before anything after it can raise
+  (`tests/test_bad_build_mpi.py`). The serial `Model` does not do
+  this yet.
 - `control["progress"]` (default False) turns on mpixarray's rank-0
-  progress bar.
+  progress bar. It counts windows, not steps.
 
 Known mpixarray limits:
 

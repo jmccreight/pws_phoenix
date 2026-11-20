@@ -1679,6 +1679,13 @@ class ModelMPI(Model):
                           output vars are requested
         time_chunk_size   serial-grid Output time chunking (default 365)
         mpi_grid          name of the distributed grid/dim (default "space")
+        mpi_window_steps  depth of the time window in steps (default 1;
+                          None = the whole stream). The streamed inputs
+                          are read once per window and the streamed
+                          outputs written once per window, so each rank
+                          holds depth x its block of every streamed
+                          input and output. The answers do not depend
+                          on it.
         numba_n_threads   numba threads PER RANK for the hru kernels
                           (default 1; see Model._set_numba_threads).
                           ranks x threads must fit the cores.
@@ -1742,7 +1749,16 @@ class ModelMPI(Model):
         self._load_all = True  # serial-grid data are small; keep in memory
         self._set_budget_options(control)
         self._set_time_bounds(control)
-        self._build()
+        try:
+            self._build()
+        except BaseException:
+            # A constructor that raises never reaches __exit__, so
+            # what _build() opened is released here. The closes are
+            # collective, and safe: every rank raises together (the
+            # rule for a raise under MPI).
+            self._release()
+            self._finalized = True
+            raise
 
     # -- construction ---------------------------------------------------
 
@@ -1856,12 +1872,37 @@ class ModelMPI(Model):
         self._set_numba_threads(control)
 
         # ---- Stream over time. as_iterable windows the time-dimensioned
-        #      input vars to one step (they stay on the dataset, lazy; the
+        #      input vars to control["mpi_window_steps"] steps (default 1;
+        #      None = the whole stream, which begins at the resume index
+        #      on a warm start). They stay on the dataset, lazy; the
         #      (hru,) input buffers declared below shadow them and are
-        #      refilled per step from step.mpi.src) and leaves the space-only
-        #      static params + ICs whole on ds_mpi_stream. Every step lands
-        #      on disk (no values_on_disk subset). ----
-        ds_mpi_stream = ds_mpi.mpi.as_iterable("time", chunk_size=1, comm=comm)
+        #      refilled per step in run(), from ONE read of step.mpi.src
+        #      per window. mpixarray has one window: the streamed output
+        #      buffers declared below have the same depth and are
+        #      written once per window. The space-only static params
+        #      stay whole on ds_mpi_stream. Every step lands on disk (no
+        #      values_on_disk subset). ----
+        n_stream = n_time - self._start_index
+        window_steps = control.get("mpi_window_steps", 1)
+        if window_steps is None:
+            window_steps = n_stream
+        # the same control and input file on every rank: all ranks raise
+        if (
+            not isinstance(window_steps, (int, np.integer))
+            or not 1 <= window_steps <= n_stream
+        ):
+            raise ValueError(
+                f"control['mpi_window_steps'] = {window_steps!r}: give an "
+                f"integer from 1 to the number of streamed steps "
+                f"({n_stream}), or None for all of them."
+            )
+        self._window_steps = int(window_steps)
+        ds_mpi_stream = ds_mpi.mpi.as_iterable(
+            "time", chunk_size=self._window_steps, comm=comm
+        )
+        # here, before the writer is opened on it: a build that raises
+        # further down closes the writer through this (_release)
+        self._ds_mpi_stream = ds_mpi_stream
 
         # Realize the static (space-only) vars -- params + ICs -- in memory.
         # Otherwise they stay lazy file-backed and each `.values` re-reads, so
@@ -2039,7 +2080,6 @@ class ModelMPI(Model):
 
         ds_mpi_stream.mpi.create(verbose=False)
 
-        self._ds_mpi_stream = ds_mpi_stream
         self.discretizations[mpi_grid].dataset = ds_mpi_stream
 
         # The decomposed extent: an allgather of local sizes (scheme
@@ -2189,7 +2229,11 @@ class ModelMPI(Model):
 
     def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:
         """Stream the time loop via iterate(); n_steps is ignored (the
-        streaming source defines the count). Serial-grid inputs advance in
+        streaming source defines the count). iterate() yields one window
+        of control["mpi_window_steps"] steps at a time: the streamed
+        inputs are read once per window, the steps of the window run in
+        an inner loop, and the streamed outputs are written once per
+        window. Serial-grid inputs advance in
         lockstep with the stream; a Map is applied exactly once per step,
         immediately before its first consumer (see Model._resolve_maps).
         The loop is SPMD-uniform: every rank executes the same statements
@@ -2205,54 +2249,78 @@ class ModelMPI(Model):
             if self._proc_grid[kk] == mpi_grid
         ]
         # warm start: the stream was time-sliced at build to BEGIN at
-        # the resume index, so `tt` here is stream-local; model time
-        # stays GLOBALLY indexed via the offset (istep0-gated blocks
-        # must not re-fire at the resume step).
-        start = self._start_index
-        for tt, step in enumerate(
-            ds_mpi_stream.mpi.iterate(comm=self._comm, progress=self._progress)
+        # the resume index; model time stays GLOBALLY indexed, so
+        # `gtt` starts there (istep0-gated blocks must not re-fire at
+        # the resume step).
+        gtt = self._start_index
+        for step in ds_mpi_stream.mpi.iterate(
+            comm=self._comm, progress=self._progress
         ):
-            gtt = tt + start
-            self.current_time_index[0] = gtt
-            self.time.set_index(gtt)
             src = step.mpi.src
-            # Refill this step's input buffers from the source slab.
-            for name in self._file_input_names:
-                values = step[name].values
-                values[:] = src[name].values[0, :]
-                # control["units"] = "convert": this rank's block of
-                # the one-step buffer, converted after the refill
-                conversion = self._stream_conversions.get(name)
-                if conversion is not None:
-                    values *= conversion[0]
-                    if conversion[1] != 0.0:
-                        values += conversion[1]
-            # Serial-grid inputs advance in lockstep with the stream.
-            for inp in self.inputs_dict.values():
-                inp.advance()
+            # ONE read per window and input: (this window's depth, this
+            # rank's block), in the file's dtype. The read allocates
+            # the array, so it is new each window (one array for the
+            # run when the window is the whole stream). Each entry:
+            # the input's (grid,) float64 buffer, its window, its
+            # control["units"] = "convert" conversion or None.
+            windows = [
+                (
+                    step[name].values,
+                    src[name].values,
+                    self._stream_conversions.get(name),
+                )
+                for name in self._file_input_names
+            ]
+            # Each entry: a streamed output buffer (depth, grid) and
+            # the (grid,) state it records.
+            out_rows = [
+                (step[buf].values, step[src_name].values)
+                for src_name, buf in self._output_map.items()
+            ]
             # Rebind distributed-grid processes (and their disc's dataset)
-            # to the current step -- shares the persistent state buffers,
-            # so the Markov chain carries across steps. Serial-grid
-            # processes stay bound to their persistent grid dataset.
+            # to the current window -- shares the persistent state
+            # buffers, so the Markov chain carries across windows.
+            # Serial-grid processes stay bound to their persistent grid
+            # dataset.
             self.discretizations[mpi_grid].dataset = step
             for proc in mpi_procs:
                 proc._obj = step
-            for proc in self.model_dict.values():
-                proc.advance()
-            for proc_name, proc in self.model_dict.items():
-                for mm in self._proc_maps[proc_name]:
-                    mm.apply()
-                proc.calculate(dt, self.time)
-                self._check_budgets(proc)
-            # Record state into the streaming output slab(s) and write.
-            # Every step lands on disk (no values_on_disk subset at
-            # as_iterable), so no output-step gate.
-            for src_name, buf in self._output_map.items():
-                step[buf].values[0, :] = step[src_name].values[:]
+            # The last window is shallower when the depth does not
+            # divide the stream: the day count is this window's.
+            for dd in range(step.sizes["time"]):
+                self.current_time_index[0] = gtt
+                self.time.set_index(gtt)
+                # Refill this step's input buffers from the window;
+                # the conversion follows the refill.
+                for values, window, conversion in windows:
+                    values[:] = window[dd, :]
+                    if conversion is not None:
+                        values *= conversion[0]
+                        if conversion[1] != 0.0:
+                            values += conversion[1]
+                # Serial-grid inputs advance in lockstep with the stream.
+                for inp in self.inputs_dict.values():
+                    inp.advance()
+                for proc in self.model_dict.values():
+                    proc.advance()
+                for proc_name, proc in self.model_dict.items():
+                    for mm in self._proc_maps[proc_name]:
+                        mm.apply()
+                    proc.calculate(dt, self.time)
+                    self._check_budgets(proc)
+                # Record state into this step's row of the streamed
+                # output buffer(s).
+                for out, state in out_rows:
+                    out[dd, :] = state
+                # Serial-grid output: rank 0 only (collective-free branch).
+                if self.output is not None:
+                    self.output.collect_current_timestep(gtt)
+                gtt += 1
+            # One write per window: all of its rows, at the window's
+            # position in the file. Every step lands on disk (no
+            # values_on_disk subset at as_iterable).
+            for buf in self._output_map.values():
                 step[buf].mpi.write()
-            # Serial-grid output: rank 0 only (collective-free branch).
-            if self.output is not None:
-                self.output.collect_current_timestep(gtt)
 
     def _raise_if_bad_numba_threads(self, n_threads: int, n_max: int) -> None:
         """Agree across ranks before raising: numba's maximum can
@@ -2416,15 +2484,27 @@ class ModelMPI(Model):
 
     # -- finalize -------------------------------------------------------
 
-    def finalize(self) -> None:
-        if self._finalized:
-            return
+    def _release(self) -> None:
+        """Close what the build opened: the serial-grid inputs and
+        files, the rank-0 zarr Output, the stream (with its NetCDF
+        writer) and the input dataset. Called by finalize(), and by
+        __init__ when _build() raises: a build can stop before the
+        last three exist, so each is looked up with a default. After
+        a failed build the zarr store is left with no time steps."""
         for inp in self.inputs_dict.values():
             inp.close()
         for ff in self._opened_files:
             ff.close()
-        if self.output is not None:
-            self.output.finalize()
-        self._ds_mpi_stream.mpi.finalize()
-        self._ds_input.mpi.finalize()
+        output = getattr(self, "output", None)
+        if output is not None:
+            output.finalize()
+        for attr in ("_ds_mpi_stream", "_ds_input"):
+            dataset = getattr(self, attr, None)
+            if dataset is not None:
+                dataset.mpi.finalize()
+
+    def finalize(self) -> None:
+        if self._finalized:
+            return
+        self._release()
         self._finalized = True
