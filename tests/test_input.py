@@ -1,10 +1,12 @@
-"""data_io.Input: the per-step buffer of a time-varying input."""
+"""data_io.Input: the per-step buffer of a time-varying input. Also
+data_io.open_xr, which opens the files Model reads from paths."""
 
 import numpy as np
 import pytest
 import xarray as xr
+from xarray.backends.file_manager import FILE_CACHE
 
-from pws_phoenix.data_io import Input
+from pws_phoenix.data_io import Input, open_xr
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int32])
@@ -79,3 +81,20 @@ def test_conversion_in_the_one_step_buffer(
         assert inp.data.values is values
     np.testing.assert_array_equal(values, kept)
     assert values.dtype == dtype
+
+
+@pytest.mark.parametrize("n_vars", [1, 2])
+def test_open_xr_close_closes_the_file(tmp_path, n_vars):
+    """close() on what open_xr returns closes the file, for one
+    variable (a DataArray) and for several (a Dataset). xarray holds
+    every open file in FILE_CACHE."""
+    path = tmp_path / "data.nc"
+    xr.Dataset(
+        {f"var_{ii}": ("x", np.arange(3.0)) for ii in range(n_vars)}
+    ).to_netcdf(path)
+    n_open = len(FILE_CACHE)
+    opened = open_xr(path)
+    assert isinstance(opened, xr.DataArray if n_vars == 1 else xr.Dataset)
+    assert len(FILE_CACHE) == n_open + 1
+    opened.close()
+    assert len(FILE_CACHE) == n_open

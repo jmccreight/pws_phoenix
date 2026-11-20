@@ -32,6 +32,9 @@ def open_xr(
     da_ds: Union[xr.DataArray, xr.Dataset]
     if len(ds.data_vars) == 1:
         da_ds = ds[list(ds.data_vars)[0]]
+        # ds[name] carries no close: without this, da_ds.close() is a
+        # no-op and the file stays open (tests/test_input.py)
+        da_ds.set_close(ds.close)
     else:
         da_ds = ds
     if load:
