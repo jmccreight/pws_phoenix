@@ -4,6 +4,7 @@
 
 - [machine_probes](#machine_probes)
   - [The read probe](#the-read-probe)
+    - [The order of the dims decides the read](#the-order-of-the-dims-decides-the-read)
     - [Run it](#run-it)
     - [What one run leaves](#what-one-run-leaves)
     - [Layouts](#layouts)
@@ -34,6 +35,52 @@ It was written after the Nov 20, 2026 measurements on Hovenweep, where
 128 ranks reading their blocks of the CONUS `cbh.nc` (one Lustre
 stripe) took about 16.5 minutes through the read `ModelMPI` does, and
 82 s from a copy on 8 stripes.
+
+### The order of the dims decides the read
+
+The advice, by how many days one read takes and not by model:
+
+- `(time, hru)`: serial runs, and `ModelMPI` at a shallow window
+  (`control["mpi_window_steps"]`, default 1 day).
+- `(hru, time)`: `ModelMPI` reading the whole record, or a window of
+  years.
+- In between: measure with this probe.
+
+A variable is stored one element of its first dim after another. A
+read that takes ALL of the last dim is one unbroken run of the file. A
+read that takes part of the last dim is one piece per element of the
+first dim it covers.
+
+A model makes one of two reads:
+
+- One day of all hrus (or of a rank's block): the serial `Input`
+  reading from disk, and a `ModelMPI` rank at a window of 1 day. It
+  is unbroken in a `(time, hru)` file.
+- Many days of a rank's block of hrus: a `ModelMPI` rank at a deep
+  window (`control["mpi_window_steps"]`). It is unbroken in a
+  `(hru, time)` file.
+
+So neither order is the better file: it depends on how many days one
+read takes.
+
+Pieces per read and variable for CONUS (114,958 hrus, 17,167 days,
+899 hrus per rank at 128 ranks):
+
+| one read                      | `(time, hru)` file   | `(hru, time)` file        |
+| ----------------------------- | -------------------- | ------------------------- |
+| serial, one day of all hrus   | 1                    | 114,958 pieces of 1 value |
+| serial, `control["load_all"]` | 1                    | 1                         |
+| MPI rank, window of 1 day     | 1                    | 899 pieces of 1 value     |
+| MPI rank, window of 365 days  | 365 pieces of 899    | 899 pieces of 365         |
+| MPI rank, the whole record    | 17,167 pieces of 899 | 1                         |
+
+The counts are arithmetic, not measurements. Measured so far is the
+last row (Hovenweep, Nov 20, 2026, 8 stripes, cold, 64 and 128
+ranks): 81 to 132 s from the `(time, hru)` file, 8 s from the
+`(hru, time)` file. The `step` reader measures the first row.
+
+Chunks (`blocks<N>`, below) keep the `(time, hru)` order and still put
+a rank's block together.
 
 ### Run it
 
@@ -179,6 +226,9 @@ the last two and stops).
   probe evaluates that for a window of all days
   (`control["mpi_window_steps"] = None`). What it leaves out is the
   rest of a build: buffers, the writer, the static parameters.
-- Whether `ModelMPI` accepts a `transposed` file is not known. The
-  `# blocks:` line of an `mpio` log on that layout says whether
-  `parallelize` took it; the probe reads it with its own indexing.
+- `ModelMPI` does not accept a `transposed` file yet: its build raises
+  on a streamed input whose dims are not `(time, hru)`. mpixarray
+  itself streams one through every call `ModelMPI` makes, and hands
+  each window back in the file's order, `(block, days)` (checked Nov
+  20, 2026 on LaNueva and on Hovenweep, 4 ranks, a toy file). The
+  probe reads the layout with its own indexing.
