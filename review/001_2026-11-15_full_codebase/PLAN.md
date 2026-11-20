@@ -96,7 +96,7 @@ All use checklist T.
 | 15 | 15_tests_harness.md | conftest.py, kernel_units.py, run_tests.sh, test_kernel_units.py | 2,560 | all | reviewed |
 | 16 | 16_tests_framework.md | test_{budget,discretization,input_spec,model_contract_graph,model_step,output_finalize,process_fields,ref_behaviors,time,two_grid,units,units_check,up_low_regression,benchmark_coverage}*.py | 3,737 | 1-4 | reviewed |
 | 17 | 17_tests_restart.md | test_restart*.py | 1,784 | 1, 3, 5-13 | reviewed |
-| 18 | 18_tests_flow_graph.md | test_{flow_graph,flow_graph_build,mixed_channel_starfit,obsin_source_sink_nodes,starfit_daily_parity,starfit_flow_node}.py | 1,791 | 5, 6 | todo |
+| 18 | 18_tests_flow_graph.md | test_{flow_graph,flow_graph_build,mixed_channel_starfit,obsin_source_sink_nodes,starfit_daily_parity,starfit_flow_node}.py | 1,791 | 5, 6 | reviewed |
 | 19 | 19_tests_ports_a.md | test_prms_{groundwater,canopy,channel,hydraulic_geometry,atmosphere,solar_geometry,snow}*.py | 2,873 | 7, 11, 12 | todo |
 | 20 | 20_tests_ports_b.md | test_prms_{runoff,no_dprst,soilzone}*.py | 3,023 | 7-10 | todo |
 | 21 | 21_tests_stream_temp.md | test_prms_stream_*.py | 2,309 | 13 | todo |
