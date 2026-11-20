@@ -120,12 +120,13 @@ fi
 #   stripes, stripe_size  lfs setstripe -c / -S (ignored off Lustre)
 #   arrangement           contiguous  (time, hru), no chunks
 #                         blocks<N>   (time, hru) in chunks of all days
-#                                     x (number of hrus // N) hrus: the
-#                                     blocks of N ranks, for any domain
+#                                     x ceil(number of hrus / N) hrus:
+#                                     one chunk per rank at N ranks,
+#                                     for any domain
 #                         transposed  (hru, time), no chunks
 # A layout whose file exists is used as it is (cbh_striped8.nc is the
 # copy kept from Nov 20, 2026).
-: "${LAYOUTS:=striped8:8:4M:contiguous striped8_blocks256:8:4M:blocks256 striped8_transposed:8:4M:transposed}"
+: "${LAYOUTS:=striped8:8:4M:contiguous striped8_blocks128:8:4M:blocks128 striped8_transposed:8:4M:transposed}"
 # the `step` reader stops after this many
 # seconds per variable and reports the days it got through
 : "${STEP_MAX_SECONDS:=300}"

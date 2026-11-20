@@ -9,9 +9,12 @@ A layout = where the bytes of the 2-D `time` variables lie on disk:
 
   --arrangement contiguous  (time, hru), no chunks
                 blocks<N>   (time, hru), in chunks of all days x
-                            (number of hrus // N) hrus. The width is
-                            the block of N ranks, whatever the domain;
-                            the file is not tied to N ranks.
+                            ceil(number of hrus / N) hrus: the block
+                            mpixarray gives each of N ranks, whatever
+                            the domain, so at N ranks every rank reads
+                            exactly one chunk. Other rank counts read
+                            it too, each rank touching at most one
+                            chunk more than its block needs.
                 transposed  (hru, time), no chunks
   --stripes, --stripe-size  Lustre only: `lfs setstripe -c / -S`. On
                             any other file system they are ignored
@@ -290,9 +293,9 @@ def main() -> None:
 
     chunk_hrus = None
     if n_blocks is not None:
-        chunk_hrus = source.n_hru // n_blocks
-        if chunk_hrus == 0:
-            stop(f"blocks{n_blocks}: the file has only {source.n_hru} hrus")
+        # rounded up: the width of mpixarray's blocks at n_blocks ranks
+        # (read_probe.block_bounds)
+        chunk_hrus = -(-source.n_hru // n_blocks)
         item_bytes = max(
             np.dtype(source.dtype(name)).itemsize for name in source.names
         )

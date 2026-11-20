@@ -88,20 +88,23 @@ A layout is where the bytes lie. `LAYOUTS` holds one word per layout,
 | arrangement  | on disk                                                    |
 | ------------ | ---------------------------------------------------------- |
 | `contiguous` | `(time, hru)`, no chunks: what `translate_domain` writes   |
-| `blocks<N>`  | `(time, hru)` in chunks of all days x (`nhru // N`) hrus   |
+| `blocks<N>`  | `(time, hru)` in chunks of all days x `ceil(nhru / N)` hrus |
 | `transposed` | `(hru, time)`, no chunks                                   |
 
 In a `contiguous` file a rank's block of hrus is one small piece per
 day, spread over the whole variable. The other two put a block's bytes
 together.
 
-`blocks<N>` names a chunk WIDTH that works for any domain (the block
-of N ranks); it does not tie the file to N ranks. Chunks have one
-width and rank blocks differ by one hru when `nhru` is not divisible
-by the rank count, so blocks and chunks never line up exactly: a rank
-touches at most one chunk more than its block needs. The reader
-`mpio-aligned` measures what that costs. `transposed` has no chunks,
-so it has no such cost at any rank count.
+`blocks<N>` names a chunk WIDTH for any domain: the block mpixarray
+gives each of N ranks. mpixarray was seen to give every rank
+`ceil(nhru / ranks)` hrus and the last rank the rest (Hovenweep, Nov
+20, 2026: 114,958 hrus over 128 ranks = 127 blocks of 899 and one of
+785), so at N ranks every rank reads exactly one chunk. The file is
+not tied to N ranks: at another rank count a rank touches at most one
+chunk more than its block needs. The reader `mpio-aligned` measures
+what that costs (about 4% in the first Hovenweep run, on chunks of 449
+hrus read by 128 ranks). `transposed` has no chunks, so it has no such
+cost at any rank count.
 
 Stripes are a Lustre setting (`lfs setstripe`); on another file system
 they are ignored and the log says so. Nothing is compressed.
@@ -114,9 +117,10 @@ CONUS).
 A rank's block, for the readers with MPI, is the one mpixarray gives
 it: before the timed reads the probe makes the calls `ModelMPI` makes
 (`open_dataset`, `parallelize` over the hru dimension, an allgather of
-the local sizes). The readers without MPI take `np.array_split`'s
-block. The `# blocks:` line of every MPI log says whether the two are
-the same, or that `parallelize` raised on this file.
+the local sizes). The readers without MPI cannot ask mpixarray, so
+they take the rule above (`block_bounds` in `read_probe.py`). The
+`# blocks:` line of every MPI log says whether the two are the same,
+or that `parallelize` raised on this file.
 
 Every reader reads each variable twice in one launch: `first` (cold,
 when the cache was emptied) and `second` (warm).

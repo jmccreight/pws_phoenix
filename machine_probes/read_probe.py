@@ -23,13 +23,15 @@ A rank's block:
                        communicator, an allgather of the local sizes).
                        This is done before the timed reads; it reads no
                        variable.
-  readers without MPI  the block np.array_split gives it: with `extra =
-                       n_hru % n_ranks`, the first `extra` ranks hold
-                       one hru more.
+  readers without MPI  the probe's rule (block_bounds): every rank holds
+                       ceil(n_hru / n_ranks) hrus and the last rank the
+                       rest. It is what mpixarray was SEEN to do
+                       (Hovenweep, Nov 20, 2026: 114,958 hrus over 128
+                       ranks = 127 blocks of 899 and one of 785); it is
+                       not np.array_split's rule.
 The `# blocks:` header line of every MPI log says whether the two are
-the same. When parallelize raises (for one, should mpixarray not take
-a transposed file) the line says so and np.array_split's blocks are
-read.
+the same, so an mpixarray that cuts otherwise shows up there. When
+parallelize raises, the line says so and the probe's rule is read.
 
 Readers without MPI (the rank is read from the launcher's environment):
   netCDF4  the block through netCDF-C (serial HDF5)
@@ -52,9 +54,9 @@ Readers with MPI (the rank is COMM_WORLD's):
                    for a window of all days. An INDEPENDENT read.
   mpio-collective  h5py, driver "mpio", the block read inside
                    `with dset.collective:`
-  mpio-aligned     as mpio, but the blocks are whole chunks (chunks
-                   are dealt to the ranks as hrus are above), so no
-                   rank reads part of a chunk. Against mpio on the
+  mpio-aligned     as mpio, but the blocks are whole chunks (the chunks
+                   are dealt to the ranks evenly), so no rank reads
+                   part of a chunk. Against mpio on the
                    same chunked file this is the cost of blocks that
                    do not line up with chunks. Prints "not applicable"
                    for a file without chunks.
@@ -141,9 +143,26 @@ def environment_rank() -> tuple[int, int]:
     return 0, 1
 
 
-def block_bounds(n_items: int, n_ranks: int, rank: int) -> tuple[int, int]:
-    """[start, stop) of this rank's share of n_items, identical to
-    np.array_split(np.arange(n_items), n_ranks)[rank]."""
+BLOCK_RULE = (
+    "the probe's rule (ceil(hrus / ranks) per rank, the last rank the rest)"
+)
+
+
+def block_bounds(n_hru: int, n_ranks: int, rank: int) -> tuple[int, int]:
+    """[start, stop) of this rank's block of hrus by the rule mpixarray
+    was seen to use: every rank holds ceil(n_hru / n_ranks) hrus and
+    the last rank the rest. The readers without MPI read these;
+    mpixarray_block() checks them against mpixarray at every MPI
+    launch."""
+    width = -(-n_hru // n_ranks)
+    start = min(rank * width, n_hru)
+    return start, min(start + width, n_hru)
+
+
+def even_share(n_items: int, n_ranks: int, rank: int) -> tuple[int, int]:
+    """[start, stop) of this rank's share of n_items dealt evenly: the
+    first `n_items % n_ranks` ranks hold one more (np.array_split's
+    rule). No rank is left empty while n_items >= n_ranks."""
     base, extra = divmod(n_items, n_ranks)
     start = rank * base + min(rank, extra)
     return start, start + base + (1 if rank < extra else 0)
@@ -152,9 +171,11 @@ def block_bounds(n_items: int, n_ranks: int, rank: int) -> tuple[int, int]:
 def aligned_bounds(
     n_hru: int, chunk_hrus: int, n_ranks: int, rank: int
 ) -> tuple[int, int]:
-    """[start, stop) in hrus of this rank's share of WHOLE chunks."""
+    """[start, stop) in hrus of this rank's share of WHOLE chunks, the
+    chunks dealt evenly. When the chunk width is the ranks' block
+    width (blocks<N> read by N ranks) these are block_bounds's."""
     n_chunks = -(-n_hru // chunk_hrus)
-    first, last = block_bounds(n_chunks, n_ranks, rank)
+    first, last = even_share(n_chunks, n_ranks, rank)
     return min(first * chunk_hrus, n_hru), min(last * chunk_hrus, n_hru)
 
 
@@ -168,7 +189,7 @@ def mpixarray_block(
     over the lower ranks of the cartesian communicator).
 
     Every rank must reach the same outcome, so nothing is raised here:
-    a failure is gathered and reported, and np.array_split's block is
+    a failure is gathered and reported, and block_bounds's block is
     returned instead."""
     split = block_bounds(layout.n_hru, comm.size, comm.rank)
     start = stop = total = 0
@@ -195,24 +216,23 @@ def mpixarray_block(
     if errors:
         return (
             *split,
-            f"np.array_split's. mpixarray's parallelize raised on "
+            f"{BLOCK_RULE}. mpixarray's parallelize raised on "
             f"{len(errors)} of {comm.size} ranks: {errors[0]}",
         )
     if total != layout.n_hru:
         return (
             *split,
-            f"np.array_split's. The local sizes after mpixarray's "
+            f"{BLOCK_RULE}. The local sizes after mpixarray's "
             f"parallelize add up to {total}, not {layout.n_hru} hrus",
         )
     all_same = comm.allreduce(same, op=modules["MPI"].LAND)
-    if all_same:
-        verdict = "the same as np.array_split's"
-    else:
-        verdict = (
-            "NOT the same as np.array_split's, which the readers "
-            "without MPI read"
-        )
-    return start, stop, f"mpixarray's parallelize; {verdict}"
+    verdict = "the same as" if all_same else "NOT the same as"
+    return (
+        start,
+        stop,
+        f"mpixarray's parallelize; {verdict} {BLOCK_RULE}, which the "
+        "readers without MPI read",
+    )
 
 
 def file_system_type(path: str) -> str:
@@ -478,8 +498,8 @@ def read(args: argparse.Namespace) -> None:
     n_days = layout.n_time if args.days is None else args.days
     start, stop = block_bounds(layout.n_hru, n_ranks, rank)
     blocks = (
-        "np.array_split's (a reader without MPI; an mpio log says "
-        "whether mpixarray cuts the same)"
+        f"{BLOCK_RULE}; a reader without MPI, an mpio log says "
+        "whether mpixarray cuts the same"
     )
     if reader in MPI_READERS:
         start, stop, blocks = mpixarray_block(args.file, layout, modules, comm)
