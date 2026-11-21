@@ -26,6 +26,7 @@
     - [Output backends differ on purpose: zarr in serial, NetCDF stream under MPI](#output-backends-differ-on-purpose-zarr-in-serial-netcdf-stream-under-mpi)
     - [Serial output: a pre-sized zarr store written by region](#serial-output-a-pre-sized-zarr-store-written-by-region)
     - [An input on either order of its two dims: taken from the dim names, one warning for the slower order](#an-input-on-either-order-of-its-two-dims-taken-from-the-dim-names-one-warning-for-the-slower-order)
+    - [MPI parameters from `process_dict`: each rank keeps its block, the input file holds only what is streamed](#mpi-parameters-from-process_dict-each-rank-keeps-its-block-the-input-file-holds-only-what-is-streamed)
   - [Checks](#checks)
     - [Budgets as data in the owning Process](#budgets-as-data-in-the-owning-process)
     - [Units mode: closed vocabulary, two boundaries, kernel tests](#units-mode-closed-vocabulary-two-boundaries-kernel-tests)
@@ -102,6 +103,7 @@ Terms:
 | Output backends differ on purpose: zarr in serial, NetCDF stream under MPI | built | Jun 2026 | IO |
 | Serial output: a pre-sized zarr store written by region | built | Oct 2026 | IO |
 | An input on either order of its two dims: taken from the dim names, one warning for the slower order | built; read costs measured for the whole record only | Nov 2026 | IO |
+| MPI parameters from `process_dict`: each rank keeps its block, the input file holds only what is streamed | built; build cost not measured on a large domain | Nov 2026 | IO |
 | PRMS translation: one way, pyPRMS only, outside the core | built | Aug 2026 | Translation and migration |
 | Pre-processing: derived inputs in a stamped file, verified at use | built | Aug 2026 | Translation and migration |
 | A domain translated ahead of time: files written once, options from the control copy | built, serial run entry only | Nov 2026 | Translation and migration |
@@ -302,8 +304,9 @@ Terms:
 - **Left unfinished:**
   - A derived buffer with a second dimension cannot be declared
     (mpixarray decomposes every dimension).
-  - The distributed grid's inputs are one combined file; structured
-    input is undecided.
+  - The distributed grid's STREAMED inputs are one file; its
+    parameters may come from `process_dict` (see "MPI parameters
+    from `process_dict`"). More than one streamed file is undecided.
 
 ### Memory: reference, do not copy; kernels write in place
 
@@ -440,7 +443,8 @@ Terms:
     `docs/MAINTENANCE.md`).
   - JLM: the argument that took initial state out of the combined
     MPI file applies to parameters too; forcings, parameters and
-    initial state should be separate files.
+    initial state should be separate files. Done for parameters
+    Nov 20, 2026: see "MPI parameters from `process_dict`".
   - STARFIT's requirement is by class composition; the alternative
     is a check on reservoir rows only.
 
@@ -1192,6 +1196,62 @@ Terms:
     `encoding["chunksizes"]`, which xarray's netCDF readers set. A
     zarr-backed input is never judged.
 
+### MPI parameters from `process_dict`: each rank keeps its block, the input file holds only what is streamed
+
+- **Status:** built Nov 20, 2026. The cost of the build is not
+  measured on a large domain.
+- **Why:** a combined input file holds ONE parameter set beside the
+  forcings. A calibration changes the parameters at every run, and
+  for CONUS the three forcings are 23.7 GB: a file per parameter set
+  copies them each time. mpixarray needs one dataset only for what is
+  streamed. A translated domain already has the forcings alone in a
+  file and the parameters in another, and the serial Model already
+  takes parameters from `process_dict`.
+- **Decision:**
+  - A distributed-grid entry of `process_dict` may carry
+    `"parameters"`, an `xr.Dataset` at full extent, as a serial entry
+    does. A combined file still works. A parameter given in both
+    places raises.
+  - Each rank keeps a COPY of its block of a parameter on the grid
+    dim, and the model drops the supplied dataset. A view would keep
+    the full-extent array alive on every rank for the whole run.
+    This is a declared exception to "reference, do not copy": under
+    MPI the working buffer is the block. A parameter without the
+    grid dim is taken by reference.
+  - A dataset still on disk is read by block: only the rank's block
+    is loaded.
+  - A name supplied by two processes is one array, the first placed,
+    as in serial.
+  - JLM (Nov 20, 2026): this first. Reading only a rank's block of
+    the parameters from a file is wanted as well.
+- **For users:**
+  - `process_dict[name] = {"class": ..., "discretization": grid,
+    "parameters": dataset}` and `control["input_file"]` = the forcing
+    file.
+  - During the build every rank holds the full-extent parameters it
+    was handed, until the caller lets go of them. For CONUS the two
+    solar tables alone are 0.67 GB per rank.
+- **Where:** `ModelMPI._build` in `pws_phoenix/model.py` (the block
+  that places the parameters, and the one marked WORKAROUND);
+  `tests/test_parameters_in_process_dict_mpi.py`; `CLAUDE.md` "MPI
+  path" and "Known mpixarray limits".
+- **Left unfinished:**
+  - No run entry builds such a model from a translated domain
+    (`mpi_model_from_translation`). `ModelMPI` raises on
+    `start_time` / `end_time`, which `assemble_from_translation`
+    sets, and it requires streamed output.
+  - Block reads in practice: `assemble_from_translation` loads the
+    parameter file whole, on every rank. The branch for a dataset
+    still on disk has no test.
+  - `control["units"] = "convert"` on a supplied parameter has no
+    test.
+  - The mpixarray workaround (a coordinate on the opened dataset for
+    each dim only the supplied parameters have) stays until mpixarray
+    ignores a dim its opened file lacks (reported upstream Nov 20,
+    2026).
+  - `"parameters"` given as a path raises; the serial Model takes
+    one.
+
 ## Checks
 
 ### Budgets as data in the owning Process
@@ -1693,10 +1753,10 @@ Terms:
   - For a control with stream temperature the preprocessed step
     builds four full weight matrices in memory (see "Maps", left
     unfinished): not possible at NHM scale.
-  - The MPI run entry. `ModelMPI` reads one combined file that also
-    holds the hru parameters; whether translation writes such a file
-    or `ModelMPI` takes forcing and parameters separately is
-    undecided. `ModelMPI` raises on the two window keys.
+  - The MPI run entry: `ModelMPI` takes the hru parameters from
+    `process_dict` (decided Nov 20, 2026; see "MPI parameters from
+    `process_dict`"), but `mpi_model_from_translation` is not
+    written and `ModelMPI` raises on the two window keys.
   - Reads of several days at a time, and the chunk shape of the
     forcing file.
   - Translation that writes a native model yaml, so that a run needs

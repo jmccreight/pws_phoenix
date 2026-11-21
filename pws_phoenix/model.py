@@ -1717,10 +1717,10 @@ class ModelMPI(Model):
     expected to absorb it.
 
     control dict:
-        input_file        single combined input source for the DISTRIBUTED
-                          grid (forcings + time-varying params as
-                          (time, mpi_grid); static params + ICs as
-                          (mpi_grid,))
+        input_file        the DISTRIBUTED grid's input file: its streamed
+                          inputs, on (time, mpi_grid) or
+                          (mpi_grid, time), and any of its parameters
+                          not supplied in process_dict (see below)
         output_parallel_netcdf
                           the parallel-NetCDF file streamed by the
                           mpixarray writer (distributed grid)
@@ -1755,8 +1755,12 @@ class ModelMPI(Model):
                           docstring).
 
     process_dict is as in Model (order = schedule; serial-grid entries carry
-    "discretization" + their data); distributed-grid entries need only
-    {"class": ...} -- their data come from input_file.
+    "discretization" + their data). A distributed-grid entry needs only
+    {"class": ...} when input_file holds its parameters. It may instead
+    carry "parameters", an xr.Dataset at FULL extent as in serial: each
+    rank keeps a copy of its block (a dataset still on disk is read by
+    block). A parameter given in both places raises. Initial state is
+    supplied as in Model, never in input_file.
 
     Any number of distributed-grid variables may stream to disk. (The
     pre-1.0.0 "one ``to_file=True`` var" deepcopy limit, and its 1.0.0
@@ -1922,6 +1926,26 @@ class ModelMPI(Model):
         else:
             ds_source = ds_input
 
+        # WORKAROUND for an mpixarray limit (reported upstream Nov 20,
+        # 2026): at every window mpixarray slices the opened
+        # dataset by EVERY dim of the stream dataset (MPI_Object.src),
+        # so a dim that only a parameter supplied in process_dict has
+        # (month, ...) must exist on the opened dataset too. It is
+        # given a coordinate of that length here: no parameter data.
+        # Remove when MPI_Object.src ignores a dim its parent lacks.
+        extra_dims: Dict[str, int] = {}
+        for kk in mpi_classes:
+            supplied = self._process_dict[kk].get("parameters")
+            # anything but a Dataset raises below, where it is placed
+            if isinstance(supplied, xr.Dataset):
+                for dd, size in supplied.sizes.items():
+                    if dd != mpi_grid and dd not in ds_source.dims:
+                        extra_dims[str(dd)] = int(size)
+        if extra_dims:
+            ds_source = ds_source.assign_coords(
+                {dd: np.arange(nn) for dd, nn in extra_dims.items()}
+            )
+
         self.discretizations = {
             mpi_grid: Discretization([mpi_grid], comm=comm)
         }
@@ -1971,6 +1995,64 @@ class ModelMPI(Model):
         for name in list(ds_mpi_stream.data_vars):
             if "time" not in ds_mpi_stream[name].dims:
                 ds_mpi_stream[name] = ds_mpi_stream[name].load()
+
+        # The decomposed extent: an allgather of local sizes (scheme
+        # "single" = contiguous rank-ordered blocks). This rank's block
+        # of the global extent is the arithmetic for the parameters
+        # supplied in process_dict (just below), for supplied state,
+        # restarts, and the Maps' parallel boundary.
+        local_n = int(ds_mpi_stream.sizes[mpi_grid])
+        sizes = comm.allgather(local_n)
+        start = int(sum(sizes[: comm.rank]))
+        n_global = int(sum(sizes))
+        self._decomp_slice = (start, start + local_n)
+
+        # Parameters supplied in process_dict, at FULL extent as in
+        # serial: each rank keeps its block. The same process_dict and
+        # input file on every rank: all ranks raise together.
+        for kk, cls in mpi_classes.items():
+            # popped: the model's copy of the entry must not keep the
+            # full-extent dataset alive
+            supplied = self._process_dict[kk].pop("parameters", None)
+            if supplied is None:
+                continue
+            if not isinstance(supplied, xr.Dataset):
+                raise TypeError(
+                    f"process '{kk}': 'parameters' on the distributed "
+                    f"grid '{mpi_grid}' must be an xr.Dataset, got "
+                    f"{type(supplied).__name__}."
+                )
+            for pp in cls.get_parameters():
+                if pp not in supplied:
+                    continue
+                if pp in ds_input.data_vars:
+                    raise ValueError(
+                        f"process '{kk}': parameter '{pp}' is given in "
+                        "process_dict and is also in input_file "
+                        f"{input_file!r}: give it once."
+                    )
+                if pp in ds_mpi_stream:
+                    # placed by an earlier process: one array per name,
+                    # as in serial (_add_process_fields)
+                    continue
+                da = supplied[pp]
+                if mpi_grid in da.dims:
+                    if da.sizes[mpi_grid] != n_global:
+                        raise ValueError(
+                            f"process '{kk}': parameter '{pp}' has "
+                            f"{da.sizes[mpi_grid]} along '{mpi_grid}', "
+                            f"the distributed grid has {n_global}: "
+                            "supply it at full extent."
+                        )
+                    in_memory = da.variable._in_memory
+                    da = da.isel({mpi_grid: slice(start, start + local_n)})
+                    # In memory: a COPY of the block, because a view
+                    # would keep the full-extent array alive on every
+                    # rank. On disk: load() reads the block only.
+                    da = da.copy() if in_memory else da.load()
+                # the Variable, not the DataArray: no alignment with
+                # the block's coordinate
+                ds_mpi_stream[pp] = da.variable
 
         # File-backed inputs: shadowed below by (hru,) buffers, refilled
         # from src each step.
@@ -2149,16 +2231,6 @@ class ModelMPI(Model):
         ds_mpi_stream.mpi.create(verbose=False)
 
         self.discretizations[mpi_grid].dataset = ds_mpi_stream
-
-        # The decomposed extent: an allgather of local sizes (scheme
-        # "single" = contiguous rank-ordered blocks). This rank's block
-        # of the global extent is the restore arithmetic for supplied
-        # state (below), restarts, and the Maps' parallel boundary.
-        local_n = int(ds_mpi_stream.sizes[mpi_grid])
-        sizes = comm.allgather(local_n)
-        start = int(sum(sizes[: comm.rank]))
-        n_global = int(sum(sizes))
-        self._decomp_slice = (start, start + local_n)
 
         # A streamed input stored in the slower order of its dims for
         # this window depth: a line of the build's one warning, raised

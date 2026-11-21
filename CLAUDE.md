@@ -365,6 +365,13 @@ would build a prng and write `seed.json` on rank 0):
   block)` or `(block, depth)` (`tests/test_transposed_stream_mpi.py`).
   Static parameters stay whole on `ds_mpi`, loaded into memory so
   their buffers are shared by reference.
+- A distributed-grid parameter comes from `input_file` or from the
+  process's `process_dict` entry (`"parameters"`, an `xr.Dataset` at
+  full extent, as in serial); given in both, it raises. From
+  `process_dict` each rank keeps a COPY of its block (a view would
+  keep the full-extent array alive on every rank); a dataset still on
+  disk is read by block. `input_file` then holds only the streamed
+  inputs (`tests/test_parameters_in_process_dict_mpi.py`).
 - Initial state is NOT in the input file (see "Initial state").
 - Output is routed by OWNING grid. Distributed-grid variables stream
   through the mpixarray NetCDF writer
@@ -397,12 +404,22 @@ Known mpixarray limits:
 - A non-`time` extra dim on a resident variable (a `(month, space)`
   parameter) survives `as_iterable` untouched and stays
   space-decomposed.
-- More than one streamed `(time, grid)` output variable works only
-  with a fix to `MPI_Dataset.__setitem__` (without it a second
-  declaration replaces the `time` coordinate with a copy lacking
-  `__mpi_parent`). The fix is a patch in the local mpixarray clone;
-  it is reported upstream and not yet released (Nov 2026).
-  `tests/test_prms_groundwater_mpi.py` streams two.
+- More than one streamed `(time, grid)` output variable needs the
+  `MPI_Dataset.__setitem__` fix, which is upstream (merged into the
+  local clone Nov 20, 2026). `tests/test_prms_groundwater_mpi.py`
+  streams two.
+- At every window mpixarray slices the opened file (the "parent") by
+  EVERY dim of the stream dataset (`MPI_Object.src`:
+  `parent.isel(outer_slice_dict)`). A variable put on the stream
+  dataset from memory, on a dim the file lacks, makes `iterate` raise
+  `Dimensions {...} do not exist`: a `(nmonth, nhru)` parameter from
+  `process_dict` with a file of `time` and `nhru` only. WORKAROUND in
+  `ModelMPI._build`: before `decompose`, the opened dataset gets a
+  coordinate (`np.arange(size)`) for each dim that only the supplied
+  parameters have. It holds no parameter data. Reported upstream
+  Nov 20, 2026; the fix asked for there is
+  `isel(..., missing_dims="ignore")`. Remove the workaround when
+  mpixarray has it.
 - Uneven decomposition works (765 hrus over 4 ranks).
 
 ## Global state: `Time` and options
@@ -543,8 +560,9 @@ data in the owning Process". Which process declares what:
   parameters (`hru_area`, `tosegment`, ...). Assembly takes a
   declared parameter from the grid first, then from the process's
   `parameters`. A process still DECLARES every grid parameter it
-  reads. Under MPI the distributed grid's parameters ride in the
-  input file.
+  reads. Under MPI the distributed grid's parameters come from the
+  input file or from `process_dict` (see "MPI path"); a
+  `Discretization` with parameters is for serial grids only.
 - `Discretization.topological_order` replicates pywatershed's
   construction EXACTLY (networkx): a different valid order changes
   float accumulation downstream.
