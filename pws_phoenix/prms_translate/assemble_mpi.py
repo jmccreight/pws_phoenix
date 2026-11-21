@@ -5,13 +5,17 @@ mpixarray STREAMS the distributed grid from ONE combined NetCDF on
 disk, while the serial (segment) grid is rebuilt identically on every
 rank. So the parallel path has two halves:
 
-- ``write_mpi_input_file(kit, path, n_days=None)`` -- the PREP half,
+- ``write_mpi_input_file(kit, path, n_days=None, transpose=False)``
+  -- the PREP half,
   run serially (a notebook cell, a script): merge the kit's
   distributed-grid content into the combined input file -- static
   parameters as ``(nhru, ...)``, forcings as ``(time, nhru)``, real
   dim-coordinates. Initial state is NOT in the file: it is supplied
   in memory, in process_dict, as in serial. ``n_days`` truncates the
-  time axis (the stream defines the run length).
+  time axis (the stream defines the run length). ``transpose=True``
+  writes the forcings as ``(nhru, time)``: ModelMPI reads either
+  order, and that one is the faster read at a deep
+  ``control["mpi_window_steps"]``.
 - ``mpi_model_from_control(control_file, control)`` -- the parallel
   one-liner, callable ONLY under mpirun (SPMD: every rank calls it):
   rebuilds the kit from the legacy files (deterministic, so the
@@ -52,13 +56,21 @@ def write_mpi_input_file(
     path: str | pl.Path,
     n_days: int | None = None,
     mpi_grid: str = "nhru",
+    transpose: bool = False,
 ) -> pl.Path:
     """Write the combined distributed-grid input file from a (serial)
     ModelKit: every mpi-grid process entry's parameter dataset plus
     its loose DataArray entries (forcings), merged into one dataset
     with real dim-coordinates. Supplied initial state (restart
     variables under their own names) is skipped: ModelMPI takes it
-    from process_dict. Returns the path."""
+    from process_dict. Returns the path.
+
+    ``transpose=True`` writes every ``(time, mpi_grid)`` variable as
+    ``(mpi_grid, time)``. ModelMPI takes either order and gives the
+    same answers; which one reads faster depends on
+    ``control["mpi_window_steps"]`` (machine_probes/README.md "The
+    order of the dims decides the read"). The transposed copy of each
+    variable is made by the write, one variable at a time."""
     merged = xr.Dataset()
     for entry in kit.process_dict.values():
         if entry["discretization"] != mpi_grid:
@@ -85,6 +97,11 @@ def write_mpi_input_file(
         merged = merged.assign_coords(
             time=merged["time"].values.astype("datetime64[ns]")
         )
+    if transpose:
+        for name in list(merged.data_vars):
+            if merged[name].dims == ("time", mpi_grid):
+                # a view; to_netcdf writes it in the new order
+                merged[name] = merged[name].transpose(mpi_grid, "time")
     path = pl.Path(path)
     merged.to_netcdf(path)
     return path

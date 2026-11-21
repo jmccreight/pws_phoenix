@@ -28,7 +28,14 @@ import numba
 import numpy as np
 import xarray as xr
 
-from pws_phoenix.data_io import Input, Output, ResultCollector, open_xr
+from pws_phoenix.data_io import (
+    Input,
+    Output,
+    ResultCollector,
+    open_xr,
+    slow_order_note,
+    warn_slow_order,
+)
 from pws_phoenix.discretization import Discretization
 from pws_phoenix.clock import Time
 from pws_phoenix import units as units_mod
@@ -127,6 +134,9 @@ class Model:
             gg: provided.get(gg) or Discretization([gg]) for gg in grids
         }
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
+        # lines of the build's one warning about inputs stored in the
+        # slower order of their dims (data_io.slow_order_note)
+        self._slow_order_notes: List[str] = []
         self._finalized = False
         # the guard on set_parameters(): it raises unless this is True
         self._calibration_mode = bool(control.get("calibration_mode", False))
@@ -525,6 +535,7 @@ class Model:
         self._run_initialize_hooks()
         self._apply_supplied_state()
         self._resolve_maps()
+        warn_slow_order(self._slow_order_notes)
 
     def _set_numba_threads(self, control: Dict[str, Any]) -> None:
         """control["numba_n_threads"] (default 1): the number of numba
@@ -538,7 +549,9 @@ class Model:
         (the NUMBA_NUM_THREADS environment variable, else the cores
         the process may use): a count above it raises."""
         n_threads = int(control.get("numba_n_threads", 1))
-        n_max = int(numba.config.NUMBA_NUM_THREADS)
+        # numba sets the attribute when it is imported: mypy cannot
+        # see it
+        n_max = int(numba.config.NUMBA_NUM_THREADS)  # type: ignore[attr-defined]
         self._raise_if_bad_numba_threads(n_threads, n_max)
         if "numba_n_threads" not in control:
             self._warn_if_numba_threads_ignored(n_max)
@@ -971,12 +984,26 @@ class Model:
                                 f"{sorted(map(str, data.data_vars))})."
                             )
                         data = data[ii]
-                    data = self._time_window(ii, data)
+                    stored = data
+                    # judged before Input, which may load it
+                    on_disk = not stored.variable._in_memory
+                    data = self._time_window(ii, stored)
                     self.inputs_dict[ii] = Input(
                         data,
                         read_only=(ii in inputs_req),
                         load=self._load_all,
                     )
+                    if on_disk:
+                        # read from its file: one day of the whole
+                        # grid per step, or the whole window once
+                        # (load_all)
+                        note = slow_order_note(
+                            ii,
+                            stored,
+                            n_days=data.sizes["time"] if self._load_all else 1,
+                        )
+                        if note is not None:
+                            self._slow_order_notes.append(note)
                 inp = self.inputs_dict[ii]
                 # control["units"] = "convert": the one-step buffer is
                 # converted, never the supplied data
@@ -1775,6 +1802,8 @@ class ModelMPI(Model):
             tuple[str, str], tuple[float, float]
         ] = {}
         self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
+        # lines of the build's one warning (see Model.__init__)
+        self._slow_order_notes: List[str] = []
         self._load_all = True  # serial-grid data are small; keep in memory
         # the rank-0 zarr Output, set in _build() once its store exists
         self.output: Union[Output, None] = None
@@ -1975,18 +2004,26 @@ class ModelMPI(Model):
         # only, so an input on another spatial dim (e.g. pywatershed's
         # "nhm_id" vs "nhru") stays FULL extent and broadcast-errors on
         # the first src refill, mid-collective.
+        # Either order of the two dims is taken, per input: mpixarray
+        # hands each window back in the file's order, and run() takes
+        # a day out of it by that order.
         bad_dims = {
             name: ds_input[name].dims
             for name in file_input_names
-            if ds_input[name].dims != ("time", mpi_grid)
+            if ds_input[name].dims
+            not in (("time", mpi_grid), (mpi_grid, "time"))
         }
         if bad_dims:
             raise ValueError(
                 f"input_file streamed input(s) must have dims "
-                f"('time', '{mpi_grid}'); got {bad_dims}. Rename the "
-                "offending dim(s) to the distributed grid dim when "
-                "assembling the input file."
+                f"('time', '{mpi_grid}') or ('{mpi_grid}', 'time'); got "
+                f"{bad_dims}. Rename the offending dim(s) to the "
+                "distributed grid dim when assembling the input file."
             )
+        # name -> True when the file holds it on ("time", mpi_grid)
+        self._stream_time_first: Dict[str, bool] = {
+            name: ds_input[name].dims[0] == "time" for name in file_input_names
+        }
 
         # Units at the distributed grid's boundary (control["units"]):
         # identical metadata on every rank, so every rank takes the
@@ -2123,6 +2160,19 @@ class ModelMPI(Model):
         n_global = int(sum(sizes))
         self._decomp_slice = (start, start + local_n)
 
+        # A streamed input stored in the slower order of its dims for
+        # this window depth: a line of the build's one warning, raised
+        # below on rank 0 (its block stands for every rank's).
+        for name in file_input_names:
+            note = slow_order_note(
+                name,
+                ds_input[name],
+                n_days=self._window_steps,
+                n_block=local_n,
+            )
+            if note is not None:
+                self._slow_order_notes.append(note)
+
         # ---- Serial grids (Step B): replicated on every rank. Assembled
         #      by the serial machinery, identically on each rank (from
         #      deterministic/shared inputs) -- that IS the replication.
@@ -2141,6 +2191,9 @@ class ModelMPI(Model):
             for kk in proc_names:
                 self._add_process_fields(kk, grid, grid_ds)
             self.discretizations[grid].dataset = grid_ds
+        # one warning for the run, not one per rank
+        if comm.rank == 0:
+            warn_slow_order(self._slow_order_notes)
 
         # ---- Supplied initial state (distributed grid): a restart
         #      variable given in its process_dict entry under its OWN
@@ -2289,16 +2342,19 @@ class ModelMPI(Model):
             comm=self._comm, progress=self._progress
         ):
             src = step.mpi.src
-            # ONE read per window and input: (this window's depth, this
-            # rank's block), in the file's dtype. The read allocates
-            # the array, so it is new each window (one array for the
-            # run when the window is the whole stream). Each entry:
-            # the input's (grid,) float64 buffer, its window, its
+            # ONE read per window and input: this window's depth by
+            # this rank's block, in the file's order of the two dims
+            # and in the file's dtype. The read allocates the array,
+            # so it is new each window (one array for the run when the
+            # window is the whole stream). Each entry: the input's
+            # (grid,) float64 buffer, its window, whether the window
+            # is (depth, block) or (block, depth), its
             # control["units"] = "convert" conversion or None.
             windows = [
                 (
                     step[name].values,
                     src[name].values,
+                    self._stream_time_first[name],
                     self._stream_conversions.get(name),
                 )
                 for name in self._file_input_names
@@ -2324,8 +2380,11 @@ class ModelMPI(Model):
                 self.time.set_index(gtt)
                 # Refill this step's input buffers from the window;
                 # the conversion follows the refill.
-                for values, window, conversion in windows:
-                    values[:] = window[dd, :]
+                for values, window, time_first, conversion in windows:
+                    if time_first:
+                        values[:] = window[dd, :]
+                    else:
+                        values[:] = window[:, dd]
                     if conversion is not None:
                         values *= conversion[0]
                         if conversion[1] != 0.0:

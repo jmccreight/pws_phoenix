@@ -61,7 +61,20 @@ A model makes one of two reads:
   `(hru, time)` file.
 
 So neither order is the better file: it depends on how many days one
-read takes.
+read takes. Both models read either order and give the same answers.
+
+A build warns once (`UserWarning`, rank 0 under MPI) when an input
+stored without chunks takes at least 100 times the pieces the other
+order would, for the reads that model makes. The `(hru, time)` copy
+of an existing file:
+
+```bash
+python -m pws_phoenix.utils.transpose_netcdf cbh.nc cbh_transpose.nc
+```
+
+`translate_domain --cbh-transpose` writes it with the forcing file,
+and `write_mpi_input_file(..., transpose=True)` writes the combined
+MPI input file that way.
 
 Pieces per read and variable for CONUS (114,958 hrus, 17,167 days,
 899 hrus per rank at 128 ranks):
@@ -226,9 +239,8 @@ the last two and stops).
   probe evaluates that for a window of all days
   (`control["mpi_window_steps"] = None`). What it leaves out is the
   rest of a build: buffers, the writer, the static parameters.
-- `ModelMPI` does not accept a `transposed` file yet: its build raises
-  on a streamed input whose dims are not `(time, hru)`. mpixarray
-  itself streams one through every call `ModelMPI` makes, and hands
-  each window back in the file's order, `(block, days)` (checked Nov
-  20, 2026 on LaNueva and on Hovenweep, 4 ranks, a toy file). The
-  probe reads the layout with its own indexing.
+- A `ModelMPI` run from a `transposed` file is not timed here.
+  `ModelMPI` reads one (mpixarray hands each window back in the
+  file's order, `(block, days)`:
+  `tests/test_transposed_stream_mpi.py`); the probe reads the layout
+  with its own indexing.

@@ -25,6 +25,7 @@
   - [IO](#io)
     - [Output backends differ on purpose: zarr in serial, NetCDF stream under MPI](#output-backends-differ-on-purpose-zarr-in-serial-netcdf-stream-under-mpi)
     - [Serial output: a pre-sized zarr store written by region](#serial-output-a-pre-sized-zarr-store-written-by-region)
+    - [An input on either order of its two dims: taken from the dim names, one warning for the slower order](#an-input-on-either-order-of-its-two-dims-taken-from-the-dim-names-one-warning-for-the-slower-order)
   - [Checks](#checks)
     - [Budgets as data in the owning Process](#budgets-as-data-in-the-owning-process)
     - [Units mode: closed vocabulary, two boundaries, kernel tests](#units-mode-closed-vocabulary-two-boundaries-kernel-tests)
@@ -100,6 +101,7 @@ Terms:
 | MPI window depth: one read and one write per window | built; not timed on a large domain | Nov 2026 | Performance |
 | Output backends differ on purpose: zarr in serial, NetCDF stream under MPI | built | Jun 2026 | IO |
 | Serial output: a pre-sized zarr store written by region | built | Oct 2026 | IO |
+| An input on either order of its two dims: taken from the dim names, one warning for the slower order | built; read costs measured for the whole record only | Nov 2026 | IO |
 | PRMS translation: one way, pyPRMS only, outside the core | built | Aug 2026 | Translation and migration |
 | Pre-processing: derived inputs in a stamped file, verified at use | built | Aug 2026 | Translation and migration |
 | A domain translated ahead of time: files written once, options from the control copy | built, serial run entry only | Nov 2026 | Translation and migration |
@@ -1122,6 +1124,74 @@ Terms:
   - `Model.run()` after a restart: `Output` labels rows from
     `time_values[0]` whatever the start index.
 
+### An input on either order of its two dims: taken from the dim names, one warning for the slower order
+
+- **Status:** built Nov 20, 2026; serial and MPI. The read costs are
+  measured on Hovenweep for the whole record only.
+- **Why:** a variable is stored one element of its first dim after
+  another, so the order of the two dims decides how many separate
+  pieces of the file one read is. One day of all hrus (the serial
+  read, and an MPI rank at a window of 1) is one piece of a
+  `(time, hru)` file. Many days of a rank's block of hrus (an MPI
+  rank at a deep window) is one piece of a `(hru, time)` file and one
+  piece per day of the other. Measured for CONUS on Hovenweep (128
+  ranks, the whole record, cold, 8 stripes): 81 s from the
+  `(time, hru)` file, 8 s from the `(hru, time)` file. Neither order
+  is the better file, so the models read both.
+- **Decision:**
+  - The order is taken per input from its dim names: `("time", grid)`
+    or `(grid, "time")`. There is no control key.
+  - The values are never transposed or copied after the read. The
+    step that copies one day into the input's `(grid,)` buffer takes
+    a row or a column, by an explicit branch (`window[dd, :]` /
+    `window[:, dd]`) in `Input.advance` and in `ModelMPI.run`.
+  - The answers are the same in either order, bit for bit.
+  - A slow order does not raise: the answers are right, and the piece
+    count is only a stand-in for the cost. A build gives ONE
+    `UserWarning` (rank 0 only under MPI) naming every input, stored
+    without chunks, whose order takes at least 100 times the pieces
+    the other order would for the reads that model makes
+    (`data_io.read_pieces`, `data_io.slow_order_note`). Both orders
+    are judged by that one rule.
+  - `(time, hru)` stays what `translate_domain` and
+    `write_mpi_input_file` write. The other order is a copy of an
+    existing file (`utils.transpose_netcdf`), not a second parse of
+    the CBH text.
+- **For users:**
+  - `python -m pws_phoenix.utils.transpose_netcdf SOURCE PATH`;
+    `translate_domain(..., cbh_transpose=True)` (`--cbh-transpose`)
+    writes `cbh_transpose.nc` beside `cbh.nc`;
+    `write_mpi_input_file(..., transpose=True)`.
+  - Which file a run reads is the user's choice.
+    `model_from_translation` reads the yaml's `forcing_file`, the
+    `(time, hru)` one.
+  - The advice and the table of piece counts:
+    `machine_probes/README.md` "The order of the dims decides the
+    read".
+  - A chunked input and an input given in memory are never warned
+    about.
+  - The transposed copy holds one whole variable in memory while it
+    is written (7.9 GB for a CONUS forcing variable).
+- **Where:** `Input`, `read_pieces`, `slow_order_note`,
+  `warn_slow_order` in `pws_phoenix/data_io.py`;
+  `Model._add_process_fields`, `ModelMPI._build`, `ModelMPI.run`;
+  `pws_phoenix/utils/transpose_netcdf.py`; `machine_probes/`;
+  `tests/test_input.py`, `tests/test_dim_order.py`,
+  `tests/test_transpose_netcdf.py`,
+  `tests/test_transposed_stream_mpi.py` (what mpixarray does with a
+  `(hru, time)` file), `tests/test_window_depth_mpi.py`.
+- **Left unfinished:**
+  - No read is timed for the serial one-day read of a `(hru, time)`
+    or chunked file, nor for a window between 1 day and the whole
+    record.
+  - A run entry that picks the transposed forcing file of a
+    translated domain (`assemble_from_translation` always takes
+    `forcing_file`).
+  - A windowed serial read from disk (several days per read).
+  - Whether a file is stored without chunks is read from
+    `encoding["chunksizes"]`, which xarray's netCDF readers set. A
+    zarr-backed input is never judged.
+
 ## Checks
 
 ### Budgets as data in the owning Process
@@ -1451,10 +1521,12 @@ Terms:
   `tests/test_window_depth_mpi.py` (depths 7 and the whole record
   against depth 1, and the three raises).
 - **Left unfinished:**
-  - No timing on a large domain. A rank's whole-record block read
-    from the unchunked `(time, nhru)` CONUS forcing file is 17,167
-    separate pieces per variable: measure it before choosing a chunk
-    shape or a transposed layout.
+  - No timing of a whole run on a large domain. The whole-record
+    read is measured (`machine_probes/`): from the unchunked
+    `(time, nhru)` CONUS forcing file a rank's block is 17,167
+    separate pieces per variable, and `ModelMPI` now also reads a
+    `(nhru, time)` file, where it is one (the entry "An input on
+    either order of its two dims", under IO).
   - At a depth between 1 and the whole stream, each window's read
     allocates a new array. A reused buffer needs a read into a
     preallocated array, which `.values` does not offer.
@@ -1571,6 +1643,12 @@ Terms:
   - An existing product is reused when it was written from the files
     the control names, and raises when it was written from others.
     Controls that name the same CBH files share one forcing file.
+  - `cbh_transpose=True` (`--cbh-transpose`) also writes
+    `cbh_transpose.nc`, a copy of the forcing file on `(nhru, time)`,
+    listed in the yaml as `forcing_file_transpose` (the entry "An
+    input on either order of its two dims", under IO). A `force` that
+    rewrites the forcing file raises rather than leave an older copy
+    behind.
   - A run takes one argument, the yaml:
     `model_from_translation(yaml)`, over the kit from
     `assemble_from_translation(yaml)`. Both share

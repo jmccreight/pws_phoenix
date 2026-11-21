@@ -56,6 +56,7 @@ def test_products(domain):
         "control_sha256": hashlib.sha256(NHM.read_bytes()).hexdigest(),
         "control_copy": "nhm.control",
         "forcing_file": "cbh.nc",
+        "forcing_file_transpose": None,
         "forcing_sources": NHM_CBH,
         "parameter_file": "nhm_parameters.nc",
         "parameter_sources": [str((DRB_DIR / "myparam.param").resolve())],
@@ -215,10 +216,84 @@ def test_preprocessed_step(tmp_path, monkeypatch):
     assert len(derived) == 4
 
 
+def test_cbh_transpose(tmp_path, capsys, monkeypatch):
+    """--cbh-transpose: the forcing file's copy on (nhru, time), listed
+    in the yaml, reused on a rerun, never left behind by a rewrite of
+    the forcing file."""
+    out_dir = tmp_path / "domain"
+    forcing = out_dir / "cbh.nc"
+    transposed = out_dir / "cbh_transpose.nc"
+    arguments = [str(NHM), "--out", str(out_dir), "--only", "cbh"]
+    main(arguments + ["--cbh-transpose"])
+    yaml_path = out_dir / "nhm_translation.yaml"
+    assert capsys.readouterr().out.splitlines()[-1] == str(yaml_path)
+    info = yaml.safe_load(yaml_path.read_text())
+    assert info["forcing_file"] == "cbh.nc"
+    assert info["forcing_file_transpose"] == "cbh_transpose.nc"
+    assert not [pp for pp in out_dir.iterdir() if pp.suffix == ".partial"]
+
+    assert cbh.cbh_netcdf_sources(transposed) == NHM_CBH
+    with xr.open_dataset(forcing) as ds, xr.open_dataset(transposed) as copy:
+        assert sorted(map(str, copy.data_vars)) == sorted(NHM_CBH)
+        for name in NHM_CBH:
+            assert ds[name].dims == ("time", "nhru")
+            assert copy[name].dims == ("nhru", "time")
+            assert copy[name].dtype == ds[name].dtype
+            assert (copy[name].values == ds[name].values.T).all()
+        assert (copy["time"].values == ds["time"].values).all()
+
+    # a rerun parses nothing and writes neither file
+    inodes = (forcing.stat().st_ino, transposed.stat().st_ino)
+    with monkeypatch.context() as patch:
+        patch.setattr(cbh, "load_cbh", _no_parse)
+        translate_domain(NHM, out_dir, only=["cbh"], cbh_transpose=True)
+        # without the option the copy is left, and stays listed
+        yaml_path = translate_domain(NHM, out_dir, only=["cbh"])
+    assert (forcing.stat().st_ino, transposed.stat().st_ino) == inodes
+    info = yaml.safe_load(yaml_path.read_text())
+    assert info["forcing_file_transpose"] == "cbh_transpose.nc"
+
+    # a rewrite of the forcing file alone would leave the old copy
+    with pytest.raises(FileExistsError, match="--cbh-transpose"):
+        translate_domain(NHM, out_dir, only=["cbh"], force=True)
+    assert (forcing.stat().st_ino, transposed.stat().st_ino) == inodes
+    # the other steps do not touch it
+    translate_domain(NHM, out_dir, only=["parameters"], force=True)
+    # with the option both are written again
+    translate_domain(
+        NHM, out_dir, only=["cbh"], force=True, cbh_transpose=True
+    )
+    assert forcing.stat().st_ino != inodes[0]
+    assert transposed.stat().st_ino != inodes[1]
+
+    # a control with other CBH files: neither file is its own
+    control = DRB_DIR / "nhm_stream_temp.control"
+    forcing.unlink()
+    with pytest.raises(FileExistsError, match="--cbh-name"):
+        translate_domain(control, out_dir, only=["parameters"])
+    yaml_path = translate_domain(
+        control, out_dir, cbh_name="humid", only=["cbh"], cbh_transpose=True
+    )
+    info = yaml.safe_load(yaml_path.read_text())
+    assert info["forcing_file"] == "cbh_humid.nc"
+    assert info["forcing_file_transpose"] == "cbh_humid_transpose.nc"
+    assert sorted(
+        cbh.cbh_netcdf_sources(out_dir / "cbh_humid_transpose.nc")
+    ) == ["humidity_hru", "prcp", "tmax", "tmin"]
+    assert cbh.cbh_netcdf_sources(transposed) == NHM_CBH
+
+
 def test_raises_before_writing(tmp_path):
     out_dir = tmp_path / "domain"
     with pytest.raises(ValueError, match="unknown steps"):
         translate_domain(NHM, out_dir, only=["weights"])
+    # names of a transposed copy
+    for cbh_name in ("transpose", "humid_transpose"):
+        with pytest.raises(ValueError, match="name of a transposed copy"):
+            translate_domain(NHM, out_dir, cbh_name=cbh_name)
+    # the transposed copy belongs to the cbh step
+    with pytest.raises(ValueError, match="part of the cbh step"):
+        translate_domain(NHM, out_dir, only=["parameters"], cbh_transpose=True)
     # the preprocessed step alone needs the parameter file
     with pytest.raises(FileNotFoundError, match="parameters step"):
         translate_domain(NHM, out_dir, only=["preprocessed"])

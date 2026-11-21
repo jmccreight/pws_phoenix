@@ -42,11 +42,95 @@ def open_xr(
     return da_ds
 
 
+# An input stored in the order of its dims that gives at least this
+# many times the pieces of the other order, for the reads the model
+# makes, is named in the build warning (slow_order_note).
+READ_PIECES_WARN_RATIO = 100
+
+
+def read_pieces(
+    n_block: int, n_grid: int, n_days: int, n_time: int, time_first: bool
+) -> int:
+    """The number of unbroken runs of a file that one read takes, for a
+    variable stored without chunks on ("time", <grid>) (`time_first`)
+    or on (<grid>, "time").
+
+    One read is `n_days` neighbouring days of the variable's `n_time`,
+    for `n_block` neighbouring elements of the grid's `n_grid`. A read
+    that takes ALL of the last dim is one run; any other read is one
+    run per element of the first dim it covers
+    (machine_probes/README.md "The order of the dims decides the
+    read")."""
+    if time_first:
+        return 1 if n_block == n_grid else n_days
+    return 1 if n_days == n_time else n_block
+
+
+def slow_order_note(
+    name: str,
+    data: xr.DataArray,
+    n_days: int,
+    n_block: int | None = None,
+) -> str | None:
+    """One line for the build warning of a Model (warn_slow_order) when
+    the input `name` is stored in the slower order of its dims for the
+    reads the model makes; None when it is not.
+
+    `data` is the variable as its file holds it, ALL of its time, on
+    ("time", <grid>) or (<grid>, "time"). One read is `n_days` days of
+    `n_block` grid elements (None = the whole grid). The slower order
+    is the one that takes at least READ_PIECES_WARN_RATIO times the
+    pieces (read_pieces) of the other; both orders are judged by that
+    one rule.
+
+    Only a variable stored without chunks is judged: chunks put a
+    block's bytes together in either order, and an array that came
+    from no file has no stored order. xarray's netCDF readers set
+    encoding["chunksizes"] to None for a variable stored without
+    chunks."""
+    if data.encoding.get("chunksizes", ()) is not None:
+        return None
+    time_first = data.dims[0] == "time"
+    grid_dim = data.dims[1] if time_first else data.dims[0]
+    n_time = data.sizes["time"]
+    n_grid = data.sizes[grid_dim]
+    if n_block is None:
+        n_block = n_grid
+    pieces = read_pieces(n_block, n_grid, n_days, n_time, time_first)
+    other = read_pieces(n_block, n_grid, n_days, n_time, not time_first)
+    if pieces < READ_PIECES_WARN_RATIO * other:
+        return None
+    return (
+        f"'{name}' on {data.dims}: one read ({n_days} of {n_time} days, "
+        f"{n_block} of {n_grid} {grid_dim}) takes {pieces} pieces of the "
+        f"file; on {data.dims[::-1]} it would take {other}."
+    )
+
+
+def warn_slow_order(notes: list[str]) -> None:
+    """ONE UserWarning for a build, naming every input slow_order_note
+    gave a line for. Nothing when there is none."""
+    if notes:
+        warnings.warn(
+            "Input(s) stored in the slower order of their dims for the "
+            "reads this model makes. The answers are the same in "
+            "either order; the reads take longer. See "
+            "machine_probes/README.md, 'The order of the dims decides "
+            "the read'.\n  " + "\n  ".join(notes),
+            UserWarning,
+        )
+
+
 class Input:
     """Time-varying input wrapper.
 
     Wraps a DataArray (from file or memory), advances through time steps,
     and exposes current_values for the current time step.
+
+    The data are on ("time", <grid>) or on (<grid>, "time"): the order
+    is taken from the dim names and the same values are served either
+    way. What each order costs to read from a file is in
+    machine_probes/README.md "The order of the dims decides the read".
     """
 
     def __init__(
@@ -61,6 +145,16 @@ class Input:
             self._input_file = data_or_file
         else:
             self.data = data_or_file
+        dims = self.data.dims
+        if len(dims) != 2 or dims.count("time") != 1:
+            if self._input_file is not None:
+                self.data.close()
+            raise ValueError(
+                f"Input {self.data.name!r} is on dims {dims}: expected "
+                "('time', <grid>) or (<grid>, 'time')."
+            )
+        # which axis is time, decided once from the dim names
+        self._time_first: bool = dims[0] == "time"
         if load:
             self.data = self.data.load()
         # only an array in memory is flagged: on a file-backed one,
@@ -71,9 +165,11 @@ class Input:
         # float64 whatever the data hold: a float32 forcing file must
         # not hand the kernels a float32 array (the per-step copy
         # widens, exactly)
-        self._current_values = (np.nan * self.data[0, :]).astype(
-            np.float64, copy=False
-        )
+        if self._time_first:
+            first = self.data[0, :]
+        else:
+            first = self.data[:, 0]
+        self._current_values = (np.nan * first).astype(np.float64, copy=False)
         self._closed = False
         # (scale, offset) of a units conversion; see set_conversion
         self._conversion: tuple[float, float] | None = None
@@ -98,9 +194,14 @@ class Input:
         """Advance current_values to the next time step."""
         self._current_index += np.int64(1)
         if self._data_values is not None:
-            self._current[:] = self._data_values[self._current_index]
-        else:
+            if self._time_first:
+                self._current[:] = self._data_values[self._current_index]
+            else:
+                self._current[:] = self._data_values[:, self._current_index]
+        elif self._time_first:
             self._current[:] = self.data[self._current_index, :].values
+        else:
+            self._current[:] = self.data[:, self._current_index].values
         if self._conversion is not None:
             scale, offset = self._conversion
             self._current *= scale

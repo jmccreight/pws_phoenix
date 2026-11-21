@@ -21,7 +21,8 @@ from pws_phoenix.model import Model
 from pws_phoenix.prms_translate import model_from_control
 
 CONTROL_FILE = PWS_TEST_DATA / "drb_2yr" / "nhm.control"
-N_MAX = int(numba.config.NUMBA_NUM_THREADS)
+# numba sets the attribute when it is imported: mypy cannot see it
+N_MAX = int(numba.config.NUMBA_NUM_THREADS)  # type: ignore[attr-defined]
 N_SEVERAL = min(3, N_MAX)
 N_STEPS = 30
 DT = np.float64(86400.0)

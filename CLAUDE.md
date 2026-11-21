@@ -300,6 +300,21 @@ Rules:
   opened once). A file-backed input stays on disk and one time row is
   read per step, unless `control["load_all"]` is set. The per-step
   buffer is float64 whatever the data hold.
+- An input is on `("time", grid)` or `(grid, "time")`, in serial and
+  under MPI: the order is taken from the dim names, per input, and
+  the answers are the same bit for bit. Rules:
+  - Never transpose or copy what was read. The step takes a row or a
+    column by an explicit branch (`Input.advance`, `ModelMPI.run`).
+  - A slow order warns, it does not raise: ONE `UserWarning` per
+    build (rank 0 under MPI) for inputs stored without chunks whose
+    order takes at least 100 times the pieces of the other
+    (`data_io.slow_order_note`).
+  - `(time, grid)` is what the translation writes. The other order is
+    a copy: `utils.transpose_netcdf`,
+    `translate_domain(cbh_transpose=True)`,
+    `write_mpi_input_file(transpose=True)`.
+  - Reasons: `docs/design_description.md` "An input on either order
+    of its two dims"; the read costs: `machine_probes/README.md`.
 - `control["start_time"]` / `control["end_time"]` (each optional,
   both included) restrict the run: every input is sliced to them (a
   view, not a copy), and a bound that is not a time in an input
@@ -345,9 +360,11 @@ would build a prng and write `seed.json` on rank 0):
   any depth (`tests/test_window_depth_mpi.py`).
 - Inputs: a time-dimensioned file variable is windowed by
   `as_iterable` and shadowed by a `(grid,)` buffer, refilled each
-  step with one row of the window read from `step.mpi.src`. Static
-  parameters stay whole on `ds_mpi`, loaded into memory so their
-  buffers are shared by reference.
+  step with one day of the window read from `step.mpi.src`.
+  mpixarray hands the window back in the FILE's order, `(depth,
+  block)` or `(block, depth)` (`tests/test_transposed_stream_mpi.py`).
+  Static parameters stay whole on `ds_mpi`, loaded into memory so
+  their buffers are shared by reference.
 - Initial state is NOT in the input file (see "Initial state").
 - Output is routed by OWNING grid. Distributed-grid variables stream
   through the mpixarray NetCDF writer

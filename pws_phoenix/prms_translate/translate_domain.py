@@ -3,6 +3,7 @@ file -> pws_phoenix input files in a flat domain directory.
 
     python -m pws_phoenix.prms_translate.translate_domain \\
         CONTROL_FILE --out DOMAIN_DIR [--cbh-name NAME] \\
+        [--cbh-transpose] \\
         [--only {cbh,parameters,preprocessed} ...] [--force]
 
 The domain directory is FLAT (the layout of test_data/<domain>/): one
@@ -11,6 +12,7 @@ control's own files named by the control file's stem.
 
     DOMAIN_DIR/
         cbh.nc                      (or cbh_<NAME>.nc)
+        cbh_transpose.nc            (or cbh_<NAME>_transpose.nc; optional)
         <stem>.control              a copy of the control file
         <stem>_parameters.nc
         <stem>_preprocessed.nc
@@ -20,6 +22,14 @@ control's own files named by the control file's stem.
   (``cbh.write_cbh_netcdf``). Controls that name the same CBH files
   share it; a control with other CBH files needs its own name
   (``cbh_name``).
+- ``cbh_transpose.nc``: written only when asked for
+  (``cbh_transpose``): a copy of ``cbh.nc`` with every variable on
+  ``(nhru, time)`` instead of ``(time, nhru)``
+  (``utils.transpose_netcdf``), the same ``source_file`` attributes.
+  Both models read either file and give the same answers; which one
+  reads faster depends on the run (machine_probes/README.md "The
+  order of the dims decides the read"). The yaml lists it as
+  ``forcing_file_transpose``; a run is pointed at it by the user.
 - ``<stem>_parameters.nc``: everything in the control's parameter
   file(s), as ``readers.load_parameters`` returns it. Its
   ``source_files`` attribute holds their resolved paths, one per line.
@@ -62,6 +72,7 @@ from pws_phoenix.prms_translate.cbh import (
 from pws_phoenix.prms_translate.control import from_control
 from pws_phoenix.prms_translate.preprocess import derive_preprocessed
 from pws_phoenix.prms_translate.readers import load_control, load_parameters
+from pws_phoenix.utils.transpose_netcdf import transpose_netcdf
 
 STEPS = ("cbh", "parameters", "preprocessed")
 
@@ -84,13 +95,23 @@ def translate_domain(
     cbh_name: str | None = None,
     only: Sequence[str] | None = None,
     force: bool = False,
+    cbh_transpose: bool = False,
 ) -> pl.Path:
     """Translate the files `control_file` names into `out_dir` (see
     the module docstring for the products). Returns the path of
     ``<stem>_translation.yaml``.
 
     `cbh_name`: the forcing file is ``cbh_<cbh_name>.nc`` instead of
-    ``cbh.nc``.
+    ``cbh.nc``. A name that is ``transpose`` or ends in ``_transpose``
+    raises: it is the name of a transposed copy.
+
+    `cbh_transpose`: the ``cbh`` step also writes the transposed copy
+    of the forcing file, ``<forcing stem>_transpose.nc``
+    (``utils.transpose_netcdf``; one whole variable in memory at a
+    time). It raises when the ``cbh`` step is not selected. Without
+    it an existing transposed copy is left as it is and stays listed
+    in the yaml; a ``force`` that rewrites the forcing file raises
+    when that would leave such a copy behind.
 
     `only`: the steps to run, of ``STEPS`` (default: all). The control
     copy and the yaml are written in every case. The yaml lists a
@@ -119,6 +140,20 @@ def translate_domain(
         raise ValueError(
             f"translate_domain: unknown steps {unknown}; the steps are "
             f"{list(STEPS)}."
+        )
+
+    if cbh_name is not None and (
+        cbh_name == "transpose" or cbh_name.endswith("_transpose")
+    ):
+        raise ValueError(
+            f"translate_domain: cbh_name {cbh_name!r} is the name of a "
+            "transposed copy (cbh_transpose.nc, "
+            "cbh_<NAME>_transpose.nc): choose another."
+        )
+    if cbh_transpose and "cbh" not in steps:
+        raise ValueError(
+            "translate_domain: cbh_transpose (--cbh-transpose) is part "
+            f"of the cbh step, which is not among the steps {list(steps)}."
         )
 
     cfg = from_control(load_control(control_file), control_file)
@@ -174,8 +209,27 @@ def translate_domain(
             hint=", or give this control its own forcing file "
             "(cbh_name, --cbh-name)",
         )
+    # its transposed copy, when there is or will be one
+    transposed = forcing.with_name(f"{forcing.stem}_transpose.nc")
+    if transposed.exists() and not (rewrite and cbh_transpose):
+        _raise_if_other_sources(
+            transposed,
+            cbh_netcdf_sources(transposed),
+            forcing_sources,
+            hint=", or give this control its own forcing file "
+            "(cbh_name, --cbh-name)",
+        )
+        if rewrite:
+            raise FileExistsError(
+                f"{transposed} exists and would be left as the copy of "
+                f"the {forcing.name} this call rewrites: pass "
+                "cbh_transpose=True (--cbh-transpose) to rewrite both, "
+                "or remove it."
+            )
     if "cbh" in steps:
         write_cbh_netcdf(cfg.cbh_paths, forcing, force=force)
+    if cbh_transpose:
+        transpose_netcdf(forcing, transposed, force=force)
 
     # -- the parameter file --
     parameter_sources = [str(pp) for pp in cfg.param_files]
@@ -222,6 +276,9 @@ def translate_domain(
         "control_sha256": hashlib.sha256(control_bytes).hexdigest(),
         "control_copy": control_copy.name,
         "forcing_file": forcing.name if forcing.exists() else None,
+        "forcing_file_transpose": (
+            transposed.name if transposed.exists() else None
+        ),
         "forcing_sources": forcing_sources,
         "parameter_file": parameters.name if parameters.exists() else None,
         "parameter_sources": parameter_sources,
@@ -254,6 +311,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="write the forcing file as cbh_<CBH_NAME>.nc, not cbh.nc",
     )
     parser.add_argument(
+        "--cbh-transpose",
+        action="store_true",
+        help="also write the forcing file's transposed copy, "
+        "(nhru, time): cbh_transpose.nc, or cbh_<CBH_NAME>_transpose.nc",
+    )
+    parser.add_argument(
         "--only",
         nargs="+",
         choices=STEPS,
@@ -273,6 +336,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             cbh_name=args.cbh_name,
             only=args.only,
             force=args.force,
+            cbh_transpose=args.cbh_transpose,
         )
     )
 
