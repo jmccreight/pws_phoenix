@@ -15,6 +15,8 @@ A domain translated ahead of time (``translate_domain``: the CBH text
 and the parameter file written once as netCDF) has the same two
 layers, ``assemble_from_translation`` and ``model_from_translation``.
 They take the path of the domain's ``<stem>_translation.yaml``.
+With ``hru_block=(start, stop)`` they read and build those hrus
+alone, with the forcing in memory.
 
 These live HERE and not on Model because the core never imports
 prms_translate -- the dependency rule decides the API home. The
@@ -294,22 +296,27 @@ def _assemble(
     params: xr.Dataset,
     forcing: Callable[[str], xr.DataArray | pl.Path],
     control: dict[str, Any] | None,
-    preprocessed: str | pl.Path | None,
+    preprocessed: str | pl.Path | xr.Dataset | None,
     processes: Collection[str] | None = None,
 ) -> ModelKit:
     """A run configuration and its parameters -> a ModelKit: the part
     of assembly that does not depend on where the parameters and the
     forcings were read from. `forcing(name)` returns what the Model is
     given for the CBH input `name` (a key of ``cfg.cbh_paths``): a
-    (time, nhru) DataArray, or the path of a file that holds it.
+    DataArray on time and nhru, or the path of a file that holds it.
     `control`, `preprocessed` and `processes` are as in
-    assemble_from_control. The kit's ``config`` stays the control
-    file's record: its ``classes`` are all of the control file's."""
+    assemble_from_control; `preprocessed` may also be the artifacts
+    themselves, already read, and those are used WITHOUT the
+    verification (_assemble_hru_block). The kit's ``config`` stays the
+    control file's record: its ``classes`` are all of the control
+    file's."""
     params = prms_parameter_defaults(params)
     classes = _kept_classes(cfg.classes, processes)
     grids = {SLOT_GRIDS[slot] for slot in classes}
     artifacts: xr.Dataset | None = None
-    if preprocessed is not None:
+    if isinstance(preprocessed, xr.Dataset):
+        artifacts = preprocessed
+    elif preprocessed is not None:
         from pws_phoenix.prms_translate.preprocess import verify_preprocessed
 
         artifacts = xr.load_dataset(preprocessed)
@@ -569,6 +576,8 @@ def assemble_from_translation(
     translation_yaml: str | pl.Path,
     control: dict[str, Any] | None = None,
     processes: Collection[str] | None = None,
+    hru_block: tuple[int, int] | None = None,
+    transposed: bool = False,
 ) -> ModelKit:
     """A domain translated ahead of time -> a ModelKit.
     `translation_yaml` is the ``<stem>_translation.yaml`` that
@@ -581,18 +590,48 @@ def assemble_from_translation(
       ``preprocessed_file`` when it names one (else they are derived
       here, as in assemble_from_control).
     - Each forcing entry of the kit's process_dict is the PATH of the
-      yaml's ``forcing_file``: the Model opens it once and reads one
-      time row per step. That file holds the whole record, so the
-      kit's control carries the control file's ``start_time`` and
-      ``end_time``; ones given in `control` take precedence.
+      yaml's ``forcing_file``, on (time, nhru), or with
+      ``transposed=True`` of its ``forcing_file_transpose``, on
+      (nhru, time) (``translate_domain(cbh_transpose=True)`` writes
+      it): the Model opens it once and reads one day per step. The
+      answers are the same; the caller chooses the file. That file
+      holds the whole record, so the kit's control carries the control
+      file's ``start_time`` and ``end_time``; ones given in `control`
+      take precedence.
 
     The kit is otherwise that of assemble_from_control on the original
     control file. `control` and `processes` are as there.
 
+    ``hru_block=(start, stop)`` gives the kit of the hrus
+    ``[start, stop)`` alone (0-based positions on ``nhru``), and only
+    those hrus are read:
+
+    - Every kept process must be on the nhru grid: name them in
+      `processes`. Nothing on that grid reads another hru or the
+      channel, so the blocks of a domain run as separate models and
+      give the hru variables of the whole one.
+    - Parameters: each variable on ``nhru`` is read for the block
+      alone; the others are read whole.
+    - The derived hru parameters (the solar tables, ``hru_in_to_cf``)
+      are read from the ``preprocessed_file`` for the block alone and
+      are NOT verified against the parameters: the file's sha256
+      stamps are of whole arrays. ``verify_translation`` makes that
+      check once for the domain.
+    - Each forcing entry is an in-memory DataArray of the block over
+      ``start_time`` to ``end_time``, read once here in the file's
+      dtype and dim order (4 bytes x days x hrus of the block per
+      forcing for a float32 file). Over a long record the transposed
+      file is the one whose block is stored together.
+    - PRMS's rule for ``pref_flow_infil_frac`` (prms_parameter_defaults:
+      negative on every hru) is judged on the whole domain, so every
+      block applies it or none does.
+
     Raises when the control copy is not the control file that was
-    translated (the yaml's ``control_sha256``), and when the yaml
-    names no forcing file or no parameter file (a step that was not
-    run)."""
+    translated (the yaml's ``control_sha256``), when the yaml names no
+    forcing file or no parameter file (a step that was not run) or,
+    with ``transposed=True``, no transposed copy, and for an
+    `hru_block` outside the domain or with a kept process off the
+    nhru grid."""
     yaml_path = pl.Path(translation_yaml)
     with open(yaml_path) as ff:
         info = yaml.safe_load(ff)
@@ -630,33 +669,140 @@ def assemble_from_translation(
         name: pl.Path(pp) for name, pp in info["forcing_sources"].items()
     }
 
-    params = xr.load_dataset(domain_dir / info["parameter_file"])
-    forcing_file = domain_dir / info["forcing_file"]
+    forcing_key = "forcing_file_transpose" if transposed else "forcing_file"
+    if info.get(forcing_key) is None:
+        # only the transposed copy can be missing here
+        raise FileNotFoundError(
+            f"{yaml_path} names no {forcing_key}: run translate_domain "
+            "with cbh_transpose=True (--cbh-transpose)."
+        )
+    parameter_file = domain_dir / info["parameter_file"]
+    forcing_file = domain_dir / info[forcing_key]
     preprocessed = info.get("preprocessed_file")
+    preprocessed_file = (
+        None if preprocessed is None else domain_dir / preprocessed
+    )
     kit_control = {
         "start_time": cfg.start_time,
         "end_time": cfg.end_time,
     } | (control or {})
+    if hru_block is not None:
+        return _assemble_hru_block(
+            cfg,
+            parameter_file,
+            forcing_file,
+            preprocessed_file,
+            kit_control,
+            processes,
+            hru_block,
+        )
     return _assemble(
         cfg,
-        params,
+        xr.load_dataset(parameter_file),
         lambda name: forcing_file,
         kit_control,
-        None if preprocessed is None else domain_dir / preprocessed,
+        preprocessed_file,
         processes,
     )
+
+
+# the derived parameters on the hru grid in a preprocessed file
+_HRU_ARTIFACT_NAMES = ("soltab_potsw", "soltab_horad_potsw", "hru_in_to_cf")
+# what prms_parameter_defaults reads
+_PARAMETER_DEFAULTS_NAMES = (
+    "pref_flow_den",
+    "hru_type",
+    "pref_flow_infil_frac",
+)
+
+
+def _assemble_hru_block(
+    cfg: PrmsRunConfig,
+    parameter_file: pl.Path,
+    forcing_file: pl.Path,
+    preprocessed_file: pl.Path | None,
+    control: dict[str, Any],
+    processes: Collection[str] | None,
+    hru_block: tuple[int, int],
+) -> ModelKit:
+    """assemble_from_translation for the hrus ``[start, stop)`` alone
+    (its docstring has the rules). Nothing on ``nhru`` is held at the
+    domain's extent when this returns: each file is opened, the block
+    is read from it, and it is closed."""
+    off_grid = [
+        slot
+        for slot in _kept_classes(cfg.classes, processes)
+        if SLOT_GRIDS[slot] != "nhru"
+    ]
+    if off_grid:
+        raise ValueError(
+            f"hru_block cuts the nhru grid only, and {off_grid} are on "
+            "another grid: name the nhru processes to keep in "
+            "processes=."
+        )
+    start, stop = hru_block
+    block = {"nhru": slice(start, stop)}
+
+    # cache=False: the three arrays read whole for the check below
+    # are dropped after it. Cached, the block's cut of them would be
+    # a view that keeps the whole arrays.
+    with xr.open_dataset(parameter_file, cache=False) as whole:
+        nhru = whole.sizes["nhru"]
+        if not 0 <= start < stop <= nhru:
+            raise ValueError(
+                f"hru_block = {hru_block}: needs 0 <= start < stop <= "
+                f"{nhru}, the domain's number of hrus."
+            )
+        # the pref_flow_infil_frac rule on the whole domain: raises on
+        # a mix that a block could hide. The result is not kept;
+        # _assemble applies the rule to the block.
+        prms_parameter_defaults(
+            whole[[nn for nn in _PARAMETER_DEFAULTS_NAMES if nn in whole]]
+        )
+        params = whole.isel(block).load()
+
+    artifacts: xr.Dataset | None = None
+    if preprocessed_file is not None:
+        with xr.open_dataset(preprocessed_file) as whole:
+            artifacts = whole[list(_HRU_ARTIFACT_NAMES)].isel(block).load()
+
+    # the block's forcing over the run, held in memory for the life of
+    # the kit: one array per forcing, as the file stores it (dtype and
+    # dim order), allocated by the read
+    bounds = [
+        None if control.get(key) is None else np.datetime64(control[key], "D")
+        for key in ("start_time", "end_time")
+    ]
+    with xr.open_dataset(forcing_file) as whole:
+        cut = whole.sel(time=slice(*bounds)).isel(block)
+        # as load_cbh gives a forcing: no coordinate but time
+        cut = cut.drop_vars([cc for cc in cut.coords if cc != "time"])
+        return _assemble(
+            cfg,
+            params,
+            lambda name: cut[name].load(),
+            control,
+            artifacts,
+            processes,
+        )
 
 
 def model_from_translation(
     translation_yaml: str | pl.Path,
     control: dict[str, Any] | None = None,
     processes: Collection[str] | None = None,
+    hru_block: tuple[int, int] | None = None,
+    transposed: bool = False,
 ) -> Model:
     """The one-liner: a domain translated ahead of time -> a
     constructed (and thereby validated) pws_phoenix Model. See
     assemble_from_translation for the kit underneath."""
     return assemble_from_translation(
-        translation_yaml, control, processes
+        translation_yaml,
+        control,
+        processes,
+        hru_block=hru_block,
+        transposed=transposed,
     ).model()
 
 
