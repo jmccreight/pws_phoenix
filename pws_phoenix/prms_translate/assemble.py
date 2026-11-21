@@ -16,7 +16,8 @@ and the parameter file written once as netCDF) has the same two
 layers, ``assemble_from_translation`` and ``model_from_translation``.
 They take the path of the domain's ``<stem>_translation.yaml``.
 With ``hru_block=(start, stop)`` they read and build those hrus
-alone, with the forcing in memory.
+alone, with the forcing in memory; ``verify_translation`` makes, once,
+the checks that need the whole domain.
 
 These live HERE and not on Model because the core never imports
 prms_translate -- the dependency rule decides the API home. The
@@ -572,6 +573,52 @@ def model_from_control(
     ).model()
 
 
+def _read_translation(
+    translation_yaml: str | pl.Path,
+) -> tuple[pl.Path, dict[str, Any], PrmsRunConfig]:
+    """The yaml of a translated domain: its path, its content, and
+    the run configuration of the control copy beside it. Raises as
+    assemble_from_translation documents for the control copy and for
+    a yaml that names no forcing file or no parameter file."""
+    yaml_path = pl.Path(translation_yaml)
+    with open(yaml_path) as ff:
+        info = yaml.safe_load(ff)
+    domain_dir = yaml_path.parent
+
+    control_copy = domain_dir / info["control_copy"]
+    sha256 = hashlib.sha256(control_copy.read_bytes()).hexdigest()
+    if sha256 != info["control_sha256"]:
+        raise ValueError(
+            f"{control_copy} is not the control file that {yaml_path} "
+            f"was written from (sha256 {sha256}, the yaml records "
+            f"{info['control_sha256']}): translate the domain again."
+        )
+    not_run = [
+        key for key in ("forcing_file", "parameter_file") if info[key] is None
+    ]
+    if not_run:
+        raise FileNotFoundError(
+            f"{yaml_path} names no {' and no '.join(not_run)}: run "
+            "translate_domain with those steps."
+        )
+
+    cfg = from_control(load_control(control_copy), control_copy)
+    if cfg.dyn_param_paths:
+        raise NotImplementedError(
+            f"{control_copy} names dynamic-parameter files "
+            f"({sorted(cfg.dyn_param_paths)}): a translated domain "
+            "does not hold them yet."
+        )
+    # from_control resolved the copy's file entries against the copy's
+    # directory, but they are relative to the ORIGINAL's: the files
+    # that were read are the ones the yaml records
+    cfg.param_files = [pl.Path(pp) for pp in info["parameter_sources"]]
+    cfg.cbh_paths = {
+        name: pl.Path(pp) for name, pp in info["forcing_sources"].items()
+    }
+    return yaml_path, info, cfg
+
+
 def assemble_from_translation(
     translation_yaml: str | pl.Path,
     control: dict[str, Any] | None = None,
@@ -632,42 +679,8 @@ def assemble_from_translation(
     with ``transposed=True``, no transposed copy, and for an
     `hru_block` outside the domain or with a kept process off the
     nhru grid."""
-    yaml_path = pl.Path(translation_yaml)
-    with open(yaml_path) as ff:
-        info = yaml.safe_load(ff)
+    yaml_path, info, cfg = _read_translation(translation_yaml)
     domain_dir = yaml_path.parent
-
-    control_copy = domain_dir / info["control_copy"]
-    sha256 = hashlib.sha256(control_copy.read_bytes()).hexdigest()
-    if sha256 != info["control_sha256"]:
-        raise ValueError(
-            f"{control_copy} is not the control file that {yaml_path} "
-            f"was written from (sha256 {sha256}, the yaml records "
-            f"{info['control_sha256']}): translate the domain again."
-        )
-    not_run = [
-        key for key in ("forcing_file", "parameter_file") if info[key] is None
-    ]
-    if not_run:
-        raise FileNotFoundError(
-            f"{yaml_path} names no {' and no '.join(not_run)}: run "
-            "translate_domain with those steps."
-        )
-
-    cfg = from_control(load_control(control_copy), control_copy)
-    if cfg.dyn_param_paths:
-        raise NotImplementedError(
-            f"{control_copy} names dynamic-parameter files "
-            f"({sorted(cfg.dyn_param_paths)}): a translated domain "
-            "does not hold them yet."
-        )
-    # from_control resolved the copy's file entries against the copy's
-    # directory, but they are relative to the ORIGINAL's: the files
-    # that were read are the ones the yaml records
-    cfg.param_files = [pl.Path(pp) for pp in info["parameter_sources"]]
-    cfg.cbh_paths = {
-        name: pl.Path(pp) for name, pp in info["forcing_sources"].items()
-    }
 
     forcing_key = "forcing_file_transpose" if transposed else "forcing_file"
     if info.get(forcing_key) is None:
@@ -785,6 +798,71 @@ def _assemble_hru_block(
             artifacts,
             processes,
         )
+
+
+def verify_translation(translation_yaml: str | pl.Path) -> None:
+    """Check a translated domain as a WHOLE: what a build of one block
+    of its hrus (``assemble_from_translation(hru_block=...)``) cannot
+    check, because it reads only its block. Call it once, in one
+    process, before the runs that read blocks. It returns nothing and
+    raises on:
+
+    - what assemble_from_translation raises on for the yaml and the
+      control copy;
+    - ``pref_flow_infil_frac`` negative on some hrus but not all
+      (prms_parameter_defaults);
+    - a ``preprocessed_file`` that is not the one derived from the
+      ``parameter_file`` (verify_preprocessed: the sha256 stamps of
+      every derived array and of its inputs);
+    - a forcing file (the ``forcing_file``, and the
+      ``forcing_file_transpose`` when the yaml names one) that lacks a
+      forcing of the control file, whose number of hrus is not the
+      parameter file's, or whose time axis lacks the control file's
+      ``start_time`` or ``end_time``.
+
+    The parameter file and the preprocessed file are read whole; the
+    forcing files are opened and not read."""
+    from pws_phoenix.prms_translate.preprocess import verify_preprocessed
+
+    yaml_path, info, cfg = _read_translation(translation_yaml)
+    domain_dir = yaml_path.parent
+    parameter_file = domain_dir / info["parameter_file"]
+    params = prms_parameter_defaults(xr.load_dataset(parameter_file))
+    nhru = params.sizes["nhru"]
+    if info.get("preprocessed_file") is not None:
+        verify_preprocessed(
+            xr.load_dataset(domain_dir / info["preprocessed_file"]), params
+        )
+
+    for key in ("forcing_file", "forcing_file_transpose"):
+        if info.get(key) is None:
+            continue
+        forcing_file = domain_dir / info[key]
+        with xr.open_dataset(forcing_file) as forcing:
+            missing = sorted(set(cfg.cbh_paths) - set(forcing.data_vars))
+            if missing:
+                raise ValueError(
+                    f"{forcing_file} lacks the forcings {missing} of "
+                    "the control file: translate the domain again."
+                )
+            if forcing.sizes["nhru"] != nhru:
+                raise ValueError(
+                    f"{forcing_file} holds {forcing.sizes['nhru']} "
+                    f"hrus and {parameter_file} holds {nhru}: they are "
+                    "not of one domain."
+                )
+            times = forcing["time"].values
+            for bound_name, bound in (
+                ("start_time", cfg.start_time),
+                ("end_time", cfg.end_time),
+            ):
+                if not (times == bound).any():
+                    raise ValueError(
+                        f"{forcing_file} has no time {bound}, the "
+                        f"control file's {bound_name} (its "
+                        f"{times.size} times run from {times[0]} to "
+                        f"{times[-1]})."
+                    )
 
 
 def model_from_translation(

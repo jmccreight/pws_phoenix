@@ -34,6 +34,7 @@ from pws_phoenix.prms_translate.assemble import (
     prms_initial_state,
     prms_parameter_defaults,
     seg_inflow_from_segment_flow_init,
+    verify_translation,
 )
 from pws_phoenix.prms_translate.assemble_mpi import (
     mpi_model_from_control,
@@ -85,6 +86,7 @@ __all__ = [
     "resolve_classes",
     "seg_inflow_from_segment_flow_init",
     "verify_preprocessed",
+    "verify_translation",
     "volume_map_weights",
     "write_cbh_netcdf",
     "write_mpi_input_file",

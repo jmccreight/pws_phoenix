@@ -13,6 +13,9 @@ drb_2yr's nhm.control (765 hrus) with the six hru processes.
 - PRMS's rule for pref_flow_infil_frac is judged on the whole domain.
 - `transposed=True` without a block hands the Model the path of the
   transposed copy.
+- verify_translation makes, on the whole domain, the checks a block
+  build cannot: a preprocessed file that is not the parameter file's,
+  a forcing file of another extent.
 """
 
 import shutil
@@ -26,6 +29,7 @@ from conftest import PWS_TEST_DATA
 from pws_phoenix.prms_translate import (
     assemble_from_translation,
     model_from_translation,
+    verify_translation,
 )
 from pws_phoenix.prms_translate.parameters import SLOT_GRIDS
 from pws_phoenix.prms_translate.translate_domain import translate_domain
@@ -270,6 +274,8 @@ def test_pref_flow_rule_is_judged_on_the_domain(moved_yaml):
     )
     params.to_netcdf(parameters)
     match = "pref_flow_infil_frac is negative on 200 of 765 hrus"
+    with pytest.raises(ValueError, match=match):
+        verify_translation(moved_yaml)
     for hru_block in BLOCKS:
         with pytest.raises(ValueError, match=match):
             assemble_from_translation(
@@ -344,3 +350,46 @@ def test_no_transposed_copy_raises(moved_yaml, hru_block):
             hru_block=hru_block,
             transposed=True,
         )
+
+
+def test_verify_translation_passes(translation_yaml):
+    verify_translation(translation_yaml)
+
+
+def test_verify_translation_stale_preprocessed_file(moved_yaml):
+    """The parameter file rewritten without its preprocessed file: a
+    block build reads its block of both and cannot tell, the check of
+    the whole domain raises."""
+    parameters = moved_yaml.parent / "nhm_parameters.nc"
+    params = xr.load_dataset(parameters)
+    params["hru_slope"] = params["hru_slope"] * 1.0001
+    params.to_netcdf(parameters)
+    assemble_from_translation(moved_yaml, processes=HRU_SLOTS, hru_block=BLOCK)
+    with pytest.raises(ValueError, match="STALE.*hru_slope"):
+        verify_translation(moved_yaml)
+
+
+FORCING_EDITS = {
+    "fewer_hrus": (
+        lambda ds: ds.isel(nhru=slice(0, 700)),
+        "holds 700 hrus and .* holds 765",
+    ),
+    "shorter_record": (
+        lambda ds: ds.isel(time=slice(0, 700)),
+        "has no time 1980-12-31, the control file's end_time",
+    ),
+    "forcing_dropped": (lambda ds: ds.drop_vars("tmin"), "lacks .*tmin"),
+}
+
+
+@pytest.mark.parametrize("file_name", FILES.keys())
+@pytest.mark.parametrize("edit", FORCING_EDITS.keys())
+def test_verify_translation_forcing_file(moved_yaml, file_name, edit):
+    """Either forcing file rewritten as another one's: fewer hrus (a
+    block build would read the wrong hrus of a file with more), a
+    shorter record, a forcing absent."""
+    change, match = FORCING_EDITS[edit]
+    forcing_file = moved_yaml.parent / file_name
+    change(xr.load_dataset(forcing_file)).to_netcdf(forcing_file)
+    with pytest.raises(ValueError, match=f"{file_name}.*{match}"):
+        verify_translation(moved_yaml)
