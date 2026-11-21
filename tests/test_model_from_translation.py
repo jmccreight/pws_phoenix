@@ -19,6 +19,7 @@ from pws_phoenix.prms_translate import (
     model_from_control,
     model_from_translation,
 )
+from pws_phoenix.prms_translate.parameters import SLOT_GRIDS
 from pws_phoenix.prms_translate.translate_domain import translate_domain
 
 DRB_DIR = PWS_TEST_DATA / "drb_2yr"
@@ -39,6 +40,10 @@ COLLECT_NAMES = [
     "gwres_flow",
     "seg_outflow",
 ]
+# the process_dict slots on the hru grid (nhm.control selects all six)
+# and the collected variables on it
+HRU_SLOTS = [slot for slot, grid in SLOT_GRIDS.items() if grid == "nhru"]
+HRU_COLLECT_NAMES = [name for name in COLLECT_NAMES if name != "seg_outflow"]
 # process_dict entry keys that are not data given by the translation
 STRUCTURE_KEYS = ("class", "discretization", "parameters")
 
@@ -178,6 +183,53 @@ def test_run_equals_control_run(translation_yaml):
     for name in COLLECT_NAMES:
         assert np.isfinite(expected[name]).any()
         np.testing.assert_array_equal(results[name], expected[name])
+
+
+def test_hru_processes_alone(translation_yaml):
+    """`processes` = the six hru slots: the kit has no segment grid
+    and no Maps, and its run gives the hru variables of the full
+    model, identical over the two years (nothing on the hru grid
+    reads the channel)."""
+    control = {"budget": "error", "collect_var_names": HRU_COLLECT_NAMES}
+    with model_from_translation(translation_yaml, control=control) as model:
+        model.run(DT, np.int32(N_TIME))
+        assert model.results is not None
+        expected = model.results.values
+
+    kit = assemble_from_translation(
+        translation_yaml, control=control, processes=HRU_SLOTS
+    )
+    assert sorted(kit.process_dict) == sorted(HRU_SLOTS)
+    assert list(kit.discretizations) == ["nhru"]
+    assert kit.maps == {}
+    # the kit's config stays the control file's record
+    assert "prms_channel" in kit.config.classes
+    with kit.model() as model:
+        assert model.ntime == N_TIME
+        model.run(DT, np.int32(N_TIME))
+        assert model.results is not None
+        results = model.results.values
+
+    for name in HRU_COLLECT_NAMES:
+        assert np.isfinite(expected[name]).any()
+        np.testing.assert_array_equal(results[name], expected[name])
+
+
+def test_processes_from_control():
+    """assemble_from_control takes `processes` too: the same slots,
+    the same structure."""
+    kit = assemble_from_control(NHM, processes=HRU_SLOTS)
+    assert sorted(kit.process_dict) == sorted(HRU_SLOTS)
+    assert list(kit.discretizations) == ["nhru"]
+    assert kit.maps == {}
+
+
+def test_unknown_process_raises(translation_yaml):
+    """A slot the control file does not select raises, naming it."""
+    with pytest.raises(ValueError, match="prms_nonesuch"):
+        assemble_from_translation(
+            translation_yaml, processes=["prms_snow", "prms_nonesuch"]
+        )
 
 
 def test_moved_domain_and_callers_window(moved_yaml):

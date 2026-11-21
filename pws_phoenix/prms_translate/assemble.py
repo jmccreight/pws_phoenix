@@ -43,7 +43,7 @@ CBH_ENTRY_TO_INPUT).
 
 import hashlib
 import pathlib as pl
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -227,11 +227,28 @@ def prms_parameter_defaults(params: xr.Dataset) -> xr.Dataset:
     return params.assign({name: (params["pref_flow_den"].dims, values, attrs)})
 
 
+def _kept_classes(
+    classes: dict[str, type], processes: Collection[str] | None
+) -> dict[str, type]:
+    """The control file's process classes cut to the slots named in
+    `processes` (None = all), in the control file's order."""
+    if processes is None:
+        return dict(classes)
+    unknown = sorted(set(processes) - set(classes))
+    if unknown:
+        raise ValueError(
+            f"processes names {unknown}, which the control file does "
+            f"not select; it selects {list(classes)}."
+        )
+    return {slot: cls for slot, cls in classes.items() if slot in processes}
+
+
 def assemble_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any] | None = None,
     preprocessed: str | pl.Path | None = None,
     cbh_paths: Mapping[str, str | pl.Path] | None = None,
+    processes: Collection[str] | None = None,
 ) -> ModelKit:
     """Legacy PRMS control file -> a ModelKit (see module docstring).
     `control` is the pws_phoenix control dict passed through to the
@@ -246,7 +263,12 @@ def assemble_from_control(
     ``tmax``, ``tmin``, ``humidity_hru``, ...) -- for control files
     whose ``*_day`` entries do not name the files actually present
     (PRMS's template control names ``precip.day``; a domain may ship
-    ``prcp.cbh``)."""
+    ``prcp.cbh``). `processes` names the process_dict slots to KEEP
+    out of those the control file selects (None = all; a name it does
+    not select raises): a grid left without a process is not built,
+    and the Maps are built only when both of their grids are. What
+    the kept processes then lack (an input another process computed)
+    raises here or at the Model build, as for any model."""
     control_file = pl.Path(control_file)
     ctl = load_control(control_file)
     cfg = from_control(ctl, control_file)
@@ -263,6 +285,7 @@ def assemble_from_control(
         ),
         control,
         preprocessed,
+        processes,
     )
 
 
@@ -272,14 +295,19 @@ def _assemble(
     forcing: Callable[[str], xr.DataArray | pl.Path],
     control: dict[str, Any] | None,
     preprocessed: str | pl.Path | None,
+    processes: Collection[str] | None = None,
 ) -> ModelKit:
     """A run configuration and its parameters -> a ModelKit: the part
     of assembly that does not depend on where the parameters and the
     forcings were read from. `forcing(name)` returns what the Model is
     given for the CBH input `name` (a key of ``cfg.cbh_paths``): a
     (time, nhru) DataArray, or the path of a file that holds it.
-    `control` and `preprocessed` are as in assemble_from_control."""
+    `control`, `preprocessed` and `processes` are as in
+    assemble_from_control. The kit's ``config`` stays the control
+    file's record: its ``classes`` are all of the control file's."""
     params = prms_parameter_defaults(params)
+    classes = _kept_classes(cfg.classes, processes)
+    grids = {SLOT_GRIDS[slot] for slot in classes}
     artifacts: xr.Dataset | None = None
     if preprocessed is not None:
         from pws_phoenix.prms_translate.preprocess import verify_preprocessed
@@ -287,13 +315,13 @@ def _assemble(
         artifacts = xr.load_dataset(preprocessed)
         verify_preprocessed(artifacts, params)
 
-    stream_temp = "prms_stream_temp" in cfg.classes
+    stream_temp = "prms_stream_temp" in classes
     # the humidity CBH reaches the segments through the hru->segment
     # humidity Map (PRMSStreamTemp); PRMSStreamTempSegHumidity computes
     # seg_humid from its seg_humidity parameter instead
     cbh_humidity = False
     if stream_temp:
-        leaf = cfg.classes["prms_stream_temp"]
+        leaf = classes["prms_stream_temp"]
         if leaf not in (PRMSStreamTemp, PRMSStreamTempSegHumidity):
             raise NotImplementedError(
                 f"assembly for stream-temp leaf {leaf.__name__} is "
@@ -313,38 +341,40 @@ def _assemble(
     # the segment dis carries the network ids (nhm_seg) beside the
     # topology: no process declares them, but insert_flow_graph needs
     # them to splice by nhm_seg and to label the graph's nodes
-    seg_dis_vars = {"tosegment": params["tosegment"]}
-    if "nhm_seg" in params:
-        seg_dis_vars["nhm_seg"] = params["nhm_seg"]
-    if artifacts is not None:
-        seg_dis_vars["segment_order"] = artifacts["segment_order"]
-        discretizations = {
-            "nhru": Discretization(["nhru"]),
-            "nsegment": Discretization(
+    # a grid is built only when a kept process is on it (`processes`)
+    discretizations: dict[str, Discretization] = {}
+    soltabs: xr.Dataset | None = None
+    if "nhru" in grids:
+        discretizations["nhru"] = Discretization(["nhru"])
+        if artifacts is not None:
+            soltabs = artifacts[["soltab_potsw", "soltab_horad_potsw"]]
+        else:
+            soltabs = compute_soltabs(
+                params[["hru_slope", "hru_aspect", "hru_lat"]],
+                hru_dim="nhru",
+            )
+    if "nsegment" in grids:
+        seg_dis_vars = {"tosegment": params["tosegment"]}
+        if "nhm_seg" in params:
+            seg_dis_vars["nhm_seg"] = params["nhm_seg"]
+        if artifacts is not None:
+            seg_dis_vars["segment_order"] = artifacts["segment_order"]
+            discretizations["nsegment"] = Discretization(
                 ["nsegment"], parameters=xr.Dataset(seg_dis_vars)
-            ),
-        }
-        soltabs = artifacts[["soltab_potsw", "soltab_horad_potsw"]]
-    else:
-        discretizations = {
-            "nhru": Discretization(["nhru"]),
-            "nsegment": Discretization(
+            )
+        else:
+            discretizations["nsegment"] = Discretization(
                 ["nsegment"],
                 parameters=xr.Dataset(seg_dis_vars),
                 topo_order={"segment_order": "tosegment"},
-            ),
-        }
-        soltabs = compute_soltabs(
-            params[["hru_slope", "hru_aspect", "hru_lat"]],
-            hru_dim="nhru",
-        )
+            )
 
     # -- process_dict in NHM (resolution) order; the humidity carrier
     # (CBH humidity only) slots in just before the first segment-grid
     # process --
     process_dict: dict[str, dict[str, Any]] = {}
     carrier_inserted = False
-    for slot, cls in cfg.classes.items():
+    for slot, cls in classes.items():
         grid = SLOT_GRIDS[slot]
         if cbh_humidity and not carrier_inserted and grid == "nsegment":
             process_dict["humidity_carrier"] = {
@@ -370,65 +400,71 @@ def _assemble(
             derivation=derivation,
         )
 
-    vol_derivation = (
-        "prms_translate.volume_map_weights(params): 0/1 assignment "
-        "matrix from hru_segment"
-    )
-    vol_weights = (
-        SparseWeights.from_dataset(artifacts, "weights_vol")
-        if artifacts is not None
-        else volume_map_weights(params)
-    )
-    maps = {
-        "sroff_vol": _map(
-            "sroff_vol", "seg_sroff_vol", vol_weights, vol_derivation
-        ),
-        "ssres_vol": _map(
-            "ssres_flow_vol",
-            "seg_ssres_flow_vol",
-            vol_weights,
-            vol_derivation,
-        ),
-        "gw_vol": _map(
-            "gwres_flow_vol",
-            "seg_gwres_flow_vol",
-            vol_weights,
-            vol_derivation,
-        ),
-    }
-    if stream_temp:
-        agg_weights: dict[str, Any]
-        if artifacts is not None:
-            agg_weights = {
-                kk: SparseWeights.from_dataset(artifacts, f"weights_{kk}")
-                for kk in ("flow", "swrad", "met", "humid")
-            }
-        else:
-            seg_dis = discretizations["nsegment"].parameters
-            assert seg_dis is not None
-            agg_weights = derive_aggregation_weights(
-                params["hru_segment"].values,
-                params["hru_area"].values,
-                params["tosegment"].values,
-                seg_dis["segment_order"].values.astype(np.int64),
-                params["seg_close"].values,
-            )
-        agg_derivation = (
-            "derive_aggregation_weights(hru_segment, hru_area, "
-            "tosegment, segment_order, seg_close)"
+    maps: dict[str, Map] = {}
+    if {"nhru", "nsegment"} <= grids:
+        vol_derivation = (
+            "prms_translate.volume_map_weights(params): 0/1 assignment "
+            "matrix from hru_segment"
+        )
+        vol_weights = (
+            SparseWeights.from_dataset(artifacts, "weights_vol")
+            if artifacts is not None
+            else volume_map_weights(params)
         )
         maps |= {
-            target: _map(source, target, agg_weights[wkey], agg_derivation)
-            for target, (source, wkey) in AGGREGATION_MAP_SPEC.items()
-            if cbh_humidity or target != "seg_humid"
+            "sroff_vol": _map(
+                "sroff_vol", "seg_sroff_vol", vol_weights, vol_derivation
+            ),
+            "ssres_vol": _map(
+                "ssres_flow_vol",
+                "seg_ssres_flow_vol",
+                vol_weights,
+                vol_derivation,
+            ),
+            "gw_vol": _map(
+                "gwres_flow_vol",
+                "seg_gwres_flow_vol",
+                vol_weights,
+                vol_derivation,
+            ),
         }
+        if stream_temp:
+            agg_weights: dict[str, Any]
+            if artifacts is not None:
+                agg_weights = {
+                    kk: SparseWeights.from_dataset(artifacts, f"weights_{kk}")
+                    for kk in ("flow", "swrad", "met", "humid")
+                }
+            else:
+                seg_dis = discretizations["nsegment"].parameters
+                assert seg_dis is not None
+                agg_weights = derive_aggregation_weights(
+                    params["hru_segment"].values,
+                    params["hru_area"].values,
+                    params["tosegment"].values,
+                    seg_dis["segment_order"].values.astype(np.int64),
+                    params["seg_close"].values,
+                )
+            agg_derivation = (
+                "derive_aggregation_weights(hru_segment, hru_area, "
+                "tosegment, segment_order, seg_close)"
+            )
+            maps |= {
+                target: _map(source, target, agg_weights[wkey], agg_derivation)
+                for target, (source, wkey) in AGGREGATION_MAP_SPEC.items()
+                if cbh_humidity or target != "seg_humid"
+            }
 
     # -- the contract drives the supply --
     spec = Model.input_spec(process_dict, maps=maps)
-    extra = {str(nn): soltabs[nn] for nn in soltabs.data_vars}
+    extra = (
+        {}
+        if soltabs is None
+        else {str(nn): soltabs[nn] for nn in soltabs.data_vars}
+    )
     if artifacts is not None:
         extra["hru_in_to_cf"] = artifacts["hru_in_to_cf"]
-    packaged = package_parameters(params, cfg.classes, extra=extra)
+    packaged = package_parameters(params, classes, extra=extra)
     for slot, ds in packaged.items():
         process_dict[slot]["parameters"] = ds
 
@@ -514,18 +550,25 @@ def model_from_control(
     control: dict[str, Any] | None = None,
     preprocessed: str | pl.Path | None = None,
     cbh_paths: Mapping[str, str | pl.Path] | None = None,
+    processes: Collection[str] | None = None,
 ) -> Model:
     """The one-liner: legacy PRMS control file -> a constructed (and
     thereby validated) pws_phoenix Model. See assemble_from_control
-    for the kit underneath (and for `preprocessed` / `cbh_paths`)."""
+    for the kit underneath (and for `preprocessed` / `cbh_paths` /
+    `processes`)."""
     return assemble_from_control(
-        control_file, control, preprocessed=preprocessed, cbh_paths=cbh_paths
+        control_file,
+        control,
+        preprocessed=preprocessed,
+        cbh_paths=cbh_paths,
+        processes=processes,
     ).model()
 
 
 def assemble_from_translation(
     translation_yaml: str | pl.Path,
     control: dict[str, Any] | None = None,
+    processes: Collection[str] | None = None,
 ) -> ModelKit:
     """A domain translated ahead of time -> a ModelKit.
     `translation_yaml` is the ``<stem>_translation.yaml`` that
@@ -544,7 +587,7 @@ def assemble_from_translation(
       ``end_time``; ones given in `control` take precedence.
 
     The kit is otherwise that of assemble_from_control on the original
-    control file. `control` is as there.
+    control file. `control` and `processes` are as there.
 
     Raises when the control copy is not the control file that was
     translated (the yaml's ``control_sha256``), and when the yaml
@@ -600,17 +643,21 @@ def assemble_from_translation(
         lambda name: forcing_file,
         kit_control,
         None if preprocessed is None else domain_dir / preprocessed,
+        processes,
     )
 
 
 def model_from_translation(
     translation_yaml: str | pl.Path,
     control: dict[str, Any] | None = None,
+    processes: Collection[str] | None = None,
 ) -> Model:
     """The one-liner: a domain translated ahead of time -> a
     constructed (and thereby validated) pws_phoenix Model. See
     assemble_from_translation for the kit underneath."""
-    return assemble_from_translation(translation_yaml, control).model()
+    return assemble_from_translation(
+        translation_yaml, control, processes
+    ).model()
 
 
 def insert_flow_graph(
