@@ -24,16 +24,17 @@ rank. So the parallel path has two halves:
   its supplied initial state,
   converts every Map to MapMPI, and constructs ModelMPI.
 
-Required control keys beyond the serial dict: ``input_file`` (from
-the prep half) and ``output_parallel_netcdf`` (the parallel stream);
-``mpi_grid`` defaults to ``"nhru"``. Output: with no
+Required control key beyond the serial dict: ``input_file`` (from
+the prep half); ``mpi_grid`` defaults to ``"nhru"``. Output: with no
 ``output_var_names`` of your own, the control file's ``*OutVar_names``
 are injected PER DESTINATION -- distributed-grid names stream to
 ``output_parallel_netcdf`` (any number; the one-variable mpixarray
-limit fell Oct 28, 2026), serial-grid names go to the rank-0 zarr only
-if ``output_serial_zarr`` was supplied (else they are left out). An
-explicit list wins verbatim. Dropped names are not reported here (no
-ModelKit is returned; see assemble_from_control).
+limit fell Oct 28, 2026) and serial-grid names go to the rank-0 zarr,
+each only if its store (``output_parallel_netcdf``,
+``output_serial_zarr``) was supplied (else they are left out). With
+neither store the run writes nothing. An explicit list wins verbatim.
+Dropped names are not reported here (no ModelKit is returned; see
+assemble_from_control).
 """
 
 import pathlib as pl
@@ -118,16 +119,11 @@ def mpi_model_from_control(
     identically per rank from the legacy files."""
     control = dict(control)
     mpi_grid = control.setdefault("mpi_grid", "nhru")
-    missing = [
-        kk
-        for kk in ("input_file", "output_parallel_netcdf")
-        if kk not in control
-    ]
-    if missing:
+    if "input_file" not in control:
         raise ValueError(
-            f"mpi_model_from_control: control needs {missing} (see "
+            "mpi_model_from_control: control needs 'input_file' (see "
             "prms_translate.assemble_mpi; write_mpi_input_file "
-            "produces input_file)."
+            "produces it)."
         )
 
     kit = assemble_from_control(control_file)
@@ -151,14 +147,19 @@ def mpi_model_from_control(
             process_dict[slot] = entry
 
     # The control file's output request, per destination (the mirror of
-    # the serial gate "injected only when a store was supplied"): the
-    # parallel NetCDF is mandatory, the serial zarr is the caller's.
+    # the serial gate "injected only when a store was supplied"): a
+    # name is kept when the caller gave the store of its grid. With
+    # neither store the list is empty and the run writes nothing.
     if "output_var_names" not in control and kit.config.output_var_names:
         kept, _dropped = requested_output_names(kit.config, kit.process_dict)
         control["output_var_names"] = [
             nn
             for nn in kept
-            if nn in mpi_vars or "output_serial_zarr" in control
+            if (
+                "output_parallel_netcdf" in control
+                if nn in mpi_vars
+                else "output_serial_zarr" in control
+            )
         ]
 
     maps = {

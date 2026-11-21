@@ -1725,18 +1725,25 @@ class ModelMPI(Model):
                           inputs, on (time, mpi_grid) or
                           (mpi_grid, time), and any of its parameters
                           not supplied in process_dict (see below)
-        output_parallel_netcdf
-                          the parallel-NetCDF file streamed by the
-                          mpixarray writer (distributed grid)
         output_var_names  state vars to write, routed by OWNING grid:
                           distributed-grid vars stream to
                           output_parallel_netcdf (see note below);
                           serial-grid vars are collected by a rank-0 zarr
-                          Output (everyone computes, one writes)
+                          Output (everyone computes, one writes).
+                          Optional: absent or empty = the run writes
+                          nothing, opens no writer and holds no output
+                          buffers. A store given without this key
+                          raises.
+        output_parallel_netcdf
+                          the parallel-NetCDF file streamed by the
+                          mpixarray writer (distributed grid); required
+                          iff distributed-grid output vars are
+                          requested, and created only then
         output_serial_zarr
                           the serial zarr store path itself (".zarr"
                           suffix, used verbatim); required iff serial-grid
-                          output vars are requested
+                          output vars are requested, and created only
+                          then
         time_chunk_size   serial-grid Output time chunking (default 365)
         mpi_grid          name of the distributed grid/dim (default "space")
         mpi_window_steps  depth of the time window in steps (default 1;
@@ -1850,8 +1857,23 @@ class ModelMPI(Model):
                 "ResultCollector) is not implemented under MPI."
             )
         input_file = str(control["input_file"])
-        output_parallel_netcdf = str(control["output_parallel_netcdf"])
-        out_var_names = list(control["output_var_names"])
+        # Output is optional: no names (the key absent, or an empty
+        # list) = nothing is written. A store given without the key
+        # is a mistake, as in the serial Model.
+        if "output_var_names" not in control:
+            stores = [
+                kk
+                for kk in ("output_parallel_netcdf", "output_serial_zarr")
+                if kk in control
+            ]
+            if stores:
+                # the same control on every rank: all ranks raise
+                raise ValueError(
+                    f"control gives {stores} and no output_var_names: "
+                    "name the variables to write, or drop "
+                    f"{' and '.join(stores)} for a run with no output."
+                )
+        out_var_names = list(control.get("output_var_names", ()))
         mpi_grid = control.get("mpi_grid", "space")
         # rank-0 progress bar over the streamed time loop (mpixarray's)
         self._progress = bool(control.get("progress", False))
@@ -2185,8 +2207,21 @@ class ModelMPI(Model):
             nn for nn in out_var_names if nn in serial_var_grid
         ]
 
-        # ---- Open writer ----
-        ds_mpi_stream.mpi.open_writer(output_parallel_netcdf, comm=comm)
+        # ---- Open writer: only when a distributed-grid variable is
+        #      streamed. A store exists when a name is routed to it
+        #      (the rank-0 zarr below follows the same rule). ----
+        if stream_out_names:
+            if "output_parallel_netcdf" not in control:
+                # the same control on every rank: all ranks raise
+                raise ValueError(
+                    f"output_var_names {stream_out_names} live on the "
+                    f"distributed grid '{mpi_grid}': "
+                    "control['output_parallel_netcdf'] (a NetCDF path) "
+                    "is required for the streamed output."
+                )
+            ds_mpi_stream.mpi.open_writer(
+                str(control["output_parallel_netcdf"]), comm=comm
+            )
 
         # ---- Declare buffers: to_file=False first, to_file=True last, then
         #      create(). (1.0.0 authors a to_file var into the open writer at
@@ -2244,7 +2279,11 @@ class ModelMPI(Model):
             output_map[name] = buf
         self._output_map = output_map
 
-        ds_mpi_stream.mpi.create(verbose=False)
+        # create() writes the open writer's file (attrs, coords) and
+        # raises without one; with no streamed output there is no
+        # file, and iterate() and finalize() need none.
+        if stream_out_names:
+            ds_mpi_stream.mpi.create(verbose=False)
 
         self.discretizations[mpi_grid].dataset = ds_mpi_stream
 

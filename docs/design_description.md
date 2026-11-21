@@ -1094,12 +1094,18 @@ Terms:
     shared writer.
   - The backend follows the grid's context: under MPI a serial
     (replicated) grid still writes zarr, from rank 0.
+  - Under MPI a store exists only when a name is routed to it
+    (Nov 20, 2026), for both backends. A run with no
+    `output_var_names` writes nothing, opens no NetCDF writer and
+    holds no output buffers: a timing of compute alone needs no
+    output file. Before this the NetCDF path and the names were
+    required and the writer was always opened.
 - **For users:**
   - The difference matters only when separating compute time from
     output time in a scaling study.
 - **Where:** `CLAUDE.md` "MPI path";
   `Output` in `pws_phoenix/data_io.py`; `ModelMPI` in
-  `pws_phoenix/model.py`.
+  `pws_phoenix/model.py`; `tests/test_no_output_mpi.py`.
 - **Left unfinished:**
   - `Output` handles variables with one spatial dimension only; it
     fails loudly on others.
@@ -1237,9 +1243,9 @@ Terms:
   path" and "Known mpixarray limits".
 - **Left unfinished:**
   - No run entry builds such a model from a translated domain
-    (`mpi_model_from_translation`): `ModelMPI` requires streamed
-    output. (It takes `start_time` / `end_time`, which
-    `assemble_from_translation` sets, since Nov 20, 2026.)
+    (`mpi_model_from_translation`). What it needs of `ModelMPI` is
+    built (Nov 20, 2026): `start_time` / `end_time`, which
+    `assemble_from_translation` sets, and a run with no output.
   - Block reads in practice: `assemble_from_translation` loads the
     parameter file whole, on every rank. The branch for a dataset
     still on disk has no test.

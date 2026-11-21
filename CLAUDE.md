@@ -385,6 +385,14 @@ would build a prng and write `seed.json` on rank 0):
   (`control["output_parallel_netcdf"]`); serial-grid variables go to
   a rank-0 zarr `Output` (`control["output_serial_zarr"]`). The
   rank-0 branch holds no collectives, so it cannot hang.
+- Output is optional, and a store exists only when a name is routed
+  to it. No `control["output_var_names"]` (or an empty list): nothing
+  is written, no writer is opened and no `(depth, block)` output
+  buffer is declared. Names on one grid only: only that grid's store
+  is created. A name without its grid's store raises; a store without
+  the `output_var_names` key raises. mpixarray's `create()` is called
+  only with an open writer (it raises without one)
+  (`tests/test_no_output_mpi.py`).
 - Do NOT unify the serial zarr writer and the MPI NetCDF stream
   behind one writer: the difference is intended.
 - A raise must be collective: the ranks agree first (Allreduce), then
