@@ -1237,9 +1237,9 @@ Terms:
   path" and "Known mpixarray limits".
 - **Left unfinished:**
   - No run entry builds such a model from a translated domain
-    (`mpi_model_from_translation`). `ModelMPI` raises on
-    `start_time` / `end_time`, which `assemble_from_translation`
-    sets, and it requires streamed output.
+    (`mpi_model_from_translation`): `ModelMPI` requires streamed
+    output. (It takes `start_time` / `end_time`, which
+    `assemble_from_translation` sets, since Nov 20, 2026.)
   - Block reads in practice: `assemble_from_translation` loads the
     parameter file whole, on every rank. The branch for a dataset
     still on disk has no test.
@@ -1720,6 +1720,14 @@ Terms:
     both also needed by a native model yaml:
     `control["start_time"]` / `control["end_time"]`, and an input
     given as the path of a file that holds several inputs.
+  - `ModelMPI` takes the two dates too (Nov 20, 2026), the same way:
+    the opened input file is sliced to them before it is decomposed
+    and streamed, nothing is read, and the model's time axis is the
+    slice. Step 0 is `start_time` in both models, so the restart
+    index and the outputs are on the window, and a restart whose
+    state time is outside it raises. The answers are bit for bit
+    those of a file that holds only the window
+    (`tests/test_time_window_mpi.py`).
   - A file-backed input stays on disk, one time row read per step,
     and its per-step buffer is float64 whatever the file holds.
     Before this, a read-only file-backed input was read whole at

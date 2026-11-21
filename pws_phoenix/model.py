@@ -1212,11 +1212,15 @@ class Model:
                 f"control['end_time'] ({self._end_time})."
             )
 
-    def _time_window(self, name: str, data: xr.DataArray) -> xr.DataArray:
-        """The input `data` between control's start_time and end_time
-        (see _set_time_bounds); `data` itself when the control gives
-        neither. No copy: the slice of an in-memory array is a view of
-        it, and a file-backed array stays on disk."""
+    def _time_window[TT: (xr.DataArray, xr.Dataset)](
+        self, name: str, data: TT
+    ) -> TT:
+        """The input `data` (one input, or a dataset of inputs: the
+        file ModelMPI streams) between control's start_time and
+        end_time (see _set_time_bounds); `data` itself when the
+        control gives neither. No copy: the slice of an in-memory
+        array is a view of it, and a file-backed array stays on
+        disk."""
         if self._start_time is None and self._end_time is None:
             return data
         times = data["time"].values
@@ -1745,6 +1749,16 @@ class ModelMPI(Model):
         numba_n_threads   numba threads PER RANK for the hru kernels
                           (default 1; see Model._set_numba_threads).
                           ranks x threads must fit the cores.
+        start_time, end_time
+                          the first and the last model time step, both
+                          included and each optional, as in Model:
+                          input_file and every serial-grid input are
+                          sliced to them (nothing is read; a bound
+                          that is not a time in one of them raises).
+                          The model's time axis is the window: step 0
+                          is start_time, and the outputs hold the
+                          window's steps only. With restart_read the
+                          restart's state time must be in the window.
         restart_read      directory of write_restart() files to warm-start
                           from: saved state restores over the cold init
                           and the stream is time-sliced to BEGIN at the
@@ -1835,13 +1849,6 @@ class ModelMPI(Model):
                 "control['collect_var_names'] (the in-memory "
                 "ResultCollector) is not implemented under MPI."
             )
-        if self._start_time is not None or self._end_time is not None:
-            # the same control on every rank: all ranks raise
-            raise NotImplementedError(
-                "control['start_time'] / control['end_time'] are not "
-                "implemented under MPI: the stream covers the whole "
-                "time axis of input_file."
-            )
         input_file = str(control["input_file"])
         output_parallel_netcdf = str(control["output_parallel_netcdf"])
         out_var_names = list(control["output_var_names"])
@@ -1896,13 +1903,22 @@ class ModelMPI(Model):
             ) from err
         comm = mpix.world_comm()
         ds_input = mpi_open_dataset(input_file, comm=comm)
+        # the opened file: what _release() closes
         self._ds_input = ds_input
-        n_time = int(ds_input.sizes["time"])
+        # control["start_time"] / control["end_time"]: the model's
+        # time axis is the window, as in serial (index 0 = the first
+        # step of the window). A lazy slice of the opened dataset, no
+        # read; the stream, the clock, the restart index and the
+        # outputs below are all built from it. A bound that is not a
+        # time of the file raises: the same control and file on
+        # every rank, so all ranks raise.
+        ds_window = self._time_window(input_file, ds_input)
+        n_time = int(ds_window.sizes["time"])
         self._ntime = n_time
-        self.time = Time(ds_input["time"])
-        # restart machinery (shared with the serial base): the full
-        # time axis + the last-computed-step tracker
-        self.times = ds_input["time"]
+        self.time = Time(ds_window["time"])
+        # restart machinery (shared with the serial base): the
+        # model's time axis + the last-computed-step tracker
+        self.times = ds_window["time"]
         self.ntime = n_time
         self.current_time_index = np.zeros(1, dtype=np.int64)
 
@@ -1922,9 +1938,9 @@ class ModelMPI(Model):
                 pl.Path(restart_read)
             )
         if self._start_index:
-            ds_source = ds_input.isel(time=slice(self._start_index, None))
+            ds_source = ds_window.isel(time=slice(self._start_index, None))
         else:
-            ds_source = ds_input
+            ds_source = ds_window
 
         # WORKAROUND for an mpixarray limit (reported upstream Nov 20,
         # 2026): at every window mpixarray slices the opened
@@ -2331,7 +2347,7 @@ class ModelMPI(Model):
                     time_chunk_size=control.get("time_chunk_size", 365),
                     variable_names=serial_out_names,
                     output_store=pl.Path(control["output_serial_zarr"]),
-                    time_values=ds_input["time"].values,
+                    time_values=ds_window["time"].values,
                 )
                 # Track serial-grid processes only: their _obj is
                 # persistent. (Distributed-grid procs are rebound to each

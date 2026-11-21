@@ -1,11 +1,12 @@
 """The serial Model's time window (``control["start_time"]`` /
 ``control["end_time"]``) and inputs taken from one combined file, on
-the Upper/Lower toy model."""
+the Upper/Lower toy model. ModelMPI's window:
+``tests/test_time_window_mpi.py``."""
 
 import numpy as np
 import pytest
 
-from pws_phoenix.model import Model, ModelMPI
+from pws_phoenix.model import Model
 from pws_phoenix.processes_concrete import Lower, Upper
 
 PARAM_NAMES = ["param_up_0", "param_up_1", "param_low_0", "param_shared_name"]
@@ -154,10 +155,3 @@ def test_window_raises(toy_ds, start, end, match):
     )
     with pytest.raises(ValueError, match=match):
         Model(process_dict, _control(start, end))
-
-
-@pytest.mark.parametrize("key", ["start_time", "end_time"])
-def test_window_not_implemented_under_mpi(key):
-    """ModelMPI raises on either key before it touches MPI or a file."""
-    with pytest.raises(NotImplementedError, match="start_time"):
-        ModelMPI({"upper": {"class": Upper}}, {key: "2000-03-01"})

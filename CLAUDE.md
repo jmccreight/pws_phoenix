@@ -319,7 +319,7 @@ Rules:
   both included) restrict the run: every input is sliced to them (a
   view, not a copy), and a bound that is not a time in an input
   raises. Without them the run covers the inputs' whole time axis.
-  `ModelMPI` raises on either key (not implemented).
+  `ModelMPI` takes the same two keys (see "MPI path").
 - `Process._registry` (filled by `__init_subclass__`) resolves a
   process class named as a string; `config.load_model_yaml` uses it
   (import the defining module first).
@@ -349,6 +349,13 @@ would build a prng and write `seed.json` on rank 0):
   grid is not implemented.
 - Processes bind directly (`cls(ds_mpi)`) and are rebound to each
   window the loop yields.
+- `control["start_time"]` / `control["end_time"]` work as in serial:
+  the opened input file is sliced to them BEFORE `decompose` (a lazy
+  slice, nothing is read), and so is every serial-grid input. The
+  model's time axis is that slice: step 0 is `start_time`, and the
+  clock, the restart index and both outputs are on it. A restart's
+  state time outside it raises. `_release()` closes the opened file,
+  not the slice (`tests/test_time_window_mpi.py`).
 - `control["mpi_window_steps"]` (default 1; `None` = the whole
   stream) is the depth of the time window, passed to `as_iterable`
   as `chunk_size`. mpixarray has ONE window: it is the depth of the
