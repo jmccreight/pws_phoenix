@@ -62,7 +62,8 @@ def load_cbh(
     da = ds[names[0]].rename(_CBH_RENAMES.get(names[0], names[0]))
     # pyPRMS stamps a 1-based OBJECT-dtype nhru index coordinate;
     # dropped (object coords break zarr encoding downstream, and the
-    # framework's space dims are coordinate-free)
+    # framework's space dims are coordinate-free in memory;
+    # write_cbh_netcdf gives the FILE a coordinate of positions)
     da = da.drop_vars([cc for cc in da.coords if cc != "time"])
     if start_time is not None or end_time is not None:
         da = da.sel(time=slice(start_time, end_time))
@@ -100,8 +101,10 @@ def write_cbh_netcdf(
     float64, and carries a ``source_file`` attribute (its CBH file's
     resolved path). One variable is in memory at a time: each is
     parsed (load_cbh) and appended to the file before the next. All
-    variables must share one time axis. No `nhru` coordinate, no
-    compression, no chunking.
+    variables must share one time axis. The file has a `time`
+    coordinate and an `nhru` coordinate (0 to nhru - 1, the positions
+    along the grid: ModelMPI needs a coordinate on the distributed
+    grid). No compression, no chunking.
 
     An existing `path` is REUSED (nothing is parsed) when its
     variables' ``source_file`` attributes equal `cbh_paths`; when they
@@ -144,7 +147,11 @@ def write_cbh_netcdf(
         da.attrs["source_file"] = source
         if time is None:
             time = da["time"].values
-            da.to_dataset().to_netcdf(partial, mode="w")
+            # the file's two coordinates are written with the first
+            # variable
+            da.assign_coords(
+                nhru=np.arange(da.sizes["nhru"])
+            ).to_dataset().to_netcdf(partial, mode="w")
         else:
             if not np.array_equal(da["time"].values, time):
                 raise ValueError(
@@ -154,7 +161,7 @@ def write_cbh_netcdf(
                     f"{next(iter(sources.values()))} ({time.size} days "
                     f"from {time[0]})."
                 )
-            # the time coordinate is in the file already
+            # the coordinates are in the file already
             da.drop_vars("time").to_dataset().to_netcdf(partial, mode="a")
     partial.replace(path)
     return path

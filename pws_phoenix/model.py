@@ -1724,7 +1724,10 @@ class ModelMPI(Model):
         input_file        the DISTRIBUTED grid's input file: its streamed
                           inputs, on (time, mpi_grid) or
                           (mpi_grid, time), and any of its parameters
-                          not supplied in process_dict (see below)
+                          not supplied in process_dict (see below).
+                          It must hold a coordinate for mpi_grid and
+                          one for time; without the first the build
+                          raises
         output_var_names  state vars to write, routed by OWNING grid:
                           distributed-grid vars stream to
                           output_parallel_netcdf (see note below);
@@ -1927,6 +1930,16 @@ class ModelMPI(Model):
         ds_input = mpi_open_dataset(input_file, comm=comm)
         # the opened file: what _release() closes
         self._ds_input = ds_input
+        if mpi_grid in ds_input.dims and mpi_grid not in ds_input.coords:
+            # without one, mpixarray makes a coordinate on each rank
+            # after the split, and that is what the streamed output
+            # file would get. The same file on every rank: all raise.
+            raise ValueError(
+                f"input_file {input_file!r} has no coordinate for the "
+                f"distributed grid '{mpi_grid}': write one, the "
+                f"positions 0 to {int(ds_input.sizes[mpi_grid]) - 1} "
+                "(write_mpi_input_file and write_cbh_netcdf do)."
+            )
         # control["start_time"] / control["end_time"]: the model's
         # time axis is the window, as in serial (index 0 = the first
         # step of the window). A lazy slice of the opened dataset, no

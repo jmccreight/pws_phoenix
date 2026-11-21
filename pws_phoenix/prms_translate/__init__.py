@@ -37,6 +37,7 @@ from pws_phoenix.prms_translate.assemble import (
 )
 from pws_phoenix.prms_translate.assemble_mpi import (
     mpi_model_from_control,
+    mpi_model_from_translation,
     write_mpi_input_file,
 )
 from pws_phoenix.prms_translate.cbh import load_cbh, write_cbh_netcdf
@@ -75,6 +76,7 @@ __all__ = [
     "load_dynamic_parameter",
     "load_parameters",
     "mpi_model_from_control",
+    "mpi_model_from_translation",
     "digest_array",
     "package_parameters",
     "prms_initial_state",

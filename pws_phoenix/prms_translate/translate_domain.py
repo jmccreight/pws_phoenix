@@ -29,7 +29,8 @@ control's own files named by the control file's stem.
   Both models read either file and give the same answers; which one
   reads faster depends on the run (machine_probes/README.md "The
   order of the dims decides the read"). The yaml lists it as
-  ``forcing_file_transpose``; a run is pointed at it by the user.
+  ``forcing_file_transpose``; a run is pointed at it by the user
+  (``mpi_model_from_translation(yaml, transposed=True)``).
 - ``<stem>_parameters.nc``: everything in the control's parameter
   file(s), as ``readers.load_parameters`` returns it. Its
   ``source_files`` attribute holds their resolved paths, one per line.

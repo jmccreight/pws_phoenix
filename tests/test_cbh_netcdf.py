@@ -35,7 +35,11 @@ def test_write_cbh_netcdf_contents(tmp_path):
     assert not (tmp_path / "cbh.nc.partial").exists()
     ds = xr.load_dataset(out)
     assert list(ds.data_vars) == ["prcp", "tmax"]
-    assert list(ds.coords) == ["time"]
+    assert set(ds.coords) == {"time", "nhru"}
+    # positions along the grid, the coordinate ModelMPI needs
+    np.testing.assert_array_equal(
+        ds["nhru"].values, np.arange(ds.sizes["nhru"])
+    )
     for name, source in DRB_CBH.items():
         ours = load_cbh(source)
         assert ds[name].dims == ("time", "nhru")

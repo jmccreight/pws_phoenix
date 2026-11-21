@@ -106,7 +106,7 @@ Terms:
 | MPI parameters from `process_dict`: each rank keeps its block, the input file holds only what is streamed | built; build cost not measured on a large domain | Nov 2026 | IO |
 | PRMS translation: one way, pyPRMS only, outside the core | built | Aug 2026 | Translation and migration |
 | Pre-processing: derived inputs in a stamped file, verified at use | built | Aug 2026 | Translation and migration |
-| A domain translated ahead of time: files written once, options from the control copy | built, serial run entry only | Nov 2026 | Translation and migration |
+| A domain translated ahead of time: files written once, options from the control copy | built, serial and MPI run entries | Nov 2026 | Translation and migration |
 
 ## Framework
 
@@ -1242,10 +1242,10 @@ Terms:
   `tests/test_parameters_in_process_dict_mpi.py`; `CLAUDE.md` "MPI
   path" and "Known mpixarray limits".
 - **Left unfinished:**
-  - No run entry builds such a model from a translated domain
-    (`mpi_model_from_translation`). What it needs of `ModelMPI` is
-    built (Nov 20, 2026): `start_time` / `end_time`, which
-    `assemble_from_translation` sets, and a run with no output.
+  - The first real domain run this way is drb_2yr through
+    `mpi_model_from_translation` (Nov 21, 2026,
+    `tests/test_mpi_model_from_translation_mpi.py`); CONUS has not
+    been run.
   - Block reads in practice: `assemble_from_translation` loads the
     parameter file whole, on every rank. The branch for a dataset
     still on disk has no test.
@@ -1681,7 +1681,7 @@ Terms:
 
 ### A domain translated ahead of time: files written once, options from the control copy
 
-- **Status:** built Nov 2026; the serial run entry only.
+- **Status:** built Nov 2026; the serial and the MPI run entry.
 - **Why:** `model_from_control` parses the CBH text and the parameter
   file at every start, and under MPI every rank does. At NHM scale
   (114,958 hrus, 47 years) one CBH file is 9.87 GB of text and takes
@@ -1691,7 +1691,8 @@ Terms:
   - `translate_domain(control_file, out_dir)` writes the files a
     control names ONCE, into a flat domain directory: one combined
     forcing netCDF (`cbh.nc`: the whole record, float32 where that is
-    exact, no compression, no chunking), `<stem>_parameters.nc`,
+    exact, no compression, no chunking, a `time` coordinate and an
+    `nhru` coordinate of positions), `<stem>_parameters.nc`,
     `<stem>_preprocessed.nc`, a byte copy of the control file, and
     `<stem>_translation.yaml`.
   - `<stem>_preprocessed.nc` (the previous entry's file) is derived
@@ -1734,6 +1735,25 @@ Terms:
     state time is outside it raises. The answers are bit for bit
     those of a file that holds only the window
     (`tests/test_time_window_mpi.py`).
+  - The MPI run takes the yaml too (Nov 21, 2026):
+    `mpi_model_from_translation(yaml, control, transposed=False)`,
+    on every rank. There is no combined input file to prepare: the
+    stream is the forcing file itself, and the hru parameters stay in
+    `process_dict` ("MPI parameters from `process_dict`"). The answers
+    are bit for bit those of `mpi_model_from_control` on a combined
+    file (`tests/test_mpi_model_from_translation_mpi.py`).
+  - Which forcing file is streamed is the CALLER's choice:
+    `transposed=True` opens `cbh_transpose.nc`. No code picks the
+    file. The build's one warning (an order that takes 100 times the
+    pieces of the other, "An input on either order of its two dims")
+    tells the caller when the other file is the faster one. Picking
+    in the entry would repeat what `ModelMPI` works out later: the
+    window depth, the time window and the restart index.
+  - The coordinate `ModelMPI` needs on the distributed grid is in the
+    forcing FILE (`write_cbh_netcdf`), not added by the model after
+    the file is opened. An input file without it raises at build:
+    mpixarray would otherwise make a coordinate on each rank after
+    the split, and the streamed output file would carry it.
   - A file-backed input stays on disk, one time row read per step,
     and its per-step buffer is float64 whatever the file holds.
     Before this, a read-only file-backed input was read whole at
@@ -1751,26 +1771,37 @@ Terms:
     units as it is read, file-backed or loaded.
   - A control with dynamic-parameter files raises. An edited control
     copy raises: translate the domain again.
+  - Under `mpirun`:
+    `mpi_model_from_translation(yaml, control={...})`. With no
+    output store in `control` the run writes nothing.
+    `control["input_file"]` raises; `transposed=True` needs a domain
+    translated with `--cbh-transpose`.
+  - A forcing file written before Nov 21, 2026 has no `nhru`
+    coordinate and raises under MPI: translate the forcing again, or
+    append the coordinate to the file.
   - `--only parameters --force` rewrites the parameter file and
     leaves the preprocessed file as it was. The next run then raises
     "STALE": run `--only preprocessed --force`.
 - **Where:** `pws_phoenix/prms_translate/translate_domain.py` (module
   docstring), `cbh.write_cbh_netcdf`,
   `preprocess.derive_preprocessed`,
-  `assemble.assemble_from_translation`; `Model._time_window`;
+  `assemble.assemble_from_translation`,
+  `assemble_mpi.mpi_model_from_translation`; `Model._time_window`;
   `tests/test_translate_domain.py`, `tests/test_cbh_netcdf.py`,
-  `tests/test_model_from_translation.py`, `tests/test_time_window.py`,
-  `tests/test_input.py`.
+  `tests/test_model_from_translation.py`,
+  `tests/test_mpi_model_from_translation_mpi.py`,
+  `tests/test_time_window.py`, `tests/test_input.py`.
 - **Left unfinished:**
   - `translate_domain` does not verify an existing preprocessed file
     against the parameter file (the run does).
   - For a control with stream temperature the preprocessed step
     builds four full weight matrices in memory (see "Maps", left
     unfinished): not possible at NHM scale.
-  - The MPI run entry: `ModelMPI` takes the hru parameters from
-    `process_dict` (decided Nov 20, 2026; see "MPI parameters from
-    `process_dict`"), but `mpi_model_from_translation` is not
-    written and `ModelMPI` raises on the two window keys.
+  - Under MPI an input held in memory raises (a static parameter
+    served as a time-constant input, `ag_frac`): only the forcing
+    file is streamed.
+  - Under MPI every rank loads the whole parameter file and derives
+    or loads the map weights during the build.
   - Reads of several days at a time, and the chunk shape of the
     forcing file.
   - Translation that writes a native model yaml, so that a run needs

@@ -379,6 +379,16 @@ would build a prng and write `seed.json` on rank 0):
   keep the full-extent array alive on every rank); a dataset still on
   disk is read by block. `input_file` then holds only the streamed
   inputs (`tests/test_parameters_in_process_dict_mpi.py`).
+- `input_file` must hold a coordinate for the distributed grid
+  (`write_mpi_input_file` and `write_cbh_netcdf` write the positions,
+  `np.arange`). A file without one raises at build; the model never
+  adds it.
+- A domain translated ahead of time runs through
+  `prms_translate.mpi_model_from_translation(yaml, control,
+  transposed=False)`: the stream is the translation's forcing file
+  (`transposed=True` = its `(nhru, time)` copy), the hru parameters
+  come from `process_dict`. The caller chooses the file; no code
+  picks it (`tests/test_mpi_model_from_translation_mpi.py`).
 - Initial state is NOT in the input file (see "Initial state").
 - Output is routed by OWNING grid. Distributed-grid variables stream
   through the mpixarray NetCDF writer
