@@ -106,7 +106,7 @@ Terms:
 | MPI parameters from `process_dict`: each rank keeps its block, the input file holds only what is streamed | built; build cost not measured on a large domain | Nov 2026 | IO |
 | PRMS translation: one way, pyPRMS only, outside the core | built | Aug 2026 | Translation and migration |
 | Pre-processing: derived inputs in a stamped file, verified at use | built | Aug 2026 | Translation and migration |
-| A domain translated ahead of time: files written once, options from the control copy | built, serial and MPI run entries | Nov 2026 | Translation and migration |
+| A domain translated ahead of time: files written once, options from the control copy | built, serial and MPI run entries, a block of hrus alone (measured on CONUS) | Nov 2026 | Translation and migration |
 
 ## Framework
 
@@ -1674,14 +1674,16 @@ Terms:
   - `model_from_control(control_file, preprocessed=path)`.
   - Rewrite the file after changing any parameter a derivation reads.
   - A domain translated ahead of time gets this file from
-    `translate_domain` (the next entry).
+    `translate_domain` (the next entry). A build of one block of its
+    hrus does not verify the file; `verify_translation` does, once.
 - **Where:** `pws_phoenix/prms_translate/preprocess.py`;
   `examples/02_preprocessing.py`; `tests/test_preprocess.py`.
 - **Left unfinished** (moved from memory Nov 12, 2026): none.
 
 ### A domain translated ahead of time: files written once, options from the control copy
 
-- **Status:** built Nov 2026; the serial and the MPI run entry.
+- **Status:** built Nov 2026; the serial and the MPI run entry, and
+  the serial build of a block of hrus alone.
 - **Why:** `model_from_control` parses the CBH text and the parameter
   file at every start, and under MPI every rank does. At NHM scale
   (114,958 hrus, 47 years) one CBH file is 9.87 GB of text and takes
@@ -1758,6 +1760,53 @@ Terms:
     and its per-step buffer is float64 whatever the file holds.
     Before this, a read-only file-backed input was read whole at
     build, by the line that set its read-only flag.
+  - A subset of the control file's processes (Nov 21, 2026):
+    `processes=` on the four assembly entries (`assemble_from_control`
+    and `model_from_control` too) names the `process_dict` slots to
+    keep. A grid left without a process is not built, and the Maps
+    are built only when both of their grids are. It is a general
+    choice made at the build, not a "no channel" switch: what the
+    kept processes then lack raises as for any model. The kit's
+    `config` stays the control file's record. The six hru processes
+    alone give the hru variables of the whole model bit for bit over
+    drb_2yr's two years: nothing on the hru grid reads the channel.
+  - A block of hrus alone (Nov 21, 2026):
+    `assemble_from_translation(yaml, processes=..., hru_block=(start,
+    stop))` reads and builds the hrus `[start, stop)` only. The use
+    is a calibration by hru: the hru grid run as independent serial
+    models, one process each, with no message between them. On CONUS
+    (114,958 hrus, Hovenweep) 64 such processes took 0.96 ms per
+    step against 50.6 ms for one. Each built the whole kit and cut
+    it, a peak of 7.6 GiB per process, which is what limits a 512 GB
+    node to 64 of them. Read by block, a process holds its block and
+    nothing else on `nhru`. The blocks of drb_2yr, run apart, give
+    the whole model's hru variables bit for bit, and the reuse loop
+    (`set_parameters` -> `reset` -> `run`) works on a block as on any
+    serial model. Measured on CONUS the same day (Hovenweep, the
+    whole record of 17,167 days, the `(nhru, time)` file): a block
+    builds in 1 to 2 s and its process peaks at 0.5 to 1.0 GiB, so a
+    node takes 128 processes; 128 blocks ran at 0.62 ms per step,
+    and 256 blocks on two nodes at 0.39 ms. From the `(time, nhru)`
+    file the same build took 118 s.
+  - The block's forcing is held in memory, read once at the build, as
+    the file stores it (float32, the file's dim order): a calibration
+    runs the same record thousands of times, and N processes reading
+    one file every step is what the block avoids. The caller chooses
+    the file here too: on `(nhru, time)` a block's whole record is
+    stored together, on `(time, nhru)` it is one piece per day.
+  - What a block cannot check is checked once, for the whole domain:
+    `verify_translation(yaml)`. The preprocessed file's stamps are
+    digests of whole arrays, and a block reads part of each. A
+    forcing file with more hrus than the parameter file would give a
+    block the wrong hrus without an error. PRMS's rule for
+    `pref_flow_infil_frac` (negative on EVERY hru means "not
+    specified") is a property of the domain: both the check and each
+    block build judge it on the whole domain, so every block applies
+    it or none does.
+  - The split with the caller: this package builds the serial model
+    of a block and knows nothing of ranks, of calibration or of where
+    results go. Which block a process takes (from `SLURM_PROCID`, for
+    one) is the caller's.
 - **For users:**
   - `python -m pws_phoenix.prms_translate.translate_domain
     CONTROL_FILE --out DOMAIN_DIR`, then
@@ -1782,13 +1831,26 @@ Terms:
   - `--only parameters --force` rewrites the parameter file and
     leaves the preprocessed file as it was. The next run then raises
     "STALE": run `--only preprocessed --force`.
+  - The hru processes without the channel:
+    `model_from_translation(yaml, processes=[...])`, the slot names
+    of `prms_translate.parameters.SLOT_GRIDS` on `"nhru"`.
+  - Independent blocks: `verify_translation(yaml)` once, in one
+    process. Then in each process `model_from_translation(yaml,
+    control, processes=[...], hru_block=(start, stop),
+    transposed=True)`, with `control["calibration_mode"] = True` and
+    `control["collect_var_names"]` for the reuse loop.
+  - A block's memory for forcing is 4 bytes x days x hrus of the
+    block per forcing (three forcings, 17,167 days, 1,796 hrus, a
+    64th of CONUS: 370 MB).
 - **Where:** `pws_phoenix/prms_translate/translate_domain.py` (module
   docstring), `cbh.write_cbh_netcdf`,
   `preprocess.derive_preprocessed`,
   `assemble.assemble_from_translation`,
+  `assemble.verify_translation`,
   `assemble_mpi.mpi_model_from_translation`; `Model._time_window`;
   `tests/test_translate_domain.py`, `tests/test_cbh_netcdf.py`,
   `tests/test_model_from_translation.py`,
+  `tests/test_hru_block_from_translation.py`,
   `tests/test_mpi_model_from_translation_mpi.py`,
   `tests/test_time_window.py`, `tests/test_input.py`.
 - **Left unfinished:**
@@ -1806,3 +1868,7 @@ Terms:
     forcing file.
   - Translation that writes a native model yaml, so that a run needs
     no PRMS logic.
+  - A block build still parses the control copy, and reads whole the
+    parameters that are not on `nhru` (the segment parameters).
+  - `mpi_model_from_translation` takes no `processes`: an hru-only
+    model under MPI has no public entry.

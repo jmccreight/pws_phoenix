@@ -320,6 +320,36 @@ Rules:
   view, not a copy), and a bound that is not a time in an input
   raises. Without them the run covers the inputs' whole time axis.
   `ModelMPI` takes the same two keys (see "MPI path").
+- A domain translated ahead of time builds through
+  `prms_translate.assemble_from_translation(yaml, control,
+  processes=None, hru_block=None, transposed=False)`
+  (`model_from_translation` is the one-liner). Rules:
+  - `processes=` names the control file's `process_dict` slots to
+    KEEP (`assemble_from_control` takes it too). A grid left without
+    a process is not built, and the Maps are built only when both of
+    their grids are. It is a general choice: no argument is specific
+    to the channel.
+  - `hru_block=(start, stop)` builds the hrus `[start, stop)` alone
+    and reads only those. Every kept process must be on `nhru`. The
+    forcing is in memory over the run's window, in the file's dtype
+    and dim order.
+  - In that path nothing on `nhru` is held at the domain's extent
+    after the build: a new read there is a read of the block, and an
+    array read whole for a check is not cached
+    (`xr.open_dataset(..., cache=False)`; a cached one makes the
+    block's cut a view of it).
+  - A block build checks nothing that needs the whole domain. Those
+    checks (the preprocessed file's stamps, the forcing files'
+    extent) are made ONCE by `prms_translate.verify_translation(yaml)`,
+    in one process, before the runs that read blocks.
+    `prms_parameter_defaults` is judged on the whole domain in both.
+  - `transposed=True` reads the `(nhru, time)` forcing file. The
+    caller chooses the file; no code picks it.
+  - The package knows nothing of ranks or of calibration: the caller
+    picks each process's block
+    (`tests/test_hru_block_from_translation.py`). Reasons:
+    `docs/design_description.md` "A domain translated ahead of
+    time".
 - `Process._registry` (filled by `__init_subclass__`) resolves a
   process class named as a string; `config.load_model_yaml` uses it
   (import the defining module first).
