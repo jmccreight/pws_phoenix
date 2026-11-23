@@ -235,3 +235,43 @@ def verify_preprocessed(artifacts: xr.Dataset, params: xr.Dataset) -> None:
                     "use the in-chain default (no preprocessed= "
                     "argument)."
                 )
+
+
+def cut_preprocessed(
+    artifacts: xr.Dataset, params: xr.Dataset, hru_positions: np.ndarray
+) -> xr.Dataset:
+    """The artifacts of a domain cut to some of its hrus
+    (``cut_translation``): each artifact on ``nhru`` is CUT to
+    `hru_positions`, so it holds the source's values exactly, and is
+    stamped again against `params`, the cut's parameters (the inputs
+    named by its own ``derived_from_*`` attributes). Every other
+    artifact is dropped: the segment order, and the map weights, whose
+    entries index hrus by position. Raises ValueError for an artifact
+    on ``nhru`` with a derivation input that `params` lacks."""
+    out = xr.Dataset()
+    # one read of the span from the first position to the last, then
+    # the hrus out of it in memory
+    first = int(hru_positions[0])
+    span = slice(first, int(hru_positions[-1]) + 1)
+    for name in artifacts.data_vars:
+        da = artifacts[name]
+        if "nhru" not in da.dims:
+            continue
+        input_names = [
+            str(key)[len("derived_from_") :]
+            for key in da.attrs
+            if str(key).startswith("derived_from_")
+        ]
+        missing = [nn for nn in input_names if nn not in params]
+        if missing:
+            raise ValueError(
+                f"preprocessed artifact {name!r}: its derivation "
+                f"inputs {missing} are not in the cut's parameters."
+            )
+        out[name] = _stamp(
+            da.isel(nhru=span).load().isel(nhru=hru_positions - first),
+            da.attrs["derivation"],
+            {nn: params[nn].values for nn in input_names},
+        )
+    out.attrs = dict(artifacts.attrs)
+    return out

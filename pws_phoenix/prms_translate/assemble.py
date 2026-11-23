@@ -678,9 +678,24 @@ def assemble_from_translation(
     forcing file or no parameter file (a step that was not run) or,
     with ``transposed=True``, no transposed copy, and for an
     `hru_block` outside the domain or with a kept process off the
-    nhru grid."""
+    nhru grid. A domain cut to some of its hrus (``cut_translation``;
+    its yaml has ``cut_from``) holds hrus only: a kept process off the
+    nhru grid raises ValueError there too."""
     yaml_path, info, cfg = _read_translation(translation_yaml)
     domain_dir = yaml_path.parent
+    if info.get("cut_from") is not None:
+        off_grid = [
+            slot
+            for slot in _kept_classes(cfg.classes, processes)
+            if SLOT_GRIDS[slot] != "nhru"
+        ]
+        if off_grid:
+            raise ValueError(
+                f"{yaml_path} is a cut of the hrus of "
+                f"{info['cut_from']} (cut_translation): it holds "
+                f"nothing on another grid, and {off_grid} are on one. "
+                "Name the nhru processes to keep in processes=."
+            )
 
     forcing_key = "forcing_file_transpose" if transposed else "forcing_file"
     if info.get(forcing_key) is None:

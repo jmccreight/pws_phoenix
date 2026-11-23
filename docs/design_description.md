@@ -1682,8 +1682,9 @@ Terms:
 
 ### A domain translated ahead of time: files written once, options from the control copy
 
-- **Status:** built Nov 2026; the serial and the MPI run entry, and
-  the serial build of a block of hrus alone.
+- **Status:** built Nov 2026; the serial and the MPI run entry, the
+  serial build of a block of hrus alone, and the cut of a domain to
+  some of its hrus.
 - **Why:** `model_from_control` parses the CBH text and the parameter
   file at every start, and under MPI every rank does. At NHM scale
   (114,958 hrus, 47 years) one CBH file is 9.87 GB of text and takes
@@ -1807,6 +1808,37 @@ Terms:
     of a block and knows nothing of ranks, of calibration or of where
     results go. Which block a process takes (from `SLURM_PROCID`, for
     one) is the caller's.
+  - A domain cut to some of its hrus (Nov 23, 2026):
+    `cut_translation(yaml, out_dir, hru_positions=... or
+    nhm_ids=...)` writes a translated domain of those hrus in another
+    directory, with the files and the yaml keys of any translated
+    domain, so the run entries read it unchanged. The use is a small
+    domain that is PART of a large one (a basin's hrus out of CONUS,
+    160 MB of forcing out of 24 GB) and gives the large one's answers
+    for those hrus bit for bit: an hru's answers depend on its own
+    parameters and forcing alone. Three choices follow from that aim:
+    - The cut holds HRUS ONLY. Every parameter off the hru grid is
+      dropped, with the segment order and the map weights. A basin's
+      channel needs its segments cut and numbered again and the
+      weights rebuilt, which is not done; dropped, a build that keeps
+      the channel raises instead of routing through a network that
+      lacks most of its inflow.
+    - The derived arrays on `nhru` (the solar tables,
+      `hru_in_to_cf`) are CUT from the source's file and stamped
+      again against the cut parameters, not derived again: the claim
+      of identical answers then does not rest on a derivation giving
+      the same bits on 765 hrus as on 114,958.
+    - The cut carries where it came from: the parameter file's
+      `source_position` (each hru's position in the source), and its
+      attributes `cut_from` and `source_nhru`. A caller that draws
+      per-hru random numbers by position in the large domain (a
+      calibration's seeds) needs them to draw the same numbers on
+      the cut. The yaml's `cut_from` is what marks a domain as hrus
+      only.
+    The cut keeps the source's order of the hrus. Everything on
+    `nhru` is read over the span from the first hru to the last and
+    cut in memory, the forcing from the transposed copy when there is
+    one (`tests/test_cut_translation.py`).
 - **For users:**
   - `python -m pws_phoenix.prms_translate.translate_domain
     CONTROL_FILE --out DOMAIN_DIR`, then
@@ -1825,6 +1857,11 @@ Terms:
     output store in `control` the run writes nothing.
     `control["input_file"]` raises; `transposed=True` needs a domain
     translated with `--cbh-transpose`.
+  - `python -m pws_phoenix.prms_translate.cut_translation
+    TRANSLATION_YAML --out CUT_DIR --nhm-ids-file FILE` (or
+    `--positions-file`; one integer per line), then build the cut
+    with `processes=` naming the hru processes. A cut is written
+    once: an `out_dir` that holds one of its files raises.
   - A forcing file written before Nov 21, 2026 has no `nhru`
     coordinate and raises under MPI: translate the forcing again, or
     append the coordinate to the file.

@@ -350,6 +350,18 @@ Rules:
     (`tests/test_hru_block_from_translation.py`). Reasons:
     `docs/design_description.md` "A domain translated ahead of
     time".
+  - `prms_translate.cut_translation.cut_translation(yaml, out_dir,
+    hru_positions=... or nhm_ids=...)` writes a translated domain of
+    SOME of the hrus (in the source's order), read by the same
+    entries. It holds hrus only: everything off the hru grid is
+    dropped, and a build that keeps a process off it raises (the
+    yaml's `cut_from` marks the domain). Its derived arrays are cut
+    from the source's and stamped again, never derived again, so a
+    model of the cut gives those hrus' columns of the source's model
+    bit for bit. The parameter file carries `source_position` and
+    the attributes `cut_from`, `source_nhru`
+    (`tests/test_cut_translation.py`). Segments and Maps in a cut:
+    later (JLM, Nov 23, 2026).
 - `Process._registry` (filled by `__init_subclass__`) resolves a
   process class named as a string; `config.load_model_yaml` uses it
   (import the defining module first).
