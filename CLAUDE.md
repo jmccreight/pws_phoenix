@@ -358,10 +358,10 @@ Rules:
     yaml's `cut_from` marks the domain). Its derived arrays are cut
     from the source's and stamped again, never derived again, so a
     model of the cut gives those hrus' columns of the source's model
-    bit for bit. The parameter file carries `source_position` and
-    the attributes `cut_from`, `source_nhru`
-    (`tests/test_cut_translation.py`). Segments and Maps in a cut:
-    later (JLM, Nov 23, 2026).
+    bit for bit (`tests/test_cut_translation.py`). The cut does not
+    record its hrus' positions in the source: `nhm_id`, cut with the
+    other parameters, is what names an hru in both. Segments and
+    Maps in a cut: later (JLM, Nov 23, 2026).
 - `Process._registry` (filled by `__init_subclass__`) resolves a
   process class named as a string; `config.load_model_yaml` uses it
   (import the defining module first).

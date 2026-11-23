@@ -23,11 +23,10 @@ processes on the hru grid named in ``processes=``:
   hrus, in the source's order; the variables on the dims of
   ``WHOLE_DIMS`` alone as they are; every other variable (the
   segments, the gages) DROPPED, its dims listed in the file's
-  ``dropped_dims`` attribute. Two additions: the variable
-  ``source_position`` (each hru's 0-based position in the source
-  domain) and the attributes ``cut_from`` (the source yaml) and
-  ``source_nhru`` (the source's number of hrus). No process declares
-  ``source_position``, so a model does not read it.
+  ``dropped_dims`` attribute. The attribute ``cut_from`` is the
+  source yaml. The hrus are not tracked otherwise: what names an hru
+  in the cut and in the source alike is a parameter of the domain
+  (the NHM's ``nhm_id``), cut with the rest.
 - ``<stem>_preprocessed.nc``: the derived arrays on ``nhru`` (the
   solar tables, ``hru_in_to_cf``) CUT from the source's, not derived
   again: the cut holds the source's values exactly. Each is stamped
@@ -142,16 +141,7 @@ def _cut_parameters(
     span = slice(first, int(positions[-1]) + 1)
     cut = whole[kept].isel(nhru=span).load().isel(nhru=positions - first)
     cut = cut.drop_vars(list(cut.coords))
-    cut["source_position"] = xr.DataArray(
-        positions,
-        dims=("nhru",),
-        attrs={
-            "description": "0-based position of the hru in the domain "
-            "this one was cut from (the cut_from attribute)"
-        },
-    )
     cut.attrs["cut_from"] = str(source_yaml)
-    cut.attrs["source_nhru"] = whole.sizes["nhru"]
     cut.attrs["dropped_dims"] = " ".join(dropped_dims)
     return cut
 

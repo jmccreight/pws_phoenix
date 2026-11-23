@@ -1816,7 +1816,7 @@ Terms:
     domain that is PART of a large one (a basin's hrus out of CONUS,
     160 MB of forcing out of 24 GB) and gives the large one's answers
     for those hrus bit for bit: an hru's answers depend on its own
-    parameters and forcing alone. Three choices follow from that aim:
+    parameters and forcing alone. Two choices follow from that aim:
     - The cut holds HRUS ONLY. Every parameter off the hru grid is
       dropped, with the segment order and the map weights. A basin's
       channel needs its segments cut and numbered again and the
@@ -1828,13 +1828,13 @@ Terms:
       again against the cut parameters, not derived again: the claim
       of identical answers then does not rest on a derivation giving
       the same bits on 765 hrus as on 114,958.
-    - The cut carries where it came from: the parameter file's
-      `source_position` (each hru's position in the source), and its
-      attributes `cut_from` and `source_nhru`. A caller that draws
-      per-hru random numbers by position in the large domain (a
-      calibration's seeds) needs them to draw the same numbers on
-      the cut. The yaml's `cut_from` is what marks a domain as hrus
-      only.
+    The yaml's `cut_from` is what marks a domain as hrus only. The
+    cut does NOT record each hru's position in the source (it did for
+    a day: `source_position`, `source_nhru`). The one caller that
+    wanted it, a calibration drawing each hru's random seed by
+    position, draws it from the hru's `nhm_id` instead: a parameter
+    of the domain, cut with the rest, names an hru in both domains
+    without any tracking (JLM, Nov 23, 2026).
     The cut keeps the source's order of the hrus. Everything on
     `nhru` is read over the span from the first hru to the last and
     cut in memory, the forcing from the transposed copy when there is

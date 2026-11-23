@@ -4,8 +4,8 @@ its hrus, on drb_2yr's nhm.control (765 hrus).
 - A model of the cut gives those hrus' columns of the whole domain's
   model, identical, from either forcing file, and so does a block of
   the cut.
-- The cut's files hold the source's values at those hrus, the hrus'
-  positions in the source, and nothing on another grid.
+- The cut's files hold the source's values at those hrus and nothing
+  on another grid.
 - verify_translation passes on the cut.
 - The hrus are named by position or by nhm_id, and both give one cut.
 - A build of the cut that keeps the channel raises; so do hrus that
@@ -163,9 +163,7 @@ def test_cut_parameter_file(translation_yaml, cut_yaml):
     source = _files(translation_yaml)["parameter_file"]
     cut = _files(cut_yaml)["parameter_file"]
     assert cut.sizes["nhru"] == N_CUT
-    np.testing.assert_array_equal(cut["source_position"].values, POSITIONS)
     assert cut.attrs["cut_from"] == str(translation_yaml.resolve())
-    assert cut.attrs["source_nhru"] == NHRU
     assert cut.attrs["source_files"] == source.attrs["source_files"]
     # nothing on another grid, and its dims are recorded
     assert set(cut.sizes) <= {"nhru", *cut_module.WHOLE_DIMS}
@@ -176,11 +174,9 @@ def test_cut_parameter_file(translation_yaml, cut_yaml):
     }
     assert {"tosegment", "poi_gage_id"} <= dropped
     assert set(cut.attrs["dropped_dims"].split()) == {"nsegment", "npoigages"}
-    assert set(cut.data_vars) == (
-        set(source.data_vars) - dropped | {"source_position"}
-    )
+    assert set(cut.data_vars) == set(source.data_vars) - dropped
     # the source's values, dtypes and attributes at those hrus
-    for name in set(cut.data_vars) - {"source_position"}:
+    for name in cut.data_vars:
         wanted = source[name]
         if "nhru" in wanted.dims:
             wanted = wanted.isel(nhru=POSITIONS)
