@@ -25,6 +25,7 @@ import tomllib
 import numpy as np
 import pytest
 import xarray as xr
+import yaml
 
 # The numba on-disk kernel cache is OFF for every test run (bare pytest
 # and run_tests.sh alike; each MPI rank runs its own conftest). A cached
@@ -330,6 +331,99 @@ def two_grid_weights():
         ww[seg, 2 * seg] = 0.5
         ww[seg, 2 * seg + 1] = 0.5
     return ww
+
+
+def two_grid_mpi_paths(data_dir: pl.Path) -> dict[str, pl.Path]:
+    """The files of the two-grid toy under MPI
+    (write_two_grid_mpi_files)."""
+    return {
+        "data_dir": data_dir,
+        "input_file": data_dir / "hru_input.nc",
+        "low_params": data_dir / "low_params.nc",
+        "forcing_low": data_dir / "forcing_low.nc",
+        "storage_initial": data_dir / "storage_initial.nc",
+        "flow_initial": data_dir / "flow_initial.nc",
+        "weights": data_dir / "weights.nc",
+        "yaml_file": data_dir / "model.yaml",
+    }
+
+
+def write_two_grid_mpi_files(
+    data_dir: pl.Path, toy: dict, two_grid_weights: np.ndarray
+) -> dict[str, pl.Path]:
+    """Write ALL on-disk inputs of the two-grid toy under MPI -- the
+    hru input file, the segment input files, the Map weights, and
+    model.yaml (with RELATIVE path strings, exercising config's
+    resolve-relative-to-the-yaml rule). No MPI here: ONE process
+    calls it (rank 0, or a test that launches the ranks itself)."""
+    paths = two_grid_mpi_paths(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    # The distributed grid's kitchen-sink input file: forcing +
+    # time-varying param as (time|month, hru); static params as
+    # (hru,). Segment data and initial state never enter it.
+    xr.Dataset(
+        data_vars=dict(
+            forcing_up=toy["forcing_up"],
+            param_up_0=toy["up_params"]["param_up_0"],
+            param_up_1=toy["up_params"]["param_up_1"],
+            param_shared_name=toy["up_params"]["param_shared_name"],
+        ),
+    ).to_netcdf(paths["input_file"])
+    # Segment inputs + weights, one file each (the bare DataArrays
+    # need a name for NetCDF).
+    toy["low_params"].to_netcdf(paths["low_params"])
+    toy["forcing_low"].rename("forcing_low").to_netcdf(paths["forcing_low"])
+    toy["low_storage_initial"].rename("storage_initial").to_netcdf(
+        paths["storage_initial"]
+    )
+    # the distributed grid's initial state: full extent, its own
+    # file, each rank takes its block
+    toy["up_flow_initial"].rename("flow_initial").to_netcdf(
+        paths["flow_initial"]
+    )
+    xr.DataArray(
+        two_grid_weights, dims=["segment", "hru"], name="weights"
+    ).to_netcdf(paths["weights"])
+    # The fully-serialized configuration (relative path strings).
+    cfg = {
+        "control": {
+            "input_file": "hru_input.nc",
+            "output_parallel_netcdf": "hru_output_yaml.nc",
+            "output_serial_zarr": "segment_output_yaml.zarr",
+            "output_var_names": ["flow", "storage"],
+            "time_chunk_size": 10,
+            "mpi_grid": "hru",
+        },
+        "processes": {
+            "upper": {
+                "class": "Upper",
+                "discretization": "hru",
+                "flow": "flow_initial.nc",
+            },
+            "lower": {
+                "class": "Lower",
+                "discretization": "segment",
+                "parameters": "low_params.nc",
+                "forcing_low": "forcing_low.nc",
+                "storage": "storage_initial.nc",
+            },
+        },
+        "maps": {
+            "hru_to_seg": {
+                "class": "MapMPI",
+                "weights": "weights.nc",
+                "grid": {"hru": "segment"},
+                "variable": {"flow": "flow"},
+            }
+        },
+    }
+    # sort_keys=False is LOAD-BEARING: the processes mapping order IS
+    # the execution schedule, and safe_dump alphabetizes by default
+    # (which would put lower before upper -> the one-pass order
+    # validation rightly rejects it).
+    with open(paths["yaml_file"], "w") as ff:
+        yaml.safe_dump(cfg, ff, sort_keys=False)
+    return paths
 
 
 @pytest.fixture(scope="session")

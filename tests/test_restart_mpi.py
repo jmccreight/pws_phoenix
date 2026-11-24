@@ -273,12 +273,17 @@ class TestRestartTwoGridToy:
                 "bit-identical after MPI restart",
             )
 
-    def test_replicated_state_bit_identical(self, toy_run):
+    def test_serial_grid_state_bit_identical(self, toy_run):
+        """On rank 0, where the serial grid runs (the default). The
+        other ranks hold the build's values in the run without a
+        restart and the restart's in the warm one."""
+        if MPI.COMM_WORLD.rank != 0:
+            return
         for nn, vv in toy_run["lower_ac"].items():
             np.testing.assert_array_equal(
                 toy_run["lower_bc"][nn],
                 vv,
-                err_msg=f"replicated 'lower' variable '{nn}' not "
+                err_msg=f"serial-grid 'lower' variable '{nn}' not "
                 "bit-identical after MPI restart",
             )
 

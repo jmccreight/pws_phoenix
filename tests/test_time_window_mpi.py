@@ -400,9 +400,19 @@ class TestTimeWindowTwoGridToy:
         assert warm["last"] == np.datetime64(last)
 
     def test_warm_start_final_state_bit_identical(self, toy_runs):
-        _assert_states_equal(
-            toy_runs["warm"]["state"], toy_runs["windowed"]["both"]["state"]
-        )
+        """Rank 0 holds every grid's answer. The serial grid runs on
+        rank 0 only (the default): on the other ranks it holds the
+        restart's state in the warm run and the build's in the other,
+        so only the distributed grid's variables are compared there."""
+        warm = toy_runs["warm"]["state"]
+        reference = toy_runs["windowed"]["both"]["state"]
+        if MPI.COMM_WORLD.rank != 0:
+            warm = {nn: vv for nn, vv in warm.items() if nn.startswith("hru/")}
+            reference = {
+                nn: vv for nn, vv in reference.items() if nn.startswith("hru/")
+            }
+            assert warm
+        _assert_states_equal(warm, reference)
 
     def test_warm_start_streamed_output(self, toy_runs):
         """The warm run's file holds the days after the restart day,

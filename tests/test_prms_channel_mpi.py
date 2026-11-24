@@ -309,8 +309,8 @@ def mpi_run(mpi_paths, weights):
     result = {
         "output_file": mpi_paths["output_file"],
         "output_zarr": mpi_paths["output_zarr"],
-        # replicated serial grid: capture final state directly (no
-        # gather); asserting on EVERY rank checks replication too
+        # the serial grid's final state: the answer on rank 0, where
+        # its processes ran (the default)
         "final": {
             nn: channel[nn].values.copy()
             for nn in ("seg_outflow", "seg_inflow")
@@ -359,8 +359,10 @@ class TestPRMSChannelSubmodelMPI:
         )
         assert bad.mean() <= OUTLIER_FRACTION
 
-    # -- replicated final state, asserted on EVERY rank --
-    def test_final_state_every_rank(self, mpi_run, answers):
+    # -- the segment grid's final state, on rank 0 (it ran there) --
+    def test_final_state_rank0(self, mpi_run, answers):
+        if MPI.COMM_WORLD.rank != 0:
+            return
         for nn, vals in mpi_run["final"].items():
             bad = ~np.isclose(
                 vals, answers[nn].values[-1, :], rtol=RTOL, atol=ATOL

@@ -97,6 +97,11 @@ def mpi_run():
             "budget": "error",
         },
     )
+    seg_tave_built = (
+        model.discretizations["nsegment"]
+        .dataset["seg_tave_water"]
+        .values.copy()
+    )
     model.run(DT)
     aa, bb = model._decomp_slice
     local_sroff = model._ds_mpi_stream["sroff"].values.copy()
@@ -105,10 +110,10 @@ def mpi_run():
         .dataset["seg_tave_water"]
         .values.copy()
     )
-    gathered = comm.allgather(seg_tave)
-    replicated_identical = all(
-        np.array_equal(gathered[0], gg, equal_nan=True) for gg in gathered
-    )  # equal_nan: the never-flow segment is NaN on every rank
+    # equal_nan: the never-flow segment is NaN
+    seg_tave_as_built = np.array_equal(
+        seg_tave, seg_tave_built, equal_nan=True
+    )
     model.finalize()
     comm.Barrier()
 
@@ -117,7 +122,7 @@ def mpi_run():
         "serial_sroff_block": serial_sroff[aa:bb],
         "seg_tave": seg_tave,
         "serial_seg_tave": serial_seg_tave,
-        "replicated_identical": replicated_identical,
+        "seg_tave_as_built": seg_tave_as_built,
         "output_file": output_file,
         "output_zarr": output_zarr,
         "decomp": (aa, bb),
@@ -136,7 +141,10 @@ class TestLegacyToParallel:
 
     def test_segment_grid_matches_serial(self, mpi_run):
         """MapMPI Allreduce order != serial matmul order: tiny float
-        tolerance on the segment grid."""
+        tolerance on the segment grid. On rank 0, where the segment
+        grid runs (the default)."""
+        if MPI.COMM_WORLD.rank != 0:
+            return
         finite = np.isfinite(mpi_run["serial_seg_tave"])
         assert (np.isfinite(mpi_run["seg_tave"]) == finite).all()
         np.testing.assert_allclose(
@@ -146,8 +154,10 @@ class TestLegacyToParallel:
             atol=1e-9,
         )
 
-    def test_replicated_identical_across_ranks(self, mpi_run):
-        assert mpi_run["replicated_identical"]
+    def test_segment_grid_runs_on_rank0_only(self, mpi_run):
+        """The default: off rank 0 the segment grid's variables keep
+        the values of the build."""
+        assert mpi_run["seg_tave_as_built"] == (MPI.COMM_WORLD.rank != 0)
 
     def test_control_output_request_injected(self, mpi_run):
         """The control's nhru names all stream to the NetCDF (PRMS-only

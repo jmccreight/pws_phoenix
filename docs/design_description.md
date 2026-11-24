@@ -8,7 +8,7 @@
     - [Variables classed by their relation to model time](#variables-classed-by-their-relation-to-model-time)
     - [Global state split: `Time` passed down, options consumed at build](#global-state-split-time-passed-down-options-consumed-at-build)
     - [Maps: a per-variable correspondence between grids, applied once per step](#maps-a-per-variable-correspondence-between-grids-applied-once-per-step)
-    - [MPI: one distributed grid, serial grids replicated on every rank](#mpi-one-distributed-grid-serial-grids-replicated-on-every-rank)
+    - [MPI: one distributed grid, serial grids held by every rank and run on rank 0](#mpi-one-distributed-grid-serial-grids-held-by-every-rank-and-run-on-rank-0)
     - [Memory: reference, do not copy; kernels write in place](#memory-reference-do-not-copy-kernels-write-in-place)
     - [The input contract: `Model.input_spec` and three classes of parameter](#the-input-contract-modelinput_spec-and-three-classes-of-parameter)
     - [Initial state: the restart variables, supplied under their own names](#initial-state-the-restart-variables-supplied-under-their-own-names)
@@ -89,7 +89,7 @@ Terms:
 | Variables classed by their relation to model time | built | Jun 2026 | Framework |
 | Global state split: `Time` passed down, options consumed at build | built; options still a dict | Jun 2026 | Framework |
 | Maps: a per-variable correspondence between grids, applied once per step | built | Jul 2026 | Framework |
-| MPI: one distributed grid, serial grids replicated on every rank | built | Jul 2026 | Framework |
+| MPI: one distributed grid, serial grids held by every rank and run on rank 0 | built | Jul 2026 | Framework |
 | Memory: reference, do not copy; kernels write in place | built | Jul 2026 | Framework |
 | The input contract: `Model.input_spec` and three classes of parameter | built | Aug 2026 | Framework |
 | Initial state: the restart variables, supplied under their own names | built | Nov 2026 | Framework |
@@ -265,17 +265,38 @@ Terms:
     batched product).
   - A default process order with subsetting.
 
-### MPI: one distributed grid, serial grids replicated on every rank
+### MPI: one distributed grid, serial grids held by every rank and run on rank 0
 
-- **Status:** built July 2026; on develop.
+- **Status:** built July 2026; serial grids run on rank 0 only since
+  Nov 24, 2026; on develop.
 - **Why:** the real pattern is a large hru grid feeding a small
   channel network, and mpixarray streams one decomposed dataset.
 - **Decision:**
   - An MPI run has one distributed grid (`control["mpi_grid"]`) and
-    any number of serial grids, each replicated on every rank.
-    Replication was chosen over one owning rank: every rank runs the
-    same loop, with no rank branch that could leave a collective call
-    unmatched.
+    any number of serial grids, each built and held on every rank.
+  - A serial grid's processes and inputs run on rank 0 only (JLM,
+    Nov 24, 2026). Until then every rank ran them (replication),
+    chosen so that every rank ran the same loop with no rank branch
+    that could leave a collective call unmatched. What it cost: the
+    channel ran once per rank on one node, and the CONUS step grew
+    with the rank count (76 to 90 ms at 4 ranks, 140 to 147 at 16,
+    Hovenweep, Nov 21, 2026, no output). Nothing on the distributed
+    grid reads a serial grid (no Map goes that way), and rank 0
+    already wrote the serial grids' output and restart state, so the
+    other ranks' copies were never used.
+  - What keeps the collectives matched now: every Map is applied on
+    every rank (a `MapMPI` ends in an `Allreduce`); a rank that made
+    no budget check still joins the agreement of a budget raise; any
+    other raise from what rank 0 runs alone prints its traceback and
+    ends the MPI job (`ModelMPI._call_alone`, `comm.Abort`), because
+    the other ranks would wait forever at the next `Allreduce`. An
+    `Allreduce` per step so that all ranks raise together was
+    rejected: a collective call every step for an error that almost
+    never happens.
+  - On the ranks other than 0 a serial grid's variables keep the
+    values of the build. `control["serial_grids_all_ranks"]` (default
+    False) runs the serial grids on every rank, as before; rank 0's
+    values and both output stores are the same bit for bit.
   - `MapMPI` crosses the boundary: each rank's partial product, then
     `Allreduce(SUM)`.
   - Output follows the owning grid: distributed variables go through
@@ -295,12 +316,17 @@ Terms:
     expected to take over the role.
 - **For users:**
   - `control["mpi_grid"]`, `control["output_parallel_netcdf"]`,
-    `control["output_serial_zarr"]`.
+    `control["output_serial_zarr"]`,
+    `control["serial_grids_all_ranks"]`.
   - Segment-grid results agree with serial to about 1e-9 (sum order);
     hru-grid results are bit for bit.
+  - Read a serial grid's state from the model on rank 0 only.
+  - An error in a serial grid's process during the run ends the whole
+    MPI job, with the traceback on rank 0's stderr.
 - **Where:** `CLAUDE.md` "MPI path"; `ModelMPI` in
   `pws_phoenix/model.py`; `MapMPI` in `pws_phoenix/maps.py`;
-  `tests/test_two_grid_mpi.py`.
+  `tests/test_two_grid_mpi.py` (both modes compared),
+  `tests/test_rank0_alone_abort.py`.
 - **Left unfinished:**
   - A derived buffer with a second dimension cannot be declared
     (mpixarray decomposes every dimension).

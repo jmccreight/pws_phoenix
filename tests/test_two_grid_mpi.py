@@ -2,7 +2,7 @@
 test_two_grid_mpi.py
 ====================
 pytest-mpi Step B regression: Upper on a DISTRIBUTED "hru" grid (mpixarray
-parallelize + streaming), Lower on a serial "segment" grid REPLICATED on
+parallelize + streaming), Lower on a serial "segment" grid held by
 every rank, coupled by MapMPI (local partial product + Allreduce). Validates
 against the same ground truth as the serial two-grid test (the conftest
 two-grid factories; deterministic per seed, so every rank rebuilds identical
@@ -25,9 +25,15 @@ collectives aligned across the parametrized runs.
 
 `flow` (hru) is streamed to disk (parallel NetCDF) and validated over all
 timesteps on rank 0; `storage` (segment) is collected by the rank-0 zarr
-Output and likewise validated over all timesteps. The replicated segment
-grid's final state is additionally validated on EVERY rank directly (no
-gather needed) plus an allgather cross-rank identity check.
+Output and likewise validated over all timesteps.
+
+Each input style is run TWICE: as the default, where the segment grid's
+process runs on rank 0 only, and with control["serial_grids_all_ranks"],
+where it runs on every rank. The default's final segment state is
+validated on rank 0 and is the build's on the other ranks; the
+all-ranks run's is validated on EVERY rank directly (no gather needed)
+plus an allgather cross-rank identity check; rank 0's state and both
+output stores are the same in the two runs, bit for bit.
 
 Run with:
     mpirun -n 4 pytest --with-mpi tests/test_two_grid_mpi.py -v
@@ -42,8 +48,9 @@ import tempfile
 import numpy as np
 import pytest
 import xarray as xr
-import yaml
 from mpi4py import MPI
+
+from conftest import two_grid_mpi_paths, write_two_grid_mpi_files
 from pws_phoenix.config import load_model_yaml
 from pws_phoenix.maps import MapMPI
 from pws_phoenix.model import ModelMPI
@@ -80,85 +87,9 @@ def mpi_paths(two_grid_toy, two_grid_weights):
     tmp = comm.bcast(tmp, root=0)
     assert tmp is not None
     data_dir = pl.Path(tmp) / "two_grid_mpi_data"
-    paths = {
-        "data_dir": data_dir,
-        "input_file": data_dir / "hru_input.nc",
-        "low_params": data_dir / "low_params.nc",
-        "forcing_low": data_dir / "forcing_low.nc",
-        "storage_initial": data_dir / "storage_initial.nc",
-        "flow_initial": data_dir / "flow_initial.nc",
-        "weights": data_dir / "weights.nc",
-        "yaml_file": data_dir / "model.yaml",
-    }
+    paths = two_grid_mpi_paths(data_dir)
     if comm.rank == 0:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        # The distributed grid's kitchen-sink input file: forcing +
-        # time-varying param as (time|month, hru); static params as
-        # (hru,). Segment data and initial state never enter it.
-        xr.Dataset(
-            data_vars=dict(
-                forcing_up=toy["forcing_up"],
-                param_up_0=toy["up_params"]["param_up_0"],
-                param_up_1=toy["up_params"]["param_up_1"],
-                param_shared_name=toy["up_params"]["param_shared_name"],
-            ),
-        ).to_netcdf(paths["input_file"])
-        # Segment inputs + weights, one file each (the bare DataArrays
-        # need a name for NetCDF).
-        toy["low_params"].to_netcdf(paths["low_params"])
-        toy["forcing_low"].rename("forcing_low").to_netcdf(
-            paths["forcing_low"]
-        )
-        toy["low_storage_initial"].rename("storage_initial").to_netcdf(
-            paths["storage_initial"]
-        )
-        # the distributed grid's initial state: full extent, its own
-        # file, each rank takes its block
-        toy["up_flow_initial"].rename("flow_initial").to_netcdf(
-            paths["flow_initial"]
-        )
-        xr.DataArray(
-            two_grid_weights, dims=["segment", "hru"], name="weights"
-        ).to_netcdf(paths["weights"])
-        # The fully-serialized configuration (relative path strings).
-        cfg = {
-            "control": {
-                "input_file": "hru_input.nc",
-                "output_parallel_netcdf": "hru_output_yaml.nc",
-                "output_serial_zarr": "segment_output_yaml.zarr",
-                "output_var_names": ["flow", "storage"],
-                "time_chunk_size": 10,
-                "mpi_grid": "hru",
-            },
-            "processes": {
-                "upper": {
-                    "class": "Upper",
-                    "discretization": "hru",
-                    "flow": "flow_initial.nc",
-                },
-                "lower": {
-                    "class": "Lower",
-                    "discretization": "segment",
-                    "parameters": "low_params.nc",
-                    "forcing_low": "forcing_low.nc",
-                    "storage": "storage_initial.nc",
-                },
-            },
-            "maps": {
-                "hru_to_seg": {
-                    "class": "MapMPI",
-                    "weights": "weights.nc",
-                    "grid": {"hru": "segment"},
-                    "variable": {"flow": "flow"},
-                }
-            },
-        }
-        # sort_keys=False is LOAD-BEARING: the processes mapping order IS
-        # the execution schedule, and safe_dump alphabetizes by default
-        # (which would put lower before upper -> the one-pass order
-        # validation rightly rejects it).
-        with open(paths["yaml_file"], "w") as ff:
-            yaml.safe_dump(cfg, ff, sort_keys=False)
+        write_two_grid_mpi_files(data_dir, toy, two_grid_weights)
     comm.Barrier()
     yield paths
     if comm.rank == 0:
@@ -167,13 +98,31 @@ def mpi_paths(two_grid_toy, two_grid_weights):
 
 @pytest.fixture(scope="module", params=INPUT_STYLES)
 def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
-    """Build + run + finalize ModelMPI ONCE per input style; every
-    collective lives here. Output paths are per-style so the runs don't
-    collide."""
+    """Build + run + finalize ModelMPI TWICE per input style (the
+    default, then control["serial_grids_all_ranks"]); every collective
+    lives here. Output paths are per-style and per-run so the runs
+    don't collide. The keys without a suffix are the default run's."""
     style = request.param
     comm = MPI.COMM_WORLD
-    toy = two_grid_toy
+    default = _run(
+        style, False, comm, mpi_paths, two_grid_toy, two_grid_weights
+    )
+    all_ranks = _run(
+        style, True, comm, mpi_paths, two_grid_toy, two_grid_weights
+    )
+    return default | {
+        "all_ranks": all_ranks,
+        "rank0_storage_final": comm.bcast(default["storage_final"], root=0),
+    }
+
+
+def _run(
+    style, serial_grids_all_ranks, comm, mpi_paths, toy, two_grid_weights
+):
+    """One build + run + finalize; new process_dict, maps and control
+    each time (a MapMPI is bound to its model)."""
     data_dir = mpi_paths["data_dir"]
+    tag = f"{style}_all_ranks" if serial_grids_all_ranks else style
 
     if style == "yaml":
         process_dict, control, maps, _ = load_model_yaml(
@@ -227,24 +176,30 @@ def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
             "input_file": mpi_paths["input_file"],
             # Routed by owning grid: flow (hru) streams via mpixarray;
             # storage (segment) goes to the rank-0 zarr Output.
-            "output_parallel_netcdf": data_dir / f"hru_output_{style}.nc",
-            "output_serial_zarr": data_dir / f"segment_output_{style}.zarr",
             "output_var_names": ["flow", "storage"],
             "time_chunk_size": 10,  # full chunks + a partial tail
             "mpi_grid": "hru",
         }
+    # the yaml names its own stores: both styles get per-run ones here
+    control = control | {
+        "output_parallel_netcdf": data_dir / f"hru_output_{tag}.nc",
+        "output_serial_zarr": data_dir / f"segment_output_{tag}.zarr",
+        "serial_grids_all_ranks": serial_grids_all_ranks,
+    }
 
     model = ModelMPI(process_dict, control, maps=maps)
+    seg_ds = model.discretizations["segment"].dataset
+    storage_built = seg_ds["storage"].values.copy()
     model.run(np.float64(1.0))
 
-    seg_ds = model.discretizations["segment"].dataset
     storage_final = seg_ds["storage"].values.copy()
     lower_flow_final = seg_ds["flow"].values.copy()
     # The map's target buffer must BE Lower's cross-grid input (zero-copy).
     map_wired = (
         seg_ds["flow"].values is maps["hru_to_seg"].target_values.values
     )
-    # Replicated segment grid: every rank must hold the identical answer.
+    # Compared across ranks: identical when the segment grid runs on
+    # every rank.
     gathered = comm.allgather(storage_final)
     replicated_identical = all(
         np.array_equal(gathered[0], gg) for gg in gathered
@@ -255,6 +210,7 @@ def mpi_run(request, mpi_paths, two_grid_toy, two_grid_weights):
         "style": style,
         "output_parallel_netcdf": control["output_parallel_netcdf"],
         "serial_store": control["output_serial_zarr"],
+        "storage_built": storage_built,
         "storage_final": storage_final,
         "lower_flow_final": lower_flow_final,
         "map_wired": map_wired,
@@ -271,7 +227,43 @@ class TestTwoGridMPI:
         assert mpi_run["map_wired"]
 
     def test_replicated_identical_across_ranks(self, mpi_run):
-        assert mpi_run["replicated_identical"]
+        """With serial_grids_all_ranks every rank holds the same
+        segment state; by default only rank 0 ran it."""
+        assert mpi_run["all_ranks"]["replicated_identical"]
+        assert not mpi_run["replicated_identical"]
+
+    def test_segment_grid_runs_on_rank0_only(self, mpi_run):
+        """The default: rank 0 holds the all-ranks run's segment state
+        bit for bit, and the other ranks the values of the build."""
+        if MPI.COMM_WORLD.rank == 0:
+            expected = mpi_run["all_ranks"]["storage_final"]
+        else:
+            expected = mpi_run["storage_built"]
+            assert not np.array_equal(expected, mpi_run["rank0_storage_final"])
+        np.testing.assert_array_equal(mpi_run["storage_final"], expected)
+
+    def test_stores_same_in_both_runs(self, mpi_run):
+        """Both output stores do not depend on where the segment grid
+        runs, bit for bit."""
+        if MPI.COMM_WORLD.rank != 0:
+            return
+        other = mpi_run["all_ranks"]
+        with (
+            xr.load_dataset(mpi_run["output_parallel_netcdf"]) as ds_nc,
+            xr.load_dataset(other["output_parallel_netcdf"]) as ds_nc_all,
+        ):
+            np.testing.assert_array_equal(
+                ds_nc["flow_out"].values, ds_nc_all["flow_out"].values
+            )
+        with (
+            xr.open_zarr(mpi_run["serial_store"], consolidated=False) as ds_z,
+            xr.open_zarr(
+                other["serial_store"], consolidated=False
+            ) as ds_z_all,
+        ):
+            np.testing.assert_array_equal(
+                ds_z["storage"].values, ds_z_all["storage"].values
+            )
 
     # -- streamed hru flow over all timesteps (global); validated rank 0 --
     def test_streamed_flow_all_timesteps(self, mpi_run, answers):
@@ -281,11 +273,18 @@ class TestTwoGridMPI:
             flow_out = ds_out["flow_out"].values  # (n_time, n_hru) global
         np.testing.assert_allclose(flow_out, answers["flow"], rtol=1e-12)
 
-    # -- replicated segment state: full answer on EVERY rank, no gather --
+    # -- segment state: the full answer on EVERY rank (no gather) when
+    # the segment grid runs on all of them, on rank 0 by default --
     def test_segment_storage_final(self, mpi_run, answers):
         np.testing.assert_allclose(
-            mpi_run["storage_final"], answers["storage"][-1], rtol=1e-12
+            mpi_run["all_ranks"]["storage_final"],
+            answers["storage"][-1],
+            rtol=1e-12,
         )
+        if MPI.COMM_WORLD.rank == 0:
+            np.testing.assert_allclose(
+                mpi_run["storage_final"], answers["storage"][-1], rtol=1e-12
+            )
 
     def test_mapped_flow_final(self, mpi_run, answers, two_grid_weights):
         np.testing.assert_allclose(

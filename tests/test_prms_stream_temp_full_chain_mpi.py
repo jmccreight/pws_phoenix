@@ -326,6 +326,9 @@ def mpi_run(mpi_paths):
         "time_chunk_size": 61,
         "mpi_grid": "nhru",
         "budget": "error",
+        # the serial grids run on EVERY rank here (the default is
+        # rank 0 only): test_replication_bit_identical needs it
+        "serial_grids_all_ranks": True,
     }
     model = ModelMPI(
         process_dict,

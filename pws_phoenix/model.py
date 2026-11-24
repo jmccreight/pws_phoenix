@@ -20,8 +20,10 @@ separate process-agnostic orchestrator layer.
 
 import os
 import pathlib as pl
+import sys
+import traceback
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Dict, List, Literal, Union
 
 import numba
@@ -1699,7 +1701,8 @@ class Model:
 
 class ModelMPI(Model):
     """MPI streaming model: a distributed grid time-streamed via mpixarray,
-    plus optional serial grids replicated on every rank, coupled by Maps.
+    plus optional serial grids built on every rank and run on rank 0,
+    coupled by Maps.
 
     The distributed grid (``control["mpi_grid"]``, default ``"space"``)
     keeps the Phase 1 pipeline:
@@ -1711,8 +1714,9 @@ class ModelMPI(Model):
     grid's state, parameters, per-step input buffers, and streaming outputs
     -- cross-process buffer sharing there is *structural* (the same named
     variable). Serial grids (Step B) are assembled by the SERIAL machinery
-    (``_add_process_fields`` + ``Input``), identically on every rank -- that
-    IS the replication (uniform SPMD run loop; no rank branches); their data
+    (``_add_process_fields`` + ``Input``), identically on every rank; their
+    processes and inputs RUN on rank 0 only unless
+    ``control["serial_grids_all_ranks"]`` (see run()); their data
     never enter the mpixarray dataset. A Map whose source is the distributed
     grid must be a ``MapMPI`` (distributed mat-vec: local partial product +
     Allreduce fills the target buffer on every rank). Serial->distributed
@@ -1756,6 +1760,11 @@ class ModelMPI(Model):
                           holds depth x its block of every streamed
                           input and output. The answers do not depend
                           on it.
+        serial_grids_all_ranks
+                          run the serial grids' processes and inputs
+                          on EVERY rank (default False: on rank 0
+                          only, see run()). The answers on rank 0 and
+                          both outputs do not depend on it.
         numba_n_threads   numba threads PER RANK for the hru kernels
                           (default 1; see Model._set_numba_threads).
                           ranks x threads must fit the cores.
@@ -1880,6 +1889,9 @@ class ModelMPI(Model):
         mpi_grid = control.get("mpi_grid", "space")
         # rank-0 progress bar over the streamed time loop (mpixarray's)
         self._progress = bool(control.get("progress", False))
+        self._serial_grids_all_ranks = bool(
+            control.get("serial_grids_all_ranks", False)
+        )
         self._mpi_grid = mpi_grid
 
         serial_grids = {
@@ -2313,10 +2325,11 @@ class ModelMPI(Model):
             if note is not None:
                 self._slow_order_notes.append(note)
 
-        # ---- Serial grids (Step B): replicated on every rank. Assembled
+        # ---- Serial grids (Step B): built on every rank. Assembled
         #      by the serial machinery, identically on each rank (from
-        #      deterministic/shared inputs) -- that IS the replication.
-        #      Their data never enter the mpixarray dataset. ----
+        #      deterministic/shared inputs). Their processes RUN on
+        #      rank 0 only by default (run()). Their data never enter
+        #      the mpixarray dataset. ----
         serial_grid_procs: Dict[str, List[str]] = {}
         for kk, grid in self._proc_grid.items():
             if grid != mpi_grid:
@@ -2384,7 +2397,7 @@ class ModelMPI(Model):
         self._resolve_maps(grid_sizes={mpi_grid: n_global})
 
         # ---- Serial-grid output: rank 0 collects to a zarr Output --
-        #      replicated grids mean everyone computes, one writes. The
+        #      rank 0 always runs the serial grids, and it writes. The
         #      rank branch is safe by construction: Output holds NO
         #      collectives (local buffering + disk IO only).
         if serial_out_names:
@@ -2461,8 +2474,16 @@ class ModelMPI(Model):
         window. Serial-grid inputs advance in
         lockstep with the stream; a Map is applied exactly once per step,
         immediately before its first consumer (see Model._resolve_maps).
-        The loop is SPMD-uniform: every rank executes the same statements
-        every step (no rank branches -- serial grids are replicated)."""
+
+        A serial grid's processes and inputs run on rank 0 ONLY, unless
+        control["serial_grids_all_ranks"]: nothing on the distributed
+        grid reads them, and rank 0 writes their output and their
+        restart state. On the other ranks their variables keep the
+        values of the build. Every collective is still made by every
+        rank: each Map is applied on all of them (a MapMPI ends in an
+        Allreduce), and so is the agreement of a budget raise. Any
+        other raise from what rank 0 runs alone ends the MPI job
+        (_call_alone)."""
         if self._finalized:
             raise RuntimeError("Cannot run a finalized Model.")
         numba.set_num_threads(self._numba_n_threads)
@@ -2472,6 +2493,21 @@ class ModelMPI(Model):
             proc
             for kk, proc in self.model_dict.items()
             if self._proc_grid[kk] == mpi_grid
+        ]
+        serial_here = self._serial_grids_all_ranks or self._comm.rank == 0
+        proc_runs_here = [
+            serial_here or self._proc_grid[kk] == mpi_grid
+            for kk in self.model_dict
+        ]
+        # What rank 0 runs ALONE: a raise there is no other rank's
+        # (see _call_alone).
+        alone = (
+            serial_here
+            and not self._serial_grids_all_ranks
+            and self._comm.size > 1
+        )
+        proc_runs_alone = [
+            alone and self._proc_grid[kk] != mpi_grid for kk in self.model_dict
         ]
         # warm start: the stream was time-sliced at build to BEGIN at
         # the resume index; model time stays GLOBALLY indexed, so
@@ -2531,14 +2567,33 @@ class ModelMPI(Model):
                             values += conversion[1]
                 # Serial-grid inputs advance in lockstep with the stream.
                 for inp in self.inputs_dict.values():
-                    inp.advance()
-                for proc in self.model_dict.values():
-                    proc.advance()
-                for proc_name, proc in self.model_dict.items():
+                    if alone:
+                        self._call_alone(inp.advance)
+                    elif serial_here:
+                        inp.advance()
+                for proc, runs_here, runs_alone in zip(
+                    self.model_dict.values(), proc_runs_here, proc_runs_alone
+                ):
+                    if runs_alone:
+                        self._call_alone(proc.advance)
+                    elif runs_here:
+                        proc.advance()
+                for (proc_name, proc), runs_here, runs_alone in zip(
+                    self.model_dict.items(), proc_runs_here, proc_runs_alone
+                ):
+                    # every rank: a MapMPI ends in an Allreduce
                     for mm in self._proc_maps[proc_name]:
                         mm.apply()
-                    proc.calculate(dt, self.time)
-                    self._check_budgets(proc)
+                    if runs_alone:
+                        self._call_alone(proc.calculate, dt, self.time)
+                        self._check_budgets(proc)
+                    elif runs_here:
+                        proc.calculate(dt, self.time)
+                        self._check_budgets(proc)
+                    elif proc._budgets and self._budget_mode == "error":
+                        # no check on this rank, but the ranks that
+                        # made one agree in an Allreduce: join it
+                        self._raise_if_imbalanced(0, proc)
                 # Record state into this step's row of the streamed
                 # output buffer(s).
                 for out, state in out_rows:
@@ -2567,6 +2622,27 @@ class ModelMPI(Model):
         """Rank 0 only: one warning for the run, not one per rank."""
         if self._comm.rank == 0:
             super()._warn_if_numba_threads_ignored(n_max)
+
+    def _call_alone(self, call: Callable[..., None], *args: Any) -> None:
+        """Make a call that this rank ALONE makes (by default a serial
+        grid's processes and inputs run on rank 0 only). If it raises,
+        no other rank does: they would wait forever at the next
+        collective (a MapMPI's Allreduce). So the traceback is printed
+        and the whole MPI job is ended (comm.Abort); nothing is
+        closed."""
+        try:
+            call(*args)
+        except Exception:
+            traceback.print_exc()
+            print(
+                f"ModelMPI: the error above was raised on rank "
+                f"{self._comm.rank} alone, in a serial grid's process "
+                "or input (they run on rank 0 only unless "
+                "control['serial_grids_all_ranks']). Ending the MPI job.",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._comm.Abort(1)
 
     def _raise_if_imbalanced(self, n_bad: int, proc: Any) -> None:
         """Agree across ranks before raising: one scalar Allreduce(MAX) of
@@ -2632,7 +2708,7 @@ class ModelMPI(Model):
         (gather-then-write, mirroring the rank-0 zarr Output stance):
         the distributed grid's flagged variables are allgathered
         (contiguous rank-ordered blocks -> concatenate = global order);
-        serial (replicated) grids write from rank 0's identical copy.
+        serial grids write from rank 0's copy, the one that ran.
         The files are format-identical to serial Model.write_restart,
         so serial and MPI runs can warm-start each other. The loop is
         collective-uniform (every rank joins every allgather; only the

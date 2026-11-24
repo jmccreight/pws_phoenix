@@ -148,12 +148,14 @@ def test_convert_static_parameter(
     )
     model.run(np.float64(1.0))
     storage_final = model.discretizations["segment"].dataset["storage"].values
-    np.testing.assert_allclose(
-        storage_final, answers["storage"][-1], rtol=1e-12
-    )
     model.finalize()
     comm.Barrier()
+    # the segment grid ran on rank 0 only; asserted after the
+    # collective finalize, so a rank that fails cannot hang the others
     if comm.rank == 0:
+        np.testing.assert_allclose(
+            storage_final, answers["storage"][-1], rtol=1e-12
+        )
         with xr.load_dataset(control["output_parallel_netcdf"]) as ds_out:
             flow_out = ds_out["flow_out"].values
         np.testing.assert_allclose(flow_out, answers["flow"], rtol=1e-12)
@@ -191,12 +193,14 @@ def test_streamed_input_converted(
     model, control = _build(data_dir, two_grid_toy, two_grid_weights, "feet")
     model.run(np.float64(1.0))
     storage_final = model.discretizations["segment"].dataset["storage"].values
-    np.testing.assert_allclose(
-        storage_final, answers["storage"][-1], rtol=1e-12
-    )
     model.finalize()
     comm.Barrier()
+    # the segment grid ran on rank 0 only; asserted after the
+    # collective finalize, so a rank that fails cannot hang the others
     if comm.rank == 0:
+        np.testing.assert_allclose(
+            storage_final, answers["storage"][-1], rtol=1e-12
+        )
         with xr.load_dataset(control["output_parallel_netcdf"]) as ds_out:
             flow_out = ds_out["flow_out"].values
         np.testing.assert_allclose(flow_out, answers["flow"], rtol=1e-12)
@@ -239,12 +243,14 @@ def test_supplied_state_units(
     )
     model.run(np.float64(1.0))
     storage_final = model.discretizations["segment"].dataset["storage"].values
-    np.testing.assert_allclose(
-        storage_final, answers["storage"][-1], rtol=1e-12
-    )
     model.finalize()
     comm.Barrier()
+    # the segment grid ran on rank 0 only; asserted after the
+    # collective finalize, so a rank that fails cannot hang the others
     if comm.rank == 0:
+        np.testing.assert_allclose(
+            storage_final, answers["storage"][-1], rtol=1e-12
+        )
         with xr.load_dataset(control["output_parallel_netcdf"]) as ds_out:
             flow_out = ds_out["flow_out"].values
         np.testing.assert_allclose(flow_out, answers["flow"], rtol=1e-12)

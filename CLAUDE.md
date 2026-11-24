@@ -384,11 +384,19 @@ would build a prng and write `seed.json` on rank 0):
   parameters, per-step input buffers and streaming outputs.
   `disc.decompose(ds)` does the space split; `as_iterable` (time)
   stays in `ModelMPI` (`ds_mpi` -> `ds_mpi_stream`).
-- Any number of SERIAL grids, each replicated on every rank; their
-  data never enter the mpixarray dataset. A Map from the distributed
-  grid to a serial grid is a `MapMPI`: each rank's partial product,
-  then `Allreduce(SUM)`. A Map from a serial grid to the distributed
-  grid is not implemented.
+- Any number of SERIAL grids, each built and held on every rank;
+  their data never enter the mpixarray dataset. A Map from the
+  distributed grid to a serial grid is a `MapMPI`: each rank's
+  partial product, then `Allreduce(SUM)`. A Map from a serial grid to
+  the distributed grid is not implemented.
+- A serial grid's processes and inputs RUN on rank 0 only (Nov 24,
+  2026): nothing on the distributed grid reads them, and rank 0
+  writes their output and their restart state. On the other ranks
+  their variables keep the values of the build: read a serial grid's
+  state on rank 0. Every Map is still applied on every rank (a
+  `MapMPI` ends in an `Allreduce`). `control["serial_grids_all_ranks"]`
+  (default False) runs them on every rank; rank 0's values and both
+  outputs are the same bit for bit (`tests/test_two_grid_mpi.py`).
 - Processes bind directly (`cls(ds_mpi)`) and are rebound to each
   window the loop yields.
 - `control["start_time"]` / `control["end_time"]` work as in serial:
@@ -450,6 +458,12 @@ would build a prng and write `seed.json` on rank 0):
 - A raise must be collective: the ranks agree first (Allreduce), then
   all raise. One rank raising alone hangs the others at the next
   collective.
+- The one exception: what rank 0 runs alone (a serial grid's
+  processes and inputs) cannot raise collectively. `ModelMPI.run`
+  makes those calls through `_call_alone`, which prints the traceback
+  and ends the MPI job (`comm.Abort`). A new call that only one rank
+  makes goes through it (`tests/test_rank0_alone_abort.py`, a serial
+  test that launches the ranks itself).
 - A build that raises closes what it opened: `ModelMPI.__init__`
   calls `_release()` (the input file, the NetCDF writer, the rank-0
   zarr `Output`), the same method `finalize()` calls. A new resource
