@@ -11,6 +11,7 @@ data_io.Input alone is in tests/test_input.py; ModelMPI is in
 tests/test_window_depth_mpi.py and tests/test_transposed_stream_mpi.py.
 """
 
+import importlib.util
 import warnings
 from collections.abc import Hashable
 from typing import Any
@@ -188,6 +189,10 @@ def test_stored_without_chunks_is_seen(tmp_path, engine):
     report a variable stored without chunks as
     encoding["chunksizes"] = None, a chunked one as a tuple, and a
     selection keeps the encoding."""
+    if engine == "h5netcdf" and importlib.util.find_spec("h5netcdf") is None:
+        # the serial environment (pwpx): xarray cannot pick this reader
+        assert "h5netcdf" not in xr.backends.list_engines()
+        return
     path = tmp_path / "prcp.nc"
     data = xr.DataArray(np.zeros((6, 8)), dims=("time", "nhru"), name="prcp")
     data.to_netcdf(path)
