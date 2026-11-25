@@ -1,0 +1,486 @@
+"""
+data_io.py
+==========
+IO primitives for pws_phoenix:
+  - open_xr: open a NetCDF file as DataArray or Dataset
+  - Input:   time-varying input wrapper with advance() / current_values
+  - Output:  serial buffered, time-chunked zarr writer (adapted from pywatershed)
+  - ResultCollector: chosen variables kept in memory for the whole run
+
+These are process-agnostic and sit at the base of the import stack
+(model.py builds on them; process.py no longer imports data_io).
+
+Output is the serial writer (one zarr store). The MPI path (ModelMPI in
+model.py) does NOT use Output -- it streams output through mpixarray
+(as_iterable + iterate + .mpi.write).
+"""
+
+import pathlib as pl
+import warnings
+from typing import Any, Dict, List, Union
+
+import numpy as np
+import xarray as xr
+import zarr
+
+
+def open_xr(
+    path: pl.Path, load: bool = False
+) -> Union[xr.DataArray, xr.Dataset]:
+    """Open a NetCDF file and return a DataArray (single var) or Dataset."""
+    ds = xr.open_dataset(path)
+    da_ds: Union[xr.DataArray, xr.Dataset]
+    if len(ds.data_vars) == 1:
+        da_ds = ds[list(ds.data_vars)[0]]
+        # ds[name] carries no close: without this, da_ds.close() is a
+        # no-op and the file stays open (tests/test_input.py)
+        da_ds.set_close(ds.close)
+    else:
+        da_ds = ds
+    if load:
+        da_ds = da_ds.load()
+    return da_ds
+
+
+# An input stored in the order of its dims that gives at least this
+# many times the pieces of the other order, for the reads the model
+# makes, is named in the build warning (slow_order_note).
+READ_PIECES_WARN_RATIO = 100
+
+
+def read_pieces(
+    n_block: int, n_grid: int, n_days: int, n_time: int, time_first: bool
+) -> int:
+    """The number of unbroken runs of a file that one read takes, for a
+    variable stored without chunks on ("time", <grid>) (`time_first`)
+    or on (<grid>, "time").
+
+    One read is `n_days` neighbouring days of the variable's `n_time`,
+    for `n_block` neighbouring elements of the grid's `n_grid`. A read
+    that takes ALL of the last dim is one run; any other read is one
+    run per element of the first dim it covers
+    (machine_probes/README.md "The order of the dims decides the
+    read")."""
+    if time_first:
+        return 1 if n_block == n_grid else n_days
+    return 1 if n_days == n_time else n_block
+
+
+def slow_order_note(
+    name: str,
+    data: xr.DataArray,
+    n_days: int,
+    n_block: int | None = None,
+) -> str | None:
+    """One line for the build warning of a Model (warn_slow_order) when
+    the input `name` is stored in the slower order of its dims for the
+    reads the model makes; None when it is not.
+
+    `data` is the variable as its file holds it, ALL of its time, on
+    ("time", <grid>) or (<grid>, "time"). One read is `n_days` days of
+    `n_block` grid elements (None = the whole grid). The slower order
+    is the one that takes at least READ_PIECES_WARN_RATIO times the
+    pieces (read_pieces) of the other; both orders are judged by that
+    one rule.
+
+    Only a variable stored without chunks is judged: chunks put a
+    block's bytes together in either order, and an array that came
+    from no file has no stored order. xarray's netCDF readers set
+    encoding["chunksizes"] to None for a variable stored without
+    chunks."""
+    if data.encoding.get("chunksizes", ()) is not None:
+        return None
+    time_first = data.dims[0] == "time"
+    grid_dim = data.dims[1] if time_first else data.dims[0]
+    n_time = data.sizes["time"]
+    n_grid = data.sizes[grid_dim]
+    if n_block is None:
+        n_block = n_grid
+    pieces = read_pieces(n_block, n_grid, n_days, n_time, time_first)
+    other = read_pieces(n_block, n_grid, n_days, n_time, not time_first)
+    if pieces < READ_PIECES_WARN_RATIO * other:
+        return None
+    return (
+        f"'{name}' on {data.dims}: one read ({n_days} of {n_time} days, "
+        f"{n_block} of {n_grid} {grid_dim}) takes {pieces} pieces of the "
+        f"file; on {data.dims[::-1]} it would take {other}."
+    )
+
+
+def warn_slow_order(notes: list[str]) -> None:
+    """ONE UserWarning for a build, naming every input slow_order_note
+    gave a line for. Nothing when there is none."""
+    if notes:
+        warnings.warn(
+            "Input(s) stored in the slower order of their dims for the "
+            "reads this model makes. The answers are the same in "
+            "either order; the reads take longer. See "
+            "machine_probes/README.md, 'The order of the dims decides "
+            "the read'.\n  " + "\n  ".join(notes),
+            UserWarning,
+        )
+
+
+class Input:
+    """Time-varying input wrapper.
+
+    Wraps a DataArray (from file or memory), advances through time steps,
+    and exposes current_values for the current time step.
+
+    The data are on ("time", <grid>) or on (<grid>, "time"): the order
+    is taken from the dim names and the same values are served either
+    way. What each order costs to read from a file is in
+    machine_probes/README.md "The order of the dims decides the read".
+    """
+
+    def __init__(
+        self,
+        data_or_file: Union[xr.DataArray, pl.Path],
+        read_only: bool = False,
+        load: bool = False,
+    ) -> None:
+        self._input_file: Union[pl.Path, None] = None
+        if isinstance(data_or_file, pl.Path):
+            self.data = xr.open_dataarray(data_or_file)
+            self._input_file = data_or_file
+        else:
+            self.data = data_or_file
+        dims = self.data.dims
+        if len(dims) != 2 or dims.count("time") != 1:
+            if self._input_file is not None:
+                self.data.close()
+            raise ValueError(
+                f"Input {self.data.name!r} is on dims {dims}: expected "
+                "('time', <grid>) or (<grid>, 'time')."
+            )
+        # which axis is time, decided once from the dim names
+        self._time_first: bool = dims[0] == "time"
+        if load:
+            self.data = self.data.load()
+        # only an array in memory is flagged: on a file-backed one,
+        # `.values` would read the whole array and keep it
+        if read_only and self.data.variable._in_memory:
+            self.data.values.flags.writeable = False
+        self._current_index = np.int64(-1)
+        # float64 whatever the data hold: a float32 forcing file must
+        # not hand the kernels a float32 array (the per-step copy
+        # widens, exactly)
+        if self._time_first:
+            first = self.data[0, :]
+        else:
+            first = self.data[:, 0]
+        self._current_values = (np.nan * first).astype(np.float64, copy=False)
+        self._closed = False
+        # (scale, offset) of a units conversion; see set_conversion
+        self._conversion: tuple[float, float] | None = None
+        # the ndarrays behind the per-step copy (DEVELOPER.md "Per-step
+        # data access"): a DataArray index + setitem cost ~100 us a step.
+        # A lazy (file-backed, load=False) input keeps reading one slice
+        # per step through xarray -- its whole array is not in memory.
+        self._in_memory: bool = self.data.variable._in_memory
+        self._data_values: np.ndarray | None = (
+            self.data.values if self._in_memory else None
+        )
+        self._current: np.ndarray = self._current_values.values
+
+    def set_conversion(self, scale: float, offset: float) -> None:
+        """Serve ``scale * data + offset`` (a units conversion,
+        control["units"] = "convert"). It is applied to the one-step
+        buffer in advance(), after the row is copied in and widened to
+        float64: the data themselves are never edited."""
+        self._conversion = (float(scale), float(offset))
+
+    def advance(self) -> None:
+        """Advance current_values to the next time step."""
+        self._current_index += np.int64(1)
+        if self._data_values is not None:
+            if self._time_first:
+                self._current[:] = self._data_values[self._current_index]
+            else:
+                self._current[:] = self._data_values[:, self._current_index]
+        elif self._time_first:
+            self._current[:] = self.data[self._current_index, :].values
+        else:
+            self._current[:] = self.data[:, self._current_index].values
+        if self._conversion is not None:
+            scale, offset = self._conversion
+            self._current *= scale
+            if offset != 0.0:
+                self._current += offset
+
+    def set_index(self, index: int) -> None:
+        """Fast-forward (restart): the NEXT advance() serves `index`.
+        current_values is left untouched -- the run loop advances
+        before any calculate reads it."""
+        self._current_index = np.int64(index) - np.int64(1)
+
+    def reset(self) -> None:
+        """Back to construction (Model.reset): the NEXT advance()
+        serves index 0, and current_values is nan again, so a read
+        before that advance does not see the last run's final step."""
+        self._current_index = np.int64(-1)
+        self._current[:] = np.nan
+
+    @property
+    def current_values(self) -> xr.DataArray:
+        """Values at the current time step."""
+        return self._current_values
+
+    def close(self) -> None:
+        """Close file handle if this Input opened a file."""
+        if not self._closed:
+            if self._input_file is not None:
+                self.data.close()
+            self._closed = True
+
+
+class ResultCollector:
+    """Chosen variables kept in memory for the whole run, for a caller
+    that computes on them right after it (an objective function in a
+    calibration loop): ``values[name]`` is one (n_time, *variable
+    shape) array per name, allocated ONCE at the build and filled with
+    nan. Row ``tt`` is the variable after model time step ``tt``.
+
+    ``values[name]`` is the buffer itself, not a copy: the next run
+    overwrites it. Nothing blanks it between runs; ``n_collected`` is
+    the number of rows the current run has written (Model.reset()
+    sets it to 0), so rows at or past it hold nan or an earlier run.
+
+    Serial only, float variables only (an integer buffer has no nan),
+    full spatial extent, every time step. Peak memory = n_time x the
+    variable's size per name, by design: at 350,000 HRUs over 2 years
+    of daily steps that is 2 GB per variable.
+    """
+
+    def __init__(
+        self,
+        variable_names: List[str],
+        model_dict: Dict[str, Any],
+        n_time: int,
+    ) -> None:
+        """Args:
+            variable_names: the variables to keep (budget variables
+                allowed).
+            model_dict: Model.model_dict (key -> bound Process).
+            n_time: length of the model's time axis.
+
+        Raises:
+            ValueError: a name is no process's variable, or is not a
+                float variable.
+        """
+        self.values: Dict[str, np.ndarray] = {}
+        # the variables' own ndarrays (DEVELOPER.md "Per-step data
+        # access"): no Dataset lookup in collect()
+        self._refs: Dict[str, np.ndarray] = {}
+        self.n_collected = 0
+        for name in variable_names:
+            for proc in model_dict.values():
+                if name in proc.get_var_names(include_budget=True):
+                    ref = proc._refs[name]
+                    break
+            else:
+                raise ValueError(f"Variable '{name}' not found in any process")
+            if not np.issubdtype(ref.dtype, np.floating):
+                raise ValueError(
+                    f"Variable '{name}' has dtype {ref.dtype}: only "
+                    "float variables can be collected."
+                )
+            self._refs[name] = ref
+            self.values[name] = np.full(
+                (n_time,) + ref.shape, np.nan, dtype=ref.dtype
+            )
+
+    def collect(self, time_index: int) -> None:
+        """Copy each variable into its row `time_index`."""
+        for name, ref in self._refs.items():
+            self.values[name][time_index] = ref
+        self.n_collected = time_index + 1
+
+    def reset(self) -> None:
+        """A new run begins (Model.reset): no row of it is written
+        yet. The buffers are left as they are."""
+        self.n_collected = 0
+
+
+class Output:
+    """Buffered, time-chunked serial writer to a single zarr store.
+
+    The store is created ONCE at initialize_variable_tracking: xarray writes
+    the coordinates (the full `time` axis, the spatial dim-coordinates) and
+    each variable is then declared with zarr at its full (n_time, space)
+    shape, time-chunked by time_chunk_size. Declaring is free -- a zarr
+    chunk exists on disk only once written -- so peak memory = the
+    per-variable chunk buffers; nothing is materialized (see "Prime
+    directive: memory" in pws_phoenix/CLAUDE.md). Each full buffer is
+    written as a region `arr[start:end] = buffer` (no xarray in the loop;
+    the earlier `to_zarr(append_dim="time")` cost ~2 s of store
+    re-validation per append, independent of data size); a partial tail is
+    written at finalize. Adapted from pywatershed's chunked zarr writer.
+
+    Serial only. The MPI path streams output through mpixarray
+    (as_iterable + iterate + .mpi.write) and does not use this class.
+    (Pre-sized store + region writes is also the shape concurrent writers
+    would need.)
+    """
+
+    def __init__(
+        self,
+        time_chunk_size: int,
+        variable_names: List[str],
+        output_store: pl.Path,
+        time_values: np.ndarray,
+    ) -> None:
+        """Initialize Output manager for buffered, time-chunked zarr writing.
+
+        Args:
+            time_chunk_size: Number of time steps to buffer in memory before
+                a chunk is written. Also the store's time chunk size.
+            variable_names: Variables to write -- one data_var each in the
+                single output store.
+            output_store: Path to the (single) zarr store directory; must
+                carry the ".zarr" suffix and is used verbatim.
+            time_values: 1-D datetime coordinate for the full run (sizes
+                the store's time axis).
+
+        Note:
+            Tailored to read Model.model_dict (key -> Process instance),
+            where each process's variables are identified via
+                get_var_names(include_budget=True).
+        """
+        self.time_chunk_size = time_chunk_size
+        self.variable_names = variable_names
+        self.output_store = pl.Path(output_store)
+        if self.output_store.suffix != ".zarr":
+            raise ValueError(
+                f"output_store {str(self.output_store)!r} must carry the "
+                "'.zarr' suffix (a zarr store is a directory)."
+            )
+        self.output_store.parent.mkdir(parents=True, exist_ok=True)
+        self.time_values = time_values
+
+        # Track variable references and data
+        self.variable_refs: Dict[str, xr.DataArray] = {}
+        self.process_map: Dict[str, str] = {}  # var_name -> process_name
+        self.data_buffers: Dict[str, np.ndarray] = {}
+        self._arrays: Dict[str, zarr.Array] = {}  # var_name -> store array
+        self.current_time_step = 0
+        self._finalized = False
+
+    def initialize_variable_tracking(self, model_dict: Dict[str, Any]) -> None:
+        """Reference the requested variables on their processes, allocate
+        buffers and create the (pre-sized, unmaterialized) zarr store. Must
+        be called after model processes are initialized.
+
+        Raises:
+            ValueError: If any requested variable is not found in any process.
+        """
+        for var_name in self.variable_names:
+            found = False
+            for process_name, process_obj in model_dict.items():
+                if var_name in process_obj.get_var_names(include_budget=True):
+                    self.variable_refs[var_name] = process_obj[var_name]
+                    self.process_map[var_name] = process_name
+                    found = True
+                    break
+
+            if not found:
+                raise ValueError(
+                    f"Variable '{var_name}' not found in any process"
+                )
+
+        self._initialize_buffers()
+        self._create_store()
+
+    def _create_store(self) -> None:
+        """Create the store: coordinates via xarray (so `time` round-trips
+        as datetime64), then each variable declared at full shape with
+        zarr. No data chunk is written here."""
+        coords: dict = {"time": self.time_values}
+        for var_ref in self.variable_refs.values():
+            spatial_dim = str(var_ref.dims[0])
+            # Carry the spatial dim-coordinate (e.g. "space") if present.
+            if spatial_dim in var_ref.coords and spatial_dim not in coords:
+                coords[spatial_dim] = (
+                    spatial_dim,
+                    var_ref.coords[spatial_dim].values,
+                )
+        xr.Dataset(coords=coords).to_zarr(
+            self.output_store, mode="w", consolidated=False
+        )
+        group = zarr.open_group(self.output_store, mode="r+")
+        n_time = len(self.time_values)
+        for var_name, var_ref in self.variable_refs.items():
+            # One chunk spans the full spatial extent; time chunked by buffer.
+            self._arrays[var_name] = group.create_array(
+                var_name,
+                shape=(n_time,) + var_ref.shape,
+                chunks=(self.time_chunk_size,) + var_ref.shape,
+                dtype=var_ref.dtype,
+                dimension_names=("time", str(var_ref.dims[0])),
+            )
+
+    def _initialize_buffers(self) -> None:
+        """Initialize numpy arrays to store time chunk data for each variable."""
+        for var_name, var_ref in self.variable_refs.items():
+            # Buffer: (time_chunk_size, *spatial_dims)
+            buffer_shape = (self.time_chunk_size,) + var_ref.shape
+            self.data_buffers[var_name] = np.empty(
+                buffer_shape, dtype=var_ref.dtype
+            )
+
+    def collect_current_timestep(self, time_index: int) -> None:
+        """Buffer this step's values; write a full chunk when the buffer
+        fills.
+
+        Args:
+            time_index: Global time index.
+        """
+        buffer_index = self.current_time_step % self.time_chunk_size
+
+        for var_name, var_ref in self.variable_refs.items():
+            self.data_buffers[var_name][buffer_index] = var_ref.values
+
+        self.current_time_step += 1
+
+        if self.current_time_step % self.time_chunk_size == 0:
+            self._write_chunk(self.time_chunk_size)
+
+    def _write_chunk(self, n_valid: int) -> None:
+        """Write the first n_valid buffered steps to their time region."""
+        chunk_end = self.current_time_step
+        chunk_start = chunk_end - n_valid
+        for var_name, buffer in self.data_buffers.items():
+            self._arrays[var_name][chunk_start:chunk_end] = buffer[:n_valid]
+
+    def finalize(self) -> None:
+        """Write any remaining partial buffer, then shrink the store's time
+        axis to the steps actually written (a run may stop short of
+        time_values; resize is metadata-only, dropping any chunk beyond)."""
+        remaining = self.current_time_step % self.time_chunk_size
+        if remaining > 0:
+            self._write_chunk(remaining)
+        n_written = self.current_time_step
+        if n_written < len(self.time_values):
+            group = zarr.open_group(self.output_store, mode="r+")
+            time_array = group["time"]
+            assert isinstance(time_array, zarr.Array)
+            time_array.resize((n_written,))
+            for arr in self._arrays.values():
+                arr.resize((n_written,) + arr.shape[1:])
+        self._finalized = True
+
+    def __del__(self) -> None:
+        """Warn (never write -- interpreter-shutdown order is undefined)
+        when buffered steps were lost because finalize() was not called:
+        an unwritten zarr chunk reads back as the fill value, silently."""
+        if getattr(self, "_finalized", True):
+            return
+        unwritten = self.current_time_step % self.time_chunk_size
+        if unwritten > 0:
+            warnings.warn(
+                f"Output {str(self.output_store)!r} was not finalized: "
+                f"{unwritten} buffered time step(s) were never written "
+                "(call Model.finalize() or use `with Model(...)`).",
+                RuntimeWarning,
+                stacklevel=1,
+            )

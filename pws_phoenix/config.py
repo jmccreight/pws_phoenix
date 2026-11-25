@@ -1,0 +1,190 @@
+"""
+config.py
+=========
+Minimal yaml model configuration: ``load_model_yaml(path)`` returns the
+``(process_dict, control, maps, discretizations)`` tuple that feeds
+``Model`` or ``ModelMPI`` equally.
+
+A deliberate PROBE for the future ``Options`` design (see "Global state"
+in pws_phoenix/CLAUDE.md) -- the schema is minimal and may change. yaml
+cannot hold classes or arrays, so:
+
+  - a process entry's ``class:`` is a string resolved via
+    ``Process._registry`` -- import the modules defining your concrete
+    process classes BEFORE calling ``load_model_yaml`` (importing
+    registers them);
+  - a map entry's ``class:`` is ``"Map"`` or ``"MapMPI"``; its
+    ``weights:`` is either an inline (nested-list) matrix or a path to a
+    NetCDF (loaded, closed). The file holds the full matrix as its one
+    variable, or the matrix's nonzero entries as ``weights_rows`` /
+    ``weights_cols`` / ``weights_vals``
+    (``SparseWeights.to_dataset("weights")``): which one is read off
+    the file's variables;
+  - a discretization entry gives the grid's ``dims`` and, optionally,
+    its ``parameters`` file (the dis dataset) and a ``topo_order``
+    mapping (+ ``topo_one_based``) -- the ``Discretization``
+    constructor's keywords. Serial grids only (``comm`` is not a yaml
+    value; an MPI run builds its distributed grid in code);
+  - every path string is resolved RELATIVE TO THE YAML FILE's directory
+    (absolute paths pass through);
+  - the ``processes:`` mapping ORDER IS THE EXECUTION SCHEDULE (yaml
+    mappings load in document order). If you WRITE a config
+    programmatically, pass ``sort_keys=False`` to ``yaml.safe_dump`` --
+    its default alphabetization silently reorders the schedule (the
+    one-pass order validation will catch it at build, but save yourself
+    the trip).
+
+Schema (maps and discretizations optional):
+
+    discretizations:
+      hru:
+        dims: [hru]
+      segment:
+        dims: [segment]
+        parameters: dis_segment.nc
+        topo_order: {segment_order: tosegment}
+    control:
+      input_file: hru_input.nc
+      output_parallel_netcdf: hru_output.nc
+      output_serial_zarr: segment_output.zarr
+      output_var_names: [flow, storage]
+      time_chunk_size: 10
+      mpi_grid: hru
+    processes:
+      upper:
+        class: Upper
+        discretization: hru
+        flow: flow_initial.nc
+      lower:
+        class: Lower
+        discretization: segment
+        parameters: low_params.nc
+        forcing_low: forcing_low.nc
+        storage: storage_initial.nc
+    maps:
+      hru_to_seg:
+        class: MapMPI
+        weights: weights.nc
+        grid: {hru: segment}
+        variable: {flow: flow}
+"""
+
+import pathlib as pl
+from typing import Any
+
+import numpy as np
+import xarray as xr
+import yaml
+
+from pws_phoenix.discretization import Discretization
+from pws_phoenix.maps import Map, MapMPI, SparseWeights
+from pws_phoenix.process import Process
+
+_MAP_CLASSES: dict[str, type] = {"Map": Map, "MapMPI": MapMPI}
+_CONTROL_PATH_KEYS = (
+    "input_file",
+    "output_parallel_netcdf",
+    "output_serial_zarr",
+)
+
+
+def _resolve_path(value: str, base_dir: pl.Path) -> pl.Path:
+    """A path string from the yaml, resolved relative to the yaml's dir."""
+    path = pl.Path(value)
+    return path if path.is_absolute() else base_dir / path
+
+
+def _load_weights(spec: Any, base_dir: pl.Path) -> np.ndarray | SparseWeights:
+    """Map weights: an inline nested list (the full matrix), or the path
+    of a NetCDF (loaded, closed) that holds either form, told apart by
+    its variables: one variable = the full ``(n_target, n_source)``
+    matrix; ``weights_rows`` / ``weights_cols`` / ``weights_vals`` = the
+    nonzero entries (``SparseWeights.to_dataset("weights")``)."""
+    if not isinstance(spec, str):
+        return np.asarray(spec)
+    path = _resolve_path(spec, base_dir)
+    ds = xr.load_dataset(path)
+    if "weights_vals" in ds:
+        return SparseWeights.from_dataset(ds, "weights")
+    if len(ds.data_vars) == 1:
+        (da,) = ds.data_vars.values()
+        return da.values
+    raise ValueError(
+        f"{path}: a Map weights file holds one variable (the full "
+        "(n_target, n_source) matrix) or weights_rows / weights_cols / "
+        "weights_vals (the nonzero entries); found "
+        f"{sorted(str(nn) for nn in ds.data_vars)}."
+    )
+
+
+def _load_discretizations(
+    cfg: dict[str, Any], base_dir: pl.Path
+) -> dict[str, Discretization]:
+    """The ``discretizations:`` section -> serial Discretizations."""
+    discretizations: dict[str, Discretization] = {}
+    for grid, entry in cfg.get("discretizations", {}).items():
+        kwargs: dict[str, Any] = {}
+        if "parameters" in entry:
+            kwargs["parameters"] = _resolve_path(entry["parameters"], base_dir)
+        for key in ("topo_order", "topo_one_based"):
+            if key in entry:
+                kwargs[key] = entry[key]
+        discretizations[grid] = Discretization(list(entry["dims"]), **kwargs)
+    return discretizations
+
+
+def load_model_yaml(
+    yaml_file: pl.Path,
+) -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Discretization]
+]:
+    """Load a fully-serialized model configuration.
+
+    Returns ``(process_dict, control, maps, discretizations)`` --
+    model-agnostic (feeds ``Model`` or ``ModelMPI``; ``discretizations``
+    is ``{}`` when the yaml has no such section). See the module
+    docstring for the schema and resolution rules.
+    """
+    yaml_file = pl.Path(yaml_file)
+    base_dir = yaml_file.parent
+    with open(yaml_file) as ff:
+        cfg = yaml.safe_load(ff)
+
+    process_dict: dict[str, Any] = {}
+    for proc_name, entry in cfg["processes"].items():
+        resolved: dict[str, Any] = {}
+        for key, val in entry.items():
+            if key == "class":
+                if val not in Process._registry:
+                    raise ValueError(
+                        f"process '{proc_name}': class {val!r} is not in "
+                        "Process._registry (import the module defining it "
+                        "before load_model_yaml); registered: "
+                        f"{sorted(Process._registry)}"
+                    )
+                resolved[key] = Process._registry[val]
+            elif key == "discretization":
+                resolved[key] = val
+            else:  # data entries arrive as path strings
+                resolved[key] = _resolve_path(val, base_dir)
+        process_dict[proc_name] = resolved
+
+    control: dict[str, Any] = dict(cfg["control"])
+    for key in _CONTROL_PATH_KEYS:
+        if key in control:
+            control[key] = _resolve_path(control[key], base_dir)
+
+    maps: dict[str, Any] = {}
+    for map_name, entry in cfg.get("maps", {}).items():
+        if entry["class"] not in _MAP_CLASSES:
+            raise ValueError(
+                f"map '{map_name}': class {entry['class']!r} must be one "
+                f"of {sorted(_MAP_CLASSES)}."
+            )
+        maps[map_name] = _MAP_CLASSES[entry["class"]](
+            weights=_load_weights(entry["weights"], base_dir),
+            grid=dict(entry["grid"]),
+            variable=dict(entry["variable"]),
+        )
+
+    return process_dict, control, maps, _load_discretizations(cfg, base_dir)

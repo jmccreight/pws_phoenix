@@ -1,0 +1,627 @@
+"""
+hydrology/prms_channel.py
+=========================
+PRMSChannel: muskingum_mann channel routing, ported from pywatershed
+(pywatershed/hydrology/prms_channel.py; PRMS 5.2.1 physics, PRMS-IV
+documentation: Markstrom et al. 2015, USGS TM 6-B7; muskingum_mann per
+PRMS >= 5.2.1).
+
+Second REAL process port (July 2026) -- the serial-segment-grid half of
+the Step B shape. What pywatershed's channel does INTERNALLY is here
+SEPARATED along framework seams (design decisions w/ JLM):
+
+- **Topology -> the Discretization.** ``segment_order`` is dis-owned:
+  computed at dis construction (``topo_order={"segment_order":
+  "tosegment"}``) and received here BY DECLARATION like any other dis
+  variable. ``tosegment``/``seg_length``/``seg_slope``/``seg_depth``/
+  ``segment_type`` are dis_seg variables (separate_nhm_params.py).
+- **The hru->segment aggregation -> explicit Maps.** pywatershed's
+  per-HRU ``hru_segment`` loop becomes three Maps (one per flux, same
+  0/1 weights by reference); ``hru_segment`` itself IS the weights and
+  leaves the process entirely. The mapped inputs get NEW names
+  (``seg_sroff_vol``, ``seg_ssres_flow_vol``, ``seg_gwres_flow_vol`` --
+  the first deliberate departure from names-verbatim: these
+  aggregated-to-segment quantities do not exist in pywatershed).
+  Summing them into ``seg_lateral_inflow`` is channel physics and
+  happens first thing in the kernel. Cross-dis fluxes are VOLUMES
+  (cubic feet) -- dis-relative units (inches) never cross a Map.
+- **Muskingum coefficients -> parameter_internal.** ``c0/c1/c2/ts/tsi``
+  (+ 0-based ``tosegment0``) are computed in ``init_from_params()`` from
+  process params (``mann_n``, ``x_coef``) + dis variables, then frozen.
+
+dt is SECONDS (s_per_time = dt = 86400.0 for daily PRMS).
+
+**Mass budget: deliberately NOT declared (decided Oct 23, 2026).**
+pywatershed's is the one ``basis="global"`` budget (inputs on nhru,
+outputs/storage on nsegment; only the basin sums compare)::
+
+    inputs:          channel_sroff_vol, channel_ssres_flow_vol,
+                     channel_gwres_flow_vol
+    outputs:         channel_outflow_vol
+    storage_changes: seg_stor_change
+
+Muskingum has no storage state; ``seg_stor_change = (seg_inflow -
+seg_outflow) * s_per_time`` is DEFINED as the imbalance, so no budget
+here can test the routing arithmetic -- only accounting. The
+per-segment form our framework would check (the mapped volumes are
+already on this grid; the within-network hand-off would be the first
+use of the ``exchanges`` slot) is written out here and left off::
+
+    # _MASS_BUDGET = {
+    #     "inputs": ("seg_sroff_vol", "seg_ssres_flow_vol",
+    #                "seg_gwres_flow_vol"),
+    #     "outputs": ("channel_outflow_vol",),
+    #     "storage_changes": ("seg_stor_change",),
+    #     "exchanges": ("seg_routed_vol",),   # NEW (nsegment,) variable:
+    # }                                       # up*s - out*s*(1 - O)
+    # budgets = {"mass": _MASS_BUDGET}
+
+With ``s = s_per_time``, ``lat`` = the three mapped volumes [cf],
+``up = seg_upstream_inflow``, ``out = seg_outflow`` (daily-mean cfs),
+``O = 1`` at an outlet else 0, and the kernel's ``seg_inflow = lat/s +
+up``::
+
+    lhs = inputs + exchanges        = lat + up*s - out*s + out*s*O
+    rhs = outputs + storage_changes = out*s*O + lat + up*s - out*s
+
+identical term by term: the per-segment residual is roundoff by
+construction and can only report the kernel's three accumulators
+(``seg_inflow``, ``seg_current_sum``, ``seg_outflow``) or the
+``tosegment0 < 0`` outlet test disagreeing with each other. The ONE
+check pywatershed's global sum carries -- routing telescopes, ``sum_j
+seg_routed_vol_j == 0`` iff every non-outlet ``tosegment`` lands --
+is already fatal or definitional before a budget could speak
+(``Discretization.topological_order`` rejects an index that does not
+land; ``tosegment0 < 0`` defines an outlet) and is pinned by the
+1e-13 ``seg_outflow`` parity (tests/test_prms_channel{,_mpi}.py). A
+global basis in budget.py would cost no communication (this grid is
+replicated under MPI) but a 0-d per-step residual ``Output`` cannot
+write; revisit only if a consumer with content appears. The FlowGraph
+node types are where ``exchanges`` earns its keep (obsin /
+source-sink nodes are non-conservative per node).
+
+Deliberately NOT ported (each documented in place or in CLAUDE.md):
+- Budget / ConservativeProcess (see above); adapters; restart;
+  calc_method switch; verbose.
+- ``hru_area`` (declared upstream, never used in its kernel),
+  ``tosegment_nhm``, ``obsin_segment``/``obsout_segment`` (unimplemented
+  todos upstream).
+- The ``channel_*_vol`` per-HRU diagnostics + the ``hru_segment < 1``
+  mass-discard bookkeeping (upstream zeroes them so its global budget
+  closes; the discard itself IS the zero weight columns).
+- The in-place ``seg_slope`` clamp/edit: pywatershed computes velocity
+  BEFORE clamping, so the edit affects nothing downstream in channel
+  init -- we do NOT edit the read-only dis variable. A deliberate
+  design pass on init-time parameter editing is pending (CLAUDE.md).
+"""
+
+import numba
+import numpy as np
+
+from pws_phoenix import NUMBA_CACHE
+from pws_phoenix.clock import Time
+from pws_phoenix.process import DataArrayMeta, Process
+
+# pywatershed constants.SegmentType.LAKE
+_SEGMENT_TYPE_LAKE = 2
+
+# The kernel's implicit units, named. ts is declared in hours (the
+# init adds 0.5 * ts to kcoef, a travel time in hours), but the kernel
+# divides inflow_ts -- a SUM of hourly cfs samples -- by it as a COUNT
+# of samples: the count is ts / _ROUTING_STEP_HOURS. The zeros are the
+# kernel's working units. numba freezes all three as constants (the
+# compiled code is unchanged: ts / 1.0 == ts exactly); the stage-3
+# units test (tests/test_kernel_units.py) patches them to pint
+# Quantities -- a bare 0.0 cannot be assigned into a cfs array under
+# pint.
+_ROUTING_STEP_HOURS = 1.0
+_ZERO_CFS = 0.0
+_ZERO_CUBIC_FEET = 0.0
+
+# The init derivation's implicit units, named (muskingum_mann_coefficients;
+# plain numpy, so the units test patches these directly): velocity m/s
+# -> m/hour, kcoef bounds and the dd floor in hours, and one hour for
+# the sub-timestep ladder (kk is compared as a count of hours; ts is
+# written in hours). Each multiply/divide by 1.0 is exact.
+_SECONDS_PER_MINUTE = 60.0
+_MINUTES_PER_HOUR = 60.0
+_KCOEF_MIN_HOURS = 0.01
+_KCOEF_MAX_HOURS = 24.0
+_ONE_HOUR = 1.0
+_DD_NEARZERO_HOURS = 1e-6
+_DD_FLOOR_HOURS = 0.0001
+
+
+def muskingum_mann_coefficients(
+    ts: np.ndarray,
+    tsi: np.ndarray,
+    c0: np.ndarray,
+    c1: np.ndarray,
+    c2: np.ndarray,
+    mann_n: np.ndarray,
+    seg_slope: np.ndarray,
+    seg_depth: np.ndarray,
+    seg_length: np.ndarray,
+    segment_type: np.ndarray,
+    x_coef: np.ndarray,
+) -> None:
+    """Muskingum-Mann routing coefficients, written IN PLACE (out
+    buffers first), replicating pywatershed
+    PRMSChannel._initialize_channel_data numerics exactly.
+
+    Shared by PRMSChannel.init_from_params() and the FlowGraph channel node
+    type -- ONE derivation, two consumers. Init-time temporaries only
+    (velocity, Kcoef, masks), never per-step.
+    """
+    n_seg = ts.shape[0]
+
+    velocity = (
+        ((1.0 / mann_n) * np.sqrt(seg_slope) * seg_depth ** (2.0 / 3.0))
+        * _SECONDS_PER_MINUTE
+        * _MINUTES_PER_HOUR
+    )
+    # pywatershed clamps too-flat seg_slope IN PLACE here -- AFTER
+    # velocity, so the edit affects nothing downstream in channel
+    # init. We deliberately do NOT edit the read-only dis variable
+    # (init-time parameter editing gets its own design pass).
+
+    # Kcoef = 24 default; Manning travel time where velocity > 0;
+    # lakes forced to 24; clamped to [0.01, 24]
+    # (ones * 24.0, not np.full: np.full drops a Quantity's units)
+    kcoef = _KCOEF_MAX_HOURS * np.ones(n_seg, dtype=np.float64)
+    wh_moving = velocity > 0.0
+    kcoef[wh_moving] = seg_length[wh_moving] / velocity[wh_moving]
+    kcoef = np.where(
+        segment_type == _SEGMENT_TYPE_LAKE, _KCOEF_MAX_HOURS, kcoef
+    )
+    kcoef = np.where(kcoef < _KCOEF_MIN_HOURS, _KCOEF_MIN_HOURS, kcoef)
+    kcoef = np.where(kcoef > _KCOEF_MAX_HOURS, _KCOEF_MAX_HOURS, kcoef)
+
+    ts[:] = _ONE_HOUR
+    tsi[:] = 1
+    # sub-timestep ladder (even divisors of 24 h) -- verbatim, kk a
+    # count of hours
+    for iseg in range(n_seg):
+        kk = kcoef[iseg] / _ONE_HOUR
+        if kk < 1.0:
+            tsi[iseg] = -1
+        elif kk < 2.0:
+            ts[iseg] = 1.0 * _ONE_HOUR
+            tsi[iseg] = 1
+        elif kk < 3.0:
+            ts[iseg] = 2.0 * _ONE_HOUR
+            tsi[iseg] = 2
+        elif kk < 4.0:
+            ts[iseg] = 3.0 * _ONE_HOUR
+            tsi[iseg] = 3
+        elif kk < 6.0:
+            ts[iseg] = 4.0 * _ONE_HOUR
+            tsi[iseg] = 4
+        elif kk < 8.0:
+            ts[iseg] = 6.0 * _ONE_HOUR
+            tsi[iseg] = 6
+        elif kk < 12.0:
+            ts[iseg] = 8.0 * _ONE_HOUR
+            tsi[iseg] = 8
+        elif kk < 24.0:
+            ts[iseg] = 12.0 * _ONE_HOUR
+            tsi[iseg] = 12
+        else:
+            ts[iseg] = 24.0 * _ONE_HOUR
+            tsi[iseg] = 24
+
+    dd = kcoef - (kcoef * x_coef) + (0.5 * ts)
+    dd = np.where(np.abs(dd) < _DD_NEARZERO_HOURS, _DD_FLOOR_HOURS, dd)
+    c0[:] = (-(kcoef * x_coef) + (0.5 * ts)) / dd
+    c1[:] = ((kcoef * x_coef) + (0.5 * ts)) / dd
+    c2[:] = (kcoef - (kcoef * x_coef) - (0.5 * ts)) / dd
+
+    # short travel time
+    wh_short = c2 < 0.0
+    c1[wh_short] += c2[wh_short]
+    c2[wh_short] = 0.0
+    # long travel time
+    wh_long = c0 < 0.0
+    c1[wh_long] += c0[wh_long]
+    c0[wh_long] = 0.0
+
+
+class PRMSChannel(Process):
+    """Muskingum-Mann channel routing on the segment grid.
+
+    Sequential by nature (downstream accumulation in segment order over
+    24 subhourly steps) -- the reason the segment grid stays
+    serial/replicated under MPI.
+    """
+
+    # ------------------------------------------------------------------
+    # Field declarations
+    # ------------------------------------------------------------------
+
+    # -- dis_seg variables (grid-owned; via Discretization(parameters=)) --
+    seg_length = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="m",
+        description="Segment length [m]",
+    )
+    seg_slope = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Segment slope [-]",
+    )
+    seg_depth = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="m",
+        description="Segment bank-full depth [m]",
+    )
+    segment_type = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.int64,
+        description="Segment type (SegmentType enum; LAKE = 2)",
+    )
+    tosegment = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.int64,
+        description="Downstream segment (1-based; 0 = domain outlet)",
+    )
+    segment_order = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.int64,
+        derivation="Discretization(topo_order={'segment_order': 'tosegment'})",
+        description=(
+            "Upstream-to-downstream ordering (0-based) -- DIS-derived: "
+            "Discretization(topo_order={'segment_order': 'tosegment'})"
+        ),
+    )
+
+    # -- process parameters --
+    mann_n = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="seconds/m^(1/3)",
+        description="Manning's n roughness [-]",
+    )
+    x_coef = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Muskingum storage weighting factor [-]",
+    )
+
+    # -- derived parameters (computed by init_from_params(), then frozen) --
+    tosegment0 = DataArrayMeta(
+        kind="parameter_internal",
+        dims=("space",),
+        dtype=np.int64,
+        description="Downstream segment (0-based; negative = outlet)",
+    )
+    ts = DataArrayMeta(
+        kind="parameter_internal",
+        dims=("space",),
+        dtype=np.float64,
+        units="hours",
+        description="Routing sub-timestep [h] (float)",
+    )
+    tsi = DataArrayMeta(
+        kind="parameter_internal",
+        dims=("space",),
+        dtype=np.int64,
+        units="hours",
+        description="Routing sub-timestep [h] (int; -1 = within-hour)",
+    )
+    c0 = DataArrayMeta(
+        kind="parameter_internal",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Muskingum c0 coefficient",
+    )
+    c1 = DataArrayMeta(
+        kind="parameter_internal",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Muskingum c1 coefficient",
+    )
+    c2 = DataArrayMeta(
+        kind="parameter_internal",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Muskingum c2 coefficient",
+    )
+
+    # -- inputs (Map-fed: aggregated hru VOLUMES on the segment grid) --
+    seg_sroff_vol = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        units="cubic feet",
+        description="Surface runoff volume mapped to segments [cf]",
+    )
+    seg_ssres_flow_vol = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        units="cubic feet",
+        description="Interflow volume mapped to segments [cf]",
+    )
+    seg_gwres_flow_vol = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        units="cubic feet",
+        description="Groundwater discharge volume mapped to segments [cf]",
+    )
+
+    # -- variables --
+    seg_lateral_inflow = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cfs",
+        description="Lateral inflow to each segment [cfs]",
+    )
+    seg_upstream_inflow = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cfs",
+        description="Upstream inflow, daily mean [cfs]",
+    )
+    seg_inflow = DataArrayMeta(
+        kind="variable",
+        restart=True,
+        dims=("space",),
+        dtype=np.float64,
+        units="cfs",
+        description="Segment inflow, daily mean [cfs]",
+    )
+    seg_outflow = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cfs",
+        description="Segment outflow, daily mean [cfs]",
+    )
+    inflow_ts_prev = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cfs",
+        description="Previous sub-timestep inflow (routing state)",
+    )
+    outflow_ts = DataArrayMeta(
+        kind="variable",
+        restart=True,
+        dims=("space",),
+        dtype=np.float64,
+        units="cfs",
+        description="Sub-timestep outflow (routing state; instantaneous)",
+    )
+    seg_stor_change = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cubic feet",
+        description="Channel storage change over the timestep [cf]",
+    )
+    channel_outflow_vol = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cubic feet",
+        description="Outflow volume leaving the domain (outlets) [cf]",
+    )
+    # kernel work buffers, declared so the kernel allocates NOTHING
+    inflow_ts = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cfs",
+        description="Sub-timestep inflow accumulator (kernel work buffer)",
+    )
+    seg_current_sum = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cfs",
+        description="Upstream-inflow accumulator (kernel work buffer)",
+    )
+
+    # ------------------------------------------------------------------
+    # Initialization (derived parameters + initial values)
+    # ------------------------------------------------------------------
+
+    def init_from_params(self) -> None:
+        """Compute the Muskingum coefficients, replicating pywatershed
+        _initialize_channel_data numerics (and order) exactly.
+        Temporaries here are INIT-time, not per-step."""
+        refs = self._refs
+
+        # -- 0-based connectivity for the kernel --
+        refs["tosegment0"][:] = refs["tosegment"] - 1
+
+        # -- Muskingum coefficients (module function above; shared with
+        # the FlowGraph channel node type) --
+        muskingum_mann_coefficients(
+            refs["ts"],
+            refs["tsi"],
+            refs["c0"],
+            refs["c1"],
+            refs["c2"],
+            refs["mann_n"],
+            refs["seg_slope"],
+            refs["seg_depth"],
+            refs["seg_length"],
+            refs["segment_type"],
+            refs["x_coef"],
+        )
+
+    def init_state(self, time: Time) -> None:
+        """Initial routing state: zeros (pywatershed
+        _initialize_channel_data). A nonzero start is SUPPLIED state
+        (seg_inflow, outflow_ts under their own names, written after
+        this hook). PRMS's segment_flow_init parameter is translated
+        to a supplied seg_inflow by prms_translate (pywatershed's
+        propagation, verbatim); the channel does not consume state
+        from parameters."""
+        refs = self._refs
+
+        # allocation fills nan; pywatershed zero-inits these
+        # (channel_outflow_vol is nan upstream but overwritten every
+        # step; zeroed here for tidiness)
+        for name in (
+            "seg_lateral_inflow",
+            "seg_upstream_inflow",
+            "seg_inflow",
+            "seg_outflow",
+            "outflow_ts",
+            "seg_stor_change",
+            "channel_outflow_vol",
+            "inflow_ts",
+            "seg_current_sum",
+        ):
+            refs[name][:] = 0.0
+        # pywatershed order: inflow_ts_prev from seg_inflow (zero)
+        refs["inflow_ts_prev"][:] = refs["seg_inflow"]
+
+    # ------------------------------------------------------------------
+    # Computation
+    # ------------------------------------------------------------------
+
+    def advance(self) -> None:
+        # pywatershed verbatim (incl. its "seems strange" comment that
+        # an instantaneous value is set to a daily-averaged one)
+        self._refs["inflow_ts_prev"][:] = self._refs["seg_inflow"]
+
+    @staticmethod
+    @numba.njit(cache=NUMBA_CACHE)
+    def _calculate(
+        seg_lateral_inflow: np.ndarray,
+        seg_upstream_inflow: np.ndarray,
+        seg_inflow: np.ndarray,
+        seg_outflow: np.ndarray,
+        seg_stor_change: np.ndarray,
+        channel_outflow_vol: np.ndarray,
+        inflow_ts: np.ndarray,
+        outflow_ts: np.ndarray,
+        inflow_ts_prev: np.ndarray,
+        seg_current_sum: np.ndarray,
+        seg_sroff_vol: np.ndarray,
+        seg_ssres_flow_vol: np.ndarray,
+        seg_gwres_flow_vol: np.ndarray,
+        segment_order: np.ndarray,
+        tosegment0: np.ndarray,
+        ts: np.ndarray,
+        tsi: np.ndarray,
+        c0: np.ndarray,
+        c1: np.ndarray,
+        c2: np.ndarray,
+        s_per_time: np.float64,
+    ) -> None:
+        n_seg = seg_outflow.shape[0]
+
+        # lateral inflow: mapped volumes summed -> cfs. (Float-order
+        # note: pywatershed sums (a+b+c) per HRU then aggregates; we
+        # aggregate each flux then sum -- same math, different addition
+        # order; all-positive so no cancellation.)
+        for jj in range(n_seg):
+            seg_lateral_inflow[jj] = (
+                seg_sroff_vol[jj]
+                + seg_ssres_flow_vol[jj]
+                + seg_gwres_flow_vol[jj]
+            ) / s_per_time
+
+        # muskingum_mann routing -- pywatershed _muskingum_mann_numpy,
+        # rewritten in place (its per-day allocations become zeroed
+        # buffers)
+        seg_inflow[:] = _ZERO_CFS
+        seg_outflow[:] = _ZERO_CFS
+        inflow_ts[:] = _ZERO_CFS
+        seg_current_sum[:] = _ZERO_CFS
+
+        for ihr in range(24):
+            seg_upstream_inflow[:] = _ZERO_CFS
+
+            for jseg in segment_order:
+                # current inflow: upstream avg + lateral
+                seg_current_inflow = (
+                    seg_lateral_inflow[jseg] + seg_upstream_inflow[jseg]
+                )
+                seg_inflow[jseg] += seg_current_inflow
+                inflow_ts[jseg] += seg_current_inflow
+                seg_current_sum[jseg] += seg_upstream_inflow[jseg]
+
+                remainder = (ihr + 1) % tsi[jseg]
+                if remainder == 0:
+                    # segment routed on the current hour
+                    inflow_ts[jseg] /= ts[jseg] / _ROUTING_STEP_HOURS
+                    if tsi[jseg] > 0:
+                        # Muskingum routing equation
+                        outflow_ts[jseg] = (
+                            inflow_ts[jseg] * c0[jseg]
+                            + inflow_ts_prev[jseg] * c1[jseg]
+                            + outflow_ts[jseg] * c2[jseg]
+                        )
+                    else:
+                        # travel time <= 1 hour: outflow = inflow
+                        outflow_ts[jseg] = inflow_ts[jseg]
+                    inflow_ts_prev[jseg] = inflow_ts[jseg]
+                    inflow_ts[jseg] = _ZERO_CFS
+
+                # daily mean outflow accumulates hourly values
+                seg_outflow[jseg] += outflow_ts[jseg]
+                to_seg = tosegment0[jseg]
+                if to_seg >= 0:
+                    seg_upstream_inflow[to_seg] += outflow_ts[jseg]
+
+        for jj in range(n_seg):
+            seg_outflow[jj] /= 24.0
+            seg_inflow[jj] /= 24.0
+            seg_upstream_inflow[jj] = seg_current_sum[jj] / 24.0
+            seg_stor_change[jj] = (
+                seg_inflow[jj] - seg_outflow[jj]
+            ) * s_per_time
+            # domain outlets only (inline tosegment0 < 0; no mask array)
+            if tosegment0[jj] < 0:
+                channel_outflow_vol[jj] = seg_outflow[jj] * s_per_time
+            else:
+                channel_outflow_vol[jj] = _ZERO_CUBIC_FEET
+
+    def calculate(self, dt: np.float64, time: Time) -> None:
+        # dt is SECONDS (s_per_time); 86400.0 for daily PRMS
+        self._calculate(
+            self._refs["seg_lateral_inflow"],
+            self._refs["seg_upstream_inflow"],
+            self._refs["seg_inflow"],
+            self._refs["seg_outflow"],
+            self._refs["seg_stor_change"],
+            self._refs["channel_outflow_vol"],
+            self._refs["inflow_ts"],
+            self._refs["outflow_ts"],
+            self._refs["inflow_ts_prev"],
+            self._refs["seg_current_sum"],
+            self._refs["seg_sroff_vol"],
+            self._refs["seg_ssres_flow_vol"],
+            self._refs["seg_gwres_flow_vol"],
+            self._refs["segment_order"],
+            self._refs["tosegment0"],
+            self._refs["ts"],
+            self._refs["tsi"],
+            self._refs["c0"],
+            self._refs["c1"],
+            self._refs["c2"],
+            dt,
+        )

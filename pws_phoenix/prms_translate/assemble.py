@@ -1,0 +1,1040 @@
+"""One-call assembly: legacy PRMS files -> a pws_phoenix Model.
+
+Two entry points, layered:
+
+- ``assemble_from_control(control_file, control=None) -> ModelKit`` --
+  the ASSEMBLY KIT: everything ``Model()`` takes
+  (process_dict/control/maps/discretizations), open for inspection
+  and modification BEFORE construction. This is the seam for cases
+  the one-liner does not cover: edit the kit, then ``kit.model()``.
+- ``model_from_control(control_file, control=None) -> Model`` -- the
+  one-liner (builds the kit, constructs the Model; construction runs
+  the full assembly validation).
+
+A domain translated ahead of time (``translate_domain``: the CBH text
+and the parameter file written once as netCDF) has the same two
+layers, ``assemble_from_translation`` and ``model_from_translation``.
+They take the path of the domain's ``<stem>_translation.yaml``.
+With ``hru_block=(start, stop)`` they read and build those hrus
+alone, with the forcing in memory; ``verify_translation`` makes, once,
+the checks that need the whole domain.
+
+These live HERE and not on Model because the core never imports
+prms_translate -- the dependency rule decides the API home. The
+control file names the parameter file (``param_file``) and the CBH
+files (``*_day``), so the control path is the ONLY required input.
+
+Supported ("many cases"): the NHM mainline configurations -- dprst
+on/off, stream temperature off or on in its dynamic-shade +
+CBH-humidity form or its per-segment-humidity form (the
+nhm.control / nhm_stream_temp.control / nhm_stream_temp_seg_humid_*
+shapes), transp_frost (static or dynamic frost dates, incl. the
+multi-param_file controls that carry the frost parameters), and the
+agricultural family (soilzone_ag: spinup and iter_aet/ObsET analysis
+shapes, static or dynamic ag_frac). The constant-shade stream-temp
+leaf RESOLVES (control.py) but its assembly is not wired yet and
+raises here. Everything
+unsupported fails LOUDLY, never silently.
+
+Dynamic parameters follow PRMS semantics: a translated dyn_*_flag
+serves the named input from its dynamic-parameter file
+(forward-filled onto model time); without the flag, the static
+parameter of the same name is served time-constant (tiled). PRMS's
+PET_cbh_file is deliberately not consumed (see control.py:
+CBH_ENTRY_TO_INPUT).
+"""
+
+import hashlib
+import pathlib as pl
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+import xarray as xr
+import yaml
+
+from pws_phoenix.atmosphere.prms_solar_geometry import compute_soltabs
+from pws_phoenix.discretization import Discretization
+from pws_phoenix.flow_graph_build import NewNode, splice_flow_graph
+from pws_phoenix.hydrology.prms_stream_temp import (
+    AGGREGATION_MAP_SPEC,
+    PRMSStreamTemp,
+    PRMSStreamTempSegHumidity,
+    derive_aggregation_weights,
+)
+from pws_phoenix.maps import Map, SparseWeights
+from pws_phoenix.model import Model
+from pws_phoenix.process import DataArrayMeta, Process
+from pws_phoenix.prms_translate.cbh import load_cbh
+from pws_phoenix.prms_translate.control import PrmsRunConfig, from_control
+from pws_phoenix.prms_translate.dyn_param import (
+    forward_fill,
+    load_dynamic_parameter,
+)
+from pws_phoenix.prms_translate.parameters import (
+    SLOT_GRIDS,
+    package_parameters,
+    volume_map_weights,
+)
+from pws_phoenix.prms_translate.readers import load_control, load_parameters
+
+
+class HumidityCarrier(Process):
+    """The humidity CBH forcing on the hru grid: an hru process must
+    OWN the external data so the hru->segment humidity Map can source
+    it (a Map never originates a quantity)."""
+
+    humidity_hru = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        units="percent",
+        description="CBH relative humidity [percent]",
+    )
+
+    def advance(self) -> None:
+        pass
+
+    def calculate(self, dt, time) -> None:
+        pass
+
+
+@dataclass
+class ModelKit:
+    """Everything ``Model()`` takes, plus the run configuration for
+    provenance. Modify any piece, then ``kit.model()``."""
+
+    process_dict: dict[str, dict[str, Any]]
+    control: dict[str, Any]
+    maps: dict[str, Map]
+    discretizations: dict[str, Discretization]
+    config: PrmsRunConfig = field(repr=False)
+    # PRMS-requested output names this model has no variable for
+    # (PRMS-only diagnostics etc.); the kept ones are in
+    # control["output_var_names"] when a store was supplied
+    dropped_output_var_names: list[str] = field(default_factory=list)
+
+    def model(self) -> Model:
+        """Construct the Model (construction IS the validation)."""
+        return Model(
+            self.process_dict,
+            self.control,
+            maps=self.maps,
+            discretizations=self.discretizations,
+        )
+
+
+def requested_output_names(
+    cfg: PrmsRunConfig, process_dict: dict[str, dict[str, Any]]
+) -> tuple[list[str], list[str]]:
+    """Split the control file's output REQUEST into the names this model
+    has a variable for (kept, request order) and the rest (dropped:
+    PRMS-only diagnostics etc.)."""
+    available: set[str] = set()
+    for entry in process_dict.values():
+        available |= set(entry["class"].get_var_names(include_budget=True))
+    kept = [nn for nn in cfg.output_var_names if nn in available]
+    dropped = [nn for nn in cfg.output_var_names if nn not in available]
+    return kept, dropped
+
+
+def seg_inflow_from_segment_flow_init(
+    segment_flow_init: xr.DataArray, tosegment: xr.DataArray
+) -> xr.DataArray:
+    """PRMS's segment_flow_init -> the starting seg_inflow: each
+    segment's initial flow becomes its downstream segment's inflow.
+    pywatershed's channel initialization VERBATIM, including the
+    ASSIGNMENT at confluences (the last upstream segment in index
+    order wins, not the sum). `tosegment` is 1-based, 0 = outlet."""
+    tosegment0 = tosegment.values - 1
+    seg_inflow = np.zeros(segment_flow_init.shape, dtype=np.float64)
+    for iseg in range(tosegment0.shape[0]):
+        jseg = tosegment0[iseg]
+        if jseg < 0:
+            continue
+        seg_inflow[jseg] = segment_flow_init.values[iseg]
+    # a flow in the same units as segment_flow_init
+    attrs = {
+        kk: vv for kk, vv in segment_flow_init.attrs.items() if kk == "units"
+    }
+    return xr.DataArray(seg_inflow, dims=segment_flow_init.dims, attrs=attrs)
+
+
+def prms_initial_state(params: xr.Dataset) -> dict[str, xr.DataArray]:
+    """Translate PRMS's initial-condition PARAMETERS into pws_phoenix
+    supplied initial state: restart variables under their OWN names.
+    PRMS consumes state from parameters; pws_phoenix does not -- this
+    is the one place that convention lives. Only names present in
+    `params` are translated (an absent one leaves the state to the
+    process's init_from_params() default).
+
+    - gwres_stor <- gwstor_init (a rename).
+    - seg_inflow <- segment_flow_init, propagated one segment
+      downstream (seg_inflow_from_segment_flow_init)."""
+    state: dict[str, xr.DataArray] = {}
+    if "gwstor_init" in params:
+        state["gwres_stor"] = params["gwstor_init"]
+    if "segment_flow_init" in params:
+        state["seg_inflow"] = seg_inflow_from_segment_flow_init(
+            params["segment_flow_init"], params["tosegment"]
+        )
+    return state
+
+
+# PRMS hru_type codes on which soilzone.f90 sets pref_flow_infil_frac
+# (and pref_flow_den) to zero: inactive, lake, swale
+_HRU_TYPES_WITHOUT_PREF_FLOW = (0, 2, 3)
+
+
+def prms_parameter_defaults(params: xr.Dataset) -> xr.Dataset:
+    """PRMS's own rule for a parameter its file leaves "not
+    specified", which pws_phoenix (like pywatershed) requires:
+    `params` itself when the rule does not apply, else a new Dataset
+    that shares every other array.
+
+    - pref_flow_infil_frac absent, or negative on EVERY hru (PRMS's
+      default is -1.0): pref_flow_den, set to zero on inactive, lake
+      and swale hrus. These are the values PRMS computes with
+      (soilzone.f90: ``IF ( Pref_flow_infil_frac(1)<0.0 )
+      Pref_flow_infil_frac = Pref_flow_den``, then the zeroing in its
+      hru loop). Negative on some hrus but not all raises: PRMS tests
+      only the first hru and would use the mix as it is.
+
+    A file that supplies valid values is left alone, although PRMS
+    zeroes those on inactive, lake and swale hrus too (pywatershed
+    does not; see docs/MAINTENANCE.md)."""
+    if "pref_flow_den" not in params or "hru_type" not in params:
+        # not a soil zone parameter set: nothing to derive from
+        return params
+    name = "pref_flow_infil_frac"
+    attrs = params["pref_flow_den"].attrs
+    if name in params:
+        attrs = params[name].attrs
+        negative = params[name].values < 0.0
+        if not negative.any():
+            return params
+        if not negative.all():
+            raise ValueError(
+                f"{name} is negative on {int(negative.sum())} of "
+                f"{negative.size} hrus. Negative on every hru means "
+                '"not specified" (PRMS then uses pref_flow_den); a mix '
+                "is not translated."
+            )
+    # one (nhru,) array made at assembly: pref_flow_den is a parameter
+    # in its own right and must not be edited
+    values = params["pref_flow_den"].values.copy()
+    values[
+        np.isin(params["hru_type"].values, _HRU_TYPES_WITHOUT_PREF_FLOW)
+    ] = 0.0
+    return params.assign({name: (params["pref_flow_den"].dims, values, attrs)})
+
+
+def _kept_classes(
+    classes: dict[str, type], processes: Collection[str] | None
+) -> dict[str, type]:
+    """The control file's process classes cut to the slots named in
+    `processes` (None = all), in the control file's order."""
+    if processes is None:
+        return dict(classes)
+    unknown = sorted(set(processes) - set(classes))
+    if unknown:
+        raise ValueError(
+            f"processes names {unknown}, which the control file does "
+            f"not select; it selects {list(classes)}."
+        )
+    return {slot: cls for slot, cls in classes.items() if slot in processes}
+
+
+def assemble_from_control(
+    control_file: str | pl.Path,
+    control: dict[str, Any] | None = None,
+    preprocessed: str | pl.Path | None = None,
+    cbh_paths: Mapping[str, str | pl.Path] | None = None,
+    processes: Collection[str] | None = None,
+) -> ModelKit:
+    """Legacy PRMS control file -> a ModelKit (see module docstring).
+    `control` is the pws_phoenix control dict passed through to the
+    Model (output options, restart_read, ...). `preprocessed` is an
+    OPTIONAL artifacts file from
+    ``prms_translate.write_preprocessed`` -- its stamped derivables
+    (solar tables, segment_order, hru_in_to_cf) and map weights are
+    VERIFIED against this run's parameters and used instead of
+    deriving in-chain (see prms_translate/preprocess.py for the
+    provenance/staleness design). `cbh_paths` OVERRIDES the control
+    file's forcing-file entries by pws_phoenix input name (``prcp``,
+    ``tmax``, ``tmin``, ``humidity_hru``, ...) -- for control files
+    whose ``*_day`` entries do not name the files actually present
+    (PRMS's template control names ``precip.day``; a domain may ship
+    ``prcp.cbh``). `processes` names the process_dict slots to KEEP
+    out of those the control file selects (None = all; a name it does
+    not select raises): a grid left without a process is not built,
+    and the Maps are built only when both of their grids are. What
+    the kept processes then lack (an input another process computed)
+    raises here or at the Model build, as for any model."""
+    control_file = pl.Path(control_file)
+    ctl = load_control(control_file)
+    cfg = from_control(ctl, control_file)
+    if cbh_paths:
+        cfg.cbh_paths = dict(cfg.cbh_paths) | {
+            name: pl.Path(path) for name, path in cbh_paths.items()
+        }
+    params = load_parameters(cfg.param_files)
+    return _assemble(
+        cfg,
+        params,
+        lambda name: load_cbh(
+            cfg.cbh_paths[name], cfg.start_time, cfg.end_time
+        ),
+        control,
+        preprocessed,
+        processes,
+    )
+
+
+def _assemble(
+    cfg: PrmsRunConfig,
+    params: xr.Dataset,
+    forcing: Callable[[str], xr.DataArray | pl.Path],
+    control: dict[str, Any] | None,
+    preprocessed: str | pl.Path | xr.Dataset | None,
+    processes: Collection[str] | None = None,
+) -> ModelKit:
+    """A run configuration and its parameters -> a ModelKit: the part
+    of assembly that does not depend on where the parameters and the
+    forcings were read from. `forcing(name)` returns what the Model is
+    given for the CBH input `name` (a key of ``cfg.cbh_paths``): a
+    DataArray on time and nhru, or the path of a file that holds it.
+    `control`, `preprocessed` and `processes` are as in
+    assemble_from_control; `preprocessed` may also be the artifacts
+    themselves, already read, and those are used WITHOUT the
+    verification (_assemble_hru_block). The kit's ``config`` stays the
+    control file's record: its ``classes`` are all of the control
+    file's."""
+    params = prms_parameter_defaults(params)
+    classes = _kept_classes(cfg.classes, processes)
+    grids = {SLOT_GRIDS[slot] for slot in classes}
+    artifacts: xr.Dataset | None = None
+    if isinstance(preprocessed, xr.Dataset):
+        artifacts = preprocessed
+    elif preprocessed is not None:
+        from pws_phoenix.prms_translate.preprocess import verify_preprocessed
+
+        artifacts = xr.load_dataset(preprocessed)
+        verify_preprocessed(artifacts, params)
+
+    stream_temp = "prms_stream_temp" in classes
+    # the humidity CBH reaches the segments through the hru->segment
+    # humidity Map (PRMSStreamTemp); PRMSStreamTempSegHumidity computes
+    # seg_humid from its seg_humidity parameter instead
+    cbh_humidity = False
+    if stream_temp:
+        leaf = classes["prms_stream_temp"]
+        if leaf not in (PRMSStreamTemp, PRMSStreamTempSegHumidity):
+            raise NotImplementedError(
+                f"assembly for stream-temp leaf {leaf.__name__} is "
+                "not wired (only the dynamic-shade configurations "
+                "are): build the kit by hand -- see "
+                "examples/01_prms_legacy_translation.py for the recipe."
+            )
+        cbh_humidity = "seg_humid" in leaf.get_inputs()
+        if cbh_humidity and "humidity_hru" not in cfg.cbh_paths:
+            raise ValueError(
+                "stream temperature needs the humidity CBH "
+                "(humidity_day) in the control file."
+            )
+
+    # -- discretizations + the derivable parameters (from the
+    # verified artifacts when preprocessed, else derived in-chain) --
+    # the segment dis carries the network ids (nhm_seg) beside the
+    # topology: no process declares them, but insert_flow_graph needs
+    # them to splice by nhm_seg and to label the graph's nodes
+    # a grid is built only when a kept process is on it (`processes`)
+    discretizations: dict[str, Discretization] = {}
+    soltabs: xr.Dataset | None = None
+    if "nhru" in grids:
+        discretizations["nhru"] = Discretization(["nhru"])
+        if artifacts is not None:
+            soltabs = artifacts[["soltab_potsw", "soltab_horad_potsw"]]
+        else:
+            soltabs = compute_soltabs(
+                params[["hru_slope", "hru_aspect", "hru_lat"]],
+                hru_dim="nhru",
+            )
+    if "nsegment" in grids:
+        seg_dis_vars = {"tosegment": params["tosegment"]}
+        if "nhm_seg" in params:
+            seg_dis_vars["nhm_seg"] = params["nhm_seg"]
+        if artifacts is not None:
+            seg_dis_vars["segment_order"] = artifacts["segment_order"]
+            discretizations["nsegment"] = Discretization(
+                ["nsegment"], parameters=xr.Dataset(seg_dis_vars)
+            )
+        else:
+            discretizations["nsegment"] = Discretization(
+                ["nsegment"],
+                parameters=xr.Dataset(seg_dis_vars),
+                topo_order={"segment_order": "tosegment"},
+            )
+
+    # -- process_dict in NHM (resolution) order; the humidity carrier
+    # (CBH humidity only) slots in just before the first segment-grid
+    # process --
+    process_dict: dict[str, dict[str, Any]] = {}
+    carrier_inserted = False
+    for slot, cls in classes.items():
+        grid = SLOT_GRIDS[slot]
+        if cbh_humidity and not carrier_inserted and grid == "nsegment":
+            process_dict["humidity_carrier"] = {
+                "class": HumidityCarrier,
+                "discretization": "nhru",
+            }
+            carrier_inserted = True
+        process_dict[slot] = {"class": cls, "discretization": grid}
+
+    # -- Maps: the three lateral volumes always; the ten stream-temp
+    # aggregations (basis-probed weights) when stream temp is on, nine
+    # without CBH humidity (no seg_humid Map) --
+    def _map(
+        source: str,
+        target: str,
+        ww: np.ndarray | SparseWeights,
+        derivation: str,
+    ) -> Map:
+        return Map(
+            weights=ww,
+            grid={"nhru": "nsegment"},
+            variable={source: target},
+            derivation=derivation,
+        )
+
+    maps: dict[str, Map] = {}
+    if {"nhru", "nsegment"} <= grids:
+        vol_derivation = (
+            "prms_translate.volume_map_weights(params): 0/1 assignment "
+            "matrix from hru_segment"
+        )
+        vol_weights = (
+            SparseWeights.from_dataset(artifacts, "weights_vol")
+            if artifacts is not None
+            else volume_map_weights(params)
+        )
+        maps |= {
+            "sroff_vol": _map(
+                "sroff_vol", "seg_sroff_vol", vol_weights, vol_derivation
+            ),
+            "ssres_vol": _map(
+                "ssres_flow_vol",
+                "seg_ssres_flow_vol",
+                vol_weights,
+                vol_derivation,
+            ),
+            "gw_vol": _map(
+                "gwres_flow_vol",
+                "seg_gwres_flow_vol",
+                vol_weights,
+                vol_derivation,
+            ),
+        }
+        if stream_temp:
+            agg_weights: dict[str, Any]
+            if artifacts is not None:
+                agg_weights = {
+                    kk: SparseWeights.from_dataset(artifacts, f"weights_{kk}")
+                    for kk in ("flow", "swrad", "met", "humid")
+                }
+            else:
+                seg_dis = discretizations["nsegment"].parameters
+                assert seg_dis is not None
+                agg_weights = derive_aggregation_weights(
+                    params["hru_segment"].values,
+                    params["hru_area"].values,
+                    params["tosegment"].values,
+                    seg_dis["segment_order"].values.astype(np.int64),
+                    params["seg_close"].values,
+                )
+            agg_derivation = (
+                "derive_aggregation_weights(hru_segment, hru_area, "
+                "tosegment, segment_order, seg_close)"
+            )
+            maps |= {
+                target: _map(source, target, agg_weights[wkey], agg_derivation)
+                for target, (source, wkey) in AGGREGATION_MAP_SPEC.items()
+                if cbh_humidity or target != "seg_humid"
+            }
+
+    # -- the contract drives the supply --
+    spec = Model.input_spec(process_dict, maps=maps)
+    extra = (
+        {}
+        if soltabs is None
+        else {str(nn): soltabs[nn] for nn in soltabs.data_vars}
+    )
+    if artifacts is not None:
+        extra["hru_in_to_cf"] = artifacts["hru_in_to_cf"]
+    packaged = package_parameters(params, classes, extra=extra)
+    for slot, ds in packaged.items():
+        process_dict[slot]["parameters"] = ds
+
+    # dynamic parameters -> time-varying inputs on the model window
+    # (forward-fill = PRMS semantics; load-time prep allocations)
+    times = np.arange(
+        cfg.start_time,
+        cfg.end_time + np.timedelta64(1, "D"),
+        dtype="datetime64[D]",
+    )
+    dyn_inputs = {
+        name: forward_fill(load_dynamic_parameter(path), times)
+        for name, path in cfg.dyn_param_paths.items()
+    }
+    for name, da in dyn_inputs.items():
+        # a dynamic parameter has the static parameter's units
+        if name in params and "units" in params[name].attrs:
+            da.attrs["units"] = params[name].attrs["units"]
+
+    # PRMS initial-condition parameters -> supplied state, given to the
+    # process that owns each restart variable
+    initial_state = prms_initial_state(params)
+    for entry in process_dict.values():
+        for name in entry["class"].get_restart_variables():
+            if name in initial_state:
+                entry[name] = initial_state[name]
+
+    for grid, gg in spec["required"].items():
+        for name, info in gg["external_inputs"].items():
+            consumer = info["consumers"][0]
+            if name in dyn_inputs:
+                process_dict[consumer][name] = dyn_inputs[name]
+            elif name in cfg.cbh_paths:
+                process_dict[consumer][name] = forcing(name)
+            elif name in params and params[name].dims == ("nhru",):
+                # a time-varying INPUT declaration backed by a STATIC
+                # parameter (PRMS dynamic-parameter default: no dyn
+                # flag -> the parameter holds; e.g. ag_frac in the
+                # spinup shape): serve it time-constant
+                process_dict[consumer][name] = xr.DataArray(
+                    np.tile(params[name].values, (times.size, 1)),
+                    dims=("time", "nhru"),
+                    coords={"time": times},
+                    attrs=params[name].attrs,
+                )
+            else:
+                raise KeyError(
+                    f"external input {name!r} (consumer {consumer!r}) "
+                    "has no CBH file, dynamic-parameter file, or "
+                    "same-named static parameter in the control "
+                    f"(*_day/CBH entries found: {sorted(cfg.cbh_paths)}"
+                    f"; dynamic: {sorted(dyn_inputs)})."
+                )
+
+    # -- PRMS output requests: NAMES translate, filtered to variables
+    # this model actually has; where to write is ALWAYS the caller's
+    # decision (the control file's output paths are never translated
+    # -- see PrmsRunConfig.output_var_names). Injected only when the
+    # caller supplied a store and no explicit name list of their own.
+    kit_control = dict(control or {})
+    dropped: list[str] = []
+    if (
+        cfg.output_var_names
+        and "output_serial_zarr" in kit_control
+        and "output_var_names" not in kit_control
+    ):
+        kit_control["output_var_names"], dropped = requested_output_names(
+            cfg, process_dict
+        )
+
+    return ModelKit(
+        process_dict=process_dict,
+        control=kit_control,
+        maps=maps,
+        discretizations=discretizations,
+        config=cfg,
+        dropped_output_var_names=dropped,
+    )
+
+
+def model_from_control(
+    control_file: str | pl.Path,
+    control: dict[str, Any] | None = None,
+    preprocessed: str | pl.Path | None = None,
+    cbh_paths: Mapping[str, str | pl.Path] | None = None,
+    processes: Collection[str] | None = None,
+) -> Model:
+    """The one-liner: legacy PRMS control file -> a constructed (and
+    thereby validated) pws_phoenix Model. See assemble_from_control
+    for the kit underneath (and for `preprocessed` / `cbh_paths` /
+    `processes`)."""
+    return assemble_from_control(
+        control_file,
+        control,
+        preprocessed=preprocessed,
+        cbh_paths=cbh_paths,
+        processes=processes,
+    ).model()
+
+
+def _read_translation(
+    translation_yaml: str | pl.Path,
+) -> tuple[pl.Path, dict[str, Any], PrmsRunConfig]:
+    """The yaml of a translated domain: its path, its content, and
+    the run configuration of the control copy beside it. Raises as
+    assemble_from_translation documents for the control copy and for
+    a yaml that names no forcing file or no parameter file."""
+    yaml_path = pl.Path(translation_yaml)
+    with open(yaml_path) as ff:
+        info = yaml.safe_load(ff)
+    domain_dir = yaml_path.parent
+
+    control_copy = domain_dir / info["control_copy"]
+    sha256 = hashlib.sha256(control_copy.read_bytes()).hexdigest()
+    if sha256 != info["control_sha256"]:
+        raise ValueError(
+            f"{control_copy} is not the control file that {yaml_path} "
+            f"was written from (sha256 {sha256}, the yaml records "
+            f"{info['control_sha256']}): translate the domain again."
+        )
+    not_run = [
+        key for key in ("forcing_file", "parameter_file") if info[key] is None
+    ]
+    if not_run:
+        raise FileNotFoundError(
+            f"{yaml_path} names no {' and no '.join(not_run)}: run "
+            "translate_domain with those steps."
+        )
+
+    cfg = from_control(load_control(control_copy), control_copy)
+    if cfg.dyn_param_paths:
+        raise NotImplementedError(
+            f"{control_copy} names dynamic-parameter files "
+            f"({sorted(cfg.dyn_param_paths)}): a translated domain "
+            "does not hold them yet."
+        )
+    # from_control resolved the copy's file entries against the copy's
+    # directory, but they are relative to the ORIGINAL's: the files
+    # that were read are the ones the yaml records
+    cfg.param_files = [pl.Path(pp) for pp in info["parameter_sources"]]
+    cfg.cbh_paths = {
+        name: pl.Path(pp) for name, pp in info["forcing_sources"].items()
+    }
+    return yaml_path, info, cfg
+
+
+def assemble_from_translation(
+    translation_yaml: str | pl.Path,
+    control: dict[str, Any] | None = None,
+    processes: Collection[str] | None = None,
+    hru_block: tuple[int, int] | None = None,
+    transposed: bool = False,
+) -> ModelKit:
+    """A domain translated ahead of time -> a ModelKit.
+    `translation_yaml` is the ``<stem>_translation.yaml`` that
+    ``translate_domain`` wrote; no CBH or parameter text is read.
+
+    - Options (the classes, the simulation window, the requested
+      output names) come from the control copy beside the yaml.
+    - Parameters come from the yaml's ``parameter_file``, and the
+      derived parameters and map weights from its
+      ``preprocessed_file`` when it names one (else they are derived
+      here, as in assemble_from_control).
+    - Each forcing entry of the kit's process_dict is the PATH of the
+      yaml's ``forcing_file``, on (time, nhru), or with
+      ``transposed=True`` of its ``forcing_file_transpose``, on
+      (nhru, time) (``translate_domain(cbh_transpose=True)`` writes
+      it): the Model opens it once and reads one day per step. The
+      answers are the same; the caller chooses the file. That file
+      holds the whole record, so the kit's control carries the control
+      file's ``start_time`` and ``end_time``; ones given in `control`
+      take precedence.
+
+    The kit is otherwise that of assemble_from_control on the original
+    control file. `control` and `processes` are as there.
+
+    ``hru_block=(start, stop)`` gives the kit of the hrus
+    ``[start, stop)`` alone (0-based positions on ``nhru``), and only
+    those hrus are read:
+
+    - Every kept process must be on the nhru grid: name them in
+      `processes`. Nothing on that grid reads another hru or the
+      channel, so the blocks of a domain run as separate models and
+      give the hru variables of the whole one.
+    - Parameters: each variable on ``nhru`` is read for the block
+      alone; the others are read whole.
+    - The derived hru parameters (the solar tables, ``hru_in_to_cf``)
+      are read from the ``preprocessed_file`` for the block alone and
+      are NOT verified against the parameters: the file's sha256
+      stamps are of whole arrays. ``verify_translation`` makes that
+      check once for the domain.
+    - Each forcing entry is an in-memory DataArray of the block over
+      ``start_time`` to ``end_time``, read once here in the file's
+      dtype and dim order (4 bytes x days x hrus of the block per
+      forcing for a float32 file). Over a long record the transposed
+      file is the one whose block is stored together.
+    - PRMS's rule for ``pref_flow_infil_frac`` (prms_parameter_defaults:
+      negative on every hru) is judged on the whole domain, so every
+      block applies it or none does.
+
+    Raises when the control copy is not the control file that was
+    translated (the yaml's ``control_sha256``), when the yaml names no
+    forcing file or no parameter file (a step that was not run) or,
+    with ``transposed=True``, no transposed copy, and for an
+    `hru_block` outside the domain or with a kept process off the
+    nhru grid. A domain cut to some of its hrus (``cut_translation``;
+    its yaml has ``cut_from``) holds hrus only: a kept process off the
+    nhru grid raises ValueError there too."""
+    yaml_path, info, cfg = _read_translation(translation_yaml)
+    domain_dir = yaml_path.parent
+    if info.get("cut_from") is not None:
+        off_grid = [
+            slot
+            for slot in _kept_classes(cfg.classes, processes)
+            if SLOT_GRIDS[slot] != "nhru"
+        ]
+        if off_grid:
+            raise ValueError(
+                f"{yaml_path} is a cut of the hrus of "
+                f"{info['cut_from']} (cut_translation): it holds "
+                f"nothing on another grid, and {off_grid} are on one. "
+                "Name the nhru processes to keep in processes=."
+            )
+
+    forcing_key = "forcing_file_transpose" if transposed else "forcing_file"
+    if info.get(forcing_key) is None:
+        # only the transposed copy can be missing here
+        raise FileNotFoundError(
+            f"{yaml_path} names no {forcing_key}: run translate_domain "
+            "with cbh_transpose=True (--cbh-transpose)."
+        )
+    parameter_file = domain_dir / info["parameter_file"]
+    forcing_file = domain_dir / info[forcing_key]
+    preprocessed = info.get("preprocessed_file")
+    preprocessed_file = (
+        None if preprocessed is None else domain_dir / preprocessed
+    )
+    kit_control = {
+        "start_time": cfg.start_time,
+        "end_time": cfg.end_time,
+    } | (control or {})
+    if hru_block is not None:
+        return _assemble_hru_block(
+            cfg,
+            parameter_file,
+            forcing_file,
+            preprocessed_file,
+            kit_control,
+            processes,
+            hru_block,
+        )
+    return _assemble(
+        cfg,
+        xr.load_dataset(parameter_file),
+        lambda name: forcing_file,
+        kit_control,
+        preprocessed_file,
+        processes,
+    )
+
+
+# the derived parameters on the hru grid in a preprocessed file
+_HRU_ARTIFACT_NAMES = ("soltab_potsw", "soltab_horad_potsw", "hru_in_to_cf")
+# what prms_parameter_defaults reads
+_PARAMETER_DEFAULTS_NAMES = (
+    "pref_flow_den",
+    "hru_type",
+    "pref_flow_infil_frac",
+)
+
+
+def _assemble_hru_block(
+    cfg: PrmsRunConfig,
+    parameter_file: pl.Path,
+    forcing_file: pl.Path,
+    preprocessed_file: pl.Path | None,
+    control: dict[str, Any],
+    processes: Collection[str] | None,
+    hru_block: tuple[int, int],
+) -> ModelKit:
+    """assemble_from_translation for the hrus ``[start, stop)`` alone
+    (its docstring has the rules). Nothing on ``nhru`` is held at the
+    domain's extent when this returns: each file is opened, the block
+    is read from it, and it is closed."""
+    off_grid = [
+        slot
+        for slot in _kept_classes(cfg.classes, processes)
+        if SLOT_GRIDS[slot] != "nhru"
+    ]
+    if off_grid:
+        raise ValueError(
+            f"hru_block cuts the nhru grid only, and {off_grid} are on "
+            "another grid: name the nhru processes to keep in "
+            "processes=."
+        )
+    start, stop = hru_block
+    block = {"nhru": slice(start, stop)}
+
+    # cache=False: the three arrays read whole for the check below
+    # are dropped after it. Cached, the block's cut of them would be
+    # a view that keeps the whole arrays.
+    with xr.open_dataset(parameter_file, cache=False) as whole:
+        nhru = whole.sizes["nhru"]
+        if not 0 <= start < stop <= nhru:
+            raise ValueError(
+                f"hru_block = {hru_block}: needs 0 <= start < stop <= "
+                f"{nhru}, the domain's number of hrus."
+            )
+        # the pref_flow_infil_frac rule on the whole domain: raises on
+        # a mix that a block could hide. The result is not kept;
+        # _assemble applies the rule to the block.
+        prms_parameter_defaults(
+            whole[[nn for nn in _PARAMETER_DEFAULTS_NAMES if nn in whole]]
+        )
+        params = whole.isel(block).load()
+
+    artifacts: xr.Dataset | None = None
+    if preprocessed_file is not None:
+        with xr.open_dataset(preprocessed_file) as whole:
+            artifacts = whole[list(_HRU_ARTIFACT_NAMES)].isel(block).load()
+
+    # the block's forcing over the run, held in memory for the life of
+    # the kit: one array per forcing, as the file stores it (dtype and
+    # dim order), allocated by the read
+    bounds = [
+        None if control.get(key) is None else np.datetime64(control[key], "D")
+        for key in ("start_time", "end_time")
+    ]
+    with xr.open_dataset(forcing_file) as whole:
+        cut = whole.sel(time=slice(*bounds)).isel(block)
+        # as load_cbh gives a forcing: no coordinate but time
+        cut = cut.drop_vars([cc for cc in cut.coords if cc != "time"])
+        return _assemble(
+            cfg,
+            params,
+            lambda name: cut[name].load(),
+            control,
+            artifacts,
+            processes,
+        )
+
+
+def verify_translation(translation_yaml: str | pl.Path) -> None:
+    """Check a translated domain as a WHOLE: what a build of one block
+    of its hrus (``assemble_from_translation(hru_block=...)``) cannot
+    check, because it reads only its block. Call it once, in one
+    process, before the runs that read blocks. It returns nothing and
+    raises on:
+
+    - what assemble_from_translation raises on for the yaml and the
+      control copy;
+    - ``pref_flow_infil_frac`` negative on some hrus but not all
+      (prms_parameter_defaults);
+    - a ``preprocessed_file`` that is not the one derived from the
+      ``parameter_file`` (verify_preprocessed: the sha256 stamps of
+      every derived array and of its inputs);
+    - a forcing file (the ``forcing_file``, and the
+      ``forcing_file_transpose`` when the yaml names one) that lacks a
+      forcing of the control file, whose number of hrus is not the
+      parameter file's, or whose time axis lacks the control file's
+      ``start_time`` or ``end_time``.
+
+    The parameter file and the preprocessed file are read whole; the
+    forcing files are opened and not read."""
+    from pws_phoenix.prms_translate.preprocess import verify_preprocessed
+
+    yaml_path, info, cfg = _read_translation(translation_yaml)
+    domain_dir = yaml_path.parent
+    parameter_file = domain_dir / info["parameter_file"]
+    params = prms_parameter_defaults(xr.load_dataset(parameter_file))
+    nhru = params.sizes["nhru"]
+    if info.get("preprocessed_file") is not None:
+        verify_preprocessed(
+            xr.load_dataset(domain_dir / info["preprocessed_file"]), params
+        )
+
+    for key in ("forcing_file", "forcing_file_transpose"):
+        if info.get(key) is None:
+            continue
+        forcing_file = domain_dir / info[key]
+        with xr.open_dataset(forcing_file) as forcing:
+            missing = sorted(set(cfg.cbh_paths) - set(forcing.data_vars))
+            if missing:
+                raise ValueError(
+                    f"{forcing_file} lacks the forcings {missing} of "
+                    "the control file: translate the domain again."
+                )
+            if forcing.sizes["nhru"] != nhru:
+                raise ValueError(
+                    f"{forcing_file} holds {forcing.sizes['nhru']} "
+                    f"hrus and {parameter_file} holds {nhru}: they are "
+                    "not of one domain."
+                )
+            times = forcing["time"].values
+            for bound_name, bound in (
+                ("start_time", cfg.start_time),
+                ("end_time", cfg.end_time),
+            ):
+                if not (times == bound).any():
+                    raise ValueError(
+                        f"{forcing_file} has no time {bound}, the "
+                        f"control file's {bound_name} (its "
+                        f"{times.size} times run from {times[0]} to "
+                        f"{times[-1]})."
+                    )
+
+
+def model_from_translation(
+    translation_yaml: str | pl.Path,
+    control: dict[str, Any] | None = None,
+    processes: Collection[str] | None = None,
+    hru_block: tuple[int, int] | None = None,
+    transposed: bool = False,
+) -> Model:
+    """The one-liner: a domain translated ahead of time -> a
+    constructed (and thereby validated) pws_phoenix Model. See
+    assemble_from_translation for the kit underneath."""
+    return assemble_from_translation(
+        translation_yaml,
+        control,
+        processes,
+        hru_block=hru_block,
+        transposed=transposed,
+    ).model()
+
+
+def insert_flow_graph(
+    kit: ModelKit,
+    new_nodes: list[NewNode],
+    *,
+    n_substeps: int = 24,
+    io_in_cfs: bool = True,
+    class_name: str = "FlowGraph",
+) -> ModelKit:
+    """Replace the kit's PRMSChannel with a FlowGraph that has
+    ``new_nodes`` spliced into the channel network (the pws_phoenix
+    form of pywatershed's ``prms_channel_flow_graph_to_model_dict``).
+
+    The ``prms_channel`` slot becomes ``flow_graph`` (same position in
+    the schedule) on a new ``nnodes`` grid; the three lateral-volume
+    Maps are padded with zero rows for the new nodes and re-targeted to
+    the graph's ``node_*_vol`` inputs; the ``nsegment`` grid goes away.
+    Initial state supplied in the channel entry (``seg_inflow``) is
+    carried onto the graph's channel rows, zero on the new nodes; the
+    new nodes' own initial state (``NewNode.initial_state``) is added.
+    ``control["output_var_names"]`` is re-filtered to the graph's
+    variables (``seg_inflow``/``seg_outflow`` survive -- the channel
+    node declares them as its rows' state, now on ``nnodes``; anything
+    the graph lacks is recorded in ``dropped_output_var_names``). The
+    graph-level names (``node_outflows``, ``lake_release``, ...) are
+    never auto-added -- request them yourself.
+
+    Not wired: a kit with other segment-grid processes (stream
+    temperature, hydraulic geometry) -- they consume ``seg_outflow`` on
+    ``nsegment``; feeding them from the graph is a later step.
+    """
+    if "prms_channel" not in kit.process_dict:
+        raise ValueError("the kit has no 'prms_channel' slot to replace")
+    others = [
+        slot
+        for slot, entry in kit.process_dict.items()
+        if entry["discretization"] == "nsegment" and slot != "prms_channel"
+    ]
+    if others:
+        raise NotImplementedError(
+            f"segment-grid processes {others} beside the channel are not "
+            "wired to a FlowGraph yet (they consume seg_outflow on "
+            "nsegment)."
+        )
+    seg_dis = kit.discretizations["nsegment"].parameters
+    assert seg_dis is not None
+    if "nhm_seg" not in seg_dis:
+        raise ValueError(
+            "the segment dis carries no 'nhm_seg' (the parameter file "
+            "lacks it); splicing by nhm_seg is impossible"
+        )
+    fg = splice_flow_graph(
+        seg_dis,
+        kit.process_dict["prms_channel"]["parameters"],
+        new_nodes,
+        n_substeps=n_substeps,
+        io_in_cfs=io_in_cfs,
+        class_name=class_name,
+    )
+
+    # -- process_dict: the channel slot becomes the graph, in place --
+    process_dict: dict[str, dict[str, Any]] = {}
+    for slot, entry in kit.process_dict.items():
+        if slot == "prms_channel":
+            graph_entry = {
+                "class": fg.graph_class,
+                "discretization": "nnodes",
+                "parameters": fg.parameters,
+            }
+            # supplied channel state rides onto the graph: zeros on
+            # the new nodes' rows (what init_from_params_type writes there)
+            for name in fg.graph_class.get_restart_variables():
+                if name in entry:
+                    padded = np.zeros(fg.n_nodes, dtype=np.float64)
+                    padded[: fg.n_seg] = entry[name].values
+                    # the channel state's own units ride along
+                    graph_entry[name] = xr.DataArray(
+                        padded,
+                        dims="nnodes",
+                        attrs={
+                            kk: vv
+                            for kk, vv in entry[name].attrs.items()
+                            if kk == "units"
+                        },
+                    )
+            # the new nodes' initial state (NewNode.initial_state); on
+            # a name the channel also supplied, a new node's value
+            # wins on its own row
+            for name, values in fg.initial_state.items():
+                if name in graph_entry:
+                    values = values.fillna(graph_entry[name])
+                graph_entry[name] = values
+            process_dict["flow_graph"] = graph_entry
+        else:
+            process_dict[slot] = entry
+
+    # -- Maps: pad + re-target the ones that fed the channel --
+    maps: dict[str, Map] = {}
+    for name, mm in kit.maps.items():
+        if mm.target_grid != "nsegment":
+            maps[name] = mm
+            continue
+        maps[name] = Map(
+            weights=fg.pad_weights(mm.weights),
+            grid={mm.source_grid: "nnodes"},
+            variable={mm.source_var: f"node_{mm.source_var}"},
+            derivation=(
+                f"{mm.derivation}; zero rows appended for the "
+                f"{fg.n_nodes - fg.n_seg} spliced flow-graph nodes"
+            ),
+        )
+
+    discretizations = {
+        grid: disc
+        for grid, disc in kit.discretizations.items()
+        if grid != "nsegment"
+    }
+    discretizations["nnodes"] = fg.discretization
+
+    # -- output names: the channel's variables no longer exist --
+    control = dict(kit.control)
+    dropped = list(kit.dropped_output_var_names)
+    if "output_var_names" in control:
+        available: set[str] = set()
+        for entry in process_dict.values():
+            available |= set(entry["class"].get_var_names(include_budget=True))
+        kept = [nn for nn in control["output_var_names"] if nn in available]
+        dropped += [
+            nn for nn in control["output_var_names"] if nn not in available
+        ]
+        control["output_var_names"] = kept
+
+    return ModelKit(
+        process_dict=process_dict,
+        control=control,
+        maps=maps,
+        discretizations=discretizations,
+        config=kit.config,
+        dropped_output_var_names=dropped,
+    )

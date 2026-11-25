@@ -1,0 +1,2811 @@
+"""
+model.py
+========
+Orchestrators for the mpixarray Process framework:
+
+  - Model:    serial orchestrator -- loads data, assembles one shared dataset
+              per discretization (grid) and binds each process to it directly
+              (cross-process buffer sharing is structural -- the same named
+              variable), runs the serial time loop, and writes output via the
+              Output collector (one zarr store).
+  - ModelMPI: MPI streaming orchestrator -- one space-decomposed dataset
+              streamed over time (mpixarray). Subclasses Model but overrides
+              __init__/run/finalize; there, buffer sharing is structural (all
+              processes view one decomposed dataset).
+
+Model is process-aware by design (it assembles each grid's shared dataset from
+its processes' field specs and binds the process instances to it); there is no
+separate process-agnostic orchestrator layer.
+"""
+
+import os
+import pathlib as pl
+import sys
+import traceback
+import warnings
+from collections.abc import Callable, Mapping
+from typing import Any, Dict, List, Literal, Union
+
+import numba
+import numpy as np
+import xarray as xr
+
+from pws_phoenix.data_io import (
+    Input,
+    Output,
+    ResultCollector,
+    open_xr,
+    slow_order_note,
+    warn_slow_order,
+)
+from pws_phoenix.discretization import Discretization
+from pws_phoenix.clock import Time
+from pws_phoenix import units as units_mod
+from pws_phoenix.process import _FILL_VALUE, _dict_of_kind, _resolved_fields
+
+# The MPI stack (mpix + mpixarray, ~0.6 s to import) is loaded inside
+# ModelMPI._build, the only place it is used: the serial Model never pays
+# for it, and ModelMPI fails at build if it is absent.
+
+
+class Model:
+    """Serial simulation orchestrator for Process subclasses.
+
+    Loads data, assembles one shared dataset per discretization (grid) and
+    binds each process to it directly (cross-process buffer sharing is
+    structural -- the same named variable), runs the serial time loop, and
+    writes output via the Output collector (one zarr store) when the control
+    dict requests it.
+
+    Time: the model runs over its inputs' time axis.
+    ``control["start_time"]`` / ``control["end_time"]`` (each optional,
+    both included) restrict it: every input is sliced to them, and a
+    bound that is not a time in an input raises. Inputs: a (time,
+    grid) DataArray, the path of a file that holds it, or the path of
+    ONE file that holds several inputs (each is the variable of its
+    own name; the file is opened once). A file-backed input stays on
+    disk and one time row is read per step, unless
+    ``control["load_all"]`` is set.
+
+    Restart: ``model.write_restart(dir)`` after a run saves the
+    prognostic state (the ``DataArrayMeta(restart=True)`` variables +
+    any ``get_restart_state()`` hook state) to self-locating per-grid
+    files; ``control["restart_read"] = dir`` warm-starts a new model
+    from them, resuming at the step after the saved time. USER
+    CONVENIENCE BY DESIGN: a warm start takes the SAME (superset)
+    input files as the original run -- inputs need only COVER the
+    restart time; the model indexes in (serial) or time-slices the
+    stream (MPI), so no restart-specific input preparation is ever
+    needed. Restart files are format-identical across serial and MPI:
+    either can warm-start from the other's.
+
+    Reuse: ``model.reset()`` puts a built model back to its state
+    right after the build, so it can be run again without a rebuild;
+    ``model.set_parameters(values)`` before it gives the next run new
+    parameter values (cold starts without a zarr Output only; see
+    both methods). set_parameters() raises unless the model was built
+    with ``control["calibration_mode"] = True``.
+    ``control["collect_var_names"]`` keeps the named
+    variables in memory for the whole run, as
+    ``model.results.values[name]`` (data_io.ResultCollector).
+
+    Threads: ``control["numba_n_threads"]`` (default 1) is the number
+    of numba threads the hru kernels run on (see _set_numba_threads).
+
+    Usage:
+        with Model(process_dict, control) as model:
+            model.run(dt, n_steps)
+    """
+
+    def __init__(
+        self,
+        process_dict: Dict[str, Any],
+        control: Dict[str, Any],
+        load_all: Union[bool, None] = None,
+        maps: Union[Dict[str, Any], None] = None,
+        discretizations: Union[Dict[str, Discretization], None] = None,
+    ) -> None:
+        # Structure-only copy (NO deepcopy): the model may replace values
+        # (Path -> opened object) without mutating the caller's dict, but the
+        # data are shared by reference -- the caller's in-memory arrays ARE
+        # the working buffers, and the model's read-only flags (parameters,
+        # read-only inputs) apply to them. See "Prime directive: memory" in
+        # pws_phoenix/CLAUDE.md.
+        self._process_dict = {kk: dict(vv) for kk, vv in process_dict.items()}
+        # process name -> home grid (co-registration: process_dict override,
+        # else the class default, else the single default grid "space").
+        self._proc_grid: Dict[str, str] = {
+            kk: self._resolve_grid(vv) for kk, vv in self._process_dict.items()
+        }
+        self.maps: Dict[str, Any] = maps or {}
+        # one Discretization per distinct home grid; the grid's dict key IS its
+        # real spatial dim name (1-D grids: grid identity == dim). The dis owns
+        # the grid's shared dataset, assembled + attached during _initialize.
+        # Caller-supplied Discretizations carry dis-owned parameters
+        # (dis_hru/dis_seg style); grids not supplied get the degenerate
+        # default.
+        grids = dict.fromkeys(self._proc_grid.values())
+        provided = discretizations or {}
+        unknown_grids = [gg for gg in provided if gg not in grids]
+        if unknown_grids:
+            raise ValueError(
+                f"discretizations {unknown_grids} match no process's home "
+                f"grid (grids in use: {list(grids)})."
+            )
+        self.discretizations: Dict[str, Discretization] = {
+            gg: provided.get(gg) or Discretization([gg]) for gg in grids
+        }
+        self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
+        # lines of the build's one warning about inputs stored in the
+        # slower order of their dims (data_io.slow_order_note)
+        self._slow_order_notes: List[str] = []
+        self._finalized = False
+        # the guard on set_parameters(): it raises unless this is True
+        self._calibration_mode = bool(control.get("calibration_mode", False))
+        # set_parameters() -> True: the state in place belongs to the
+        # old parameters, and step() raises until reset()
+        self._needs_reset = False
+        # True while a set_parameters() has written values but not
+        # finished init_from_params() (one raised): reset() raises
+        self._parameters_incomplete = False
+
+        self.model_dict: Dict[str, Any] = {}
+        self.inputs_dict: Dict[str, Input] = {}
+        # (grid, name) -> the caller's supplied initial-state array
+        # (a reference, not a copy)
+        self._supplied_state: Dict[tuple[str, str], Any] = {}
+        # (scale, offset) for supplied state in compatible units under
+        # control["units"] = "convert" (see _record_supplied_state)
+        self._supplied_state_affine: Dict[
+            tuple[str, str], tuple[float, float]
+        ] = {}
+        # set below once built; None until then (and when not requested)
+        self.output: Union[Output, None] = None
+        self.results: Union[ResultCollector, None] = None
+
+        try:
+            if load_all is None:
+                self._load_all = control.get("load_all", False)
+            else:
+                self._load_all = load_all
+            self._set_numba_threads(control)
+            self._set_budget_options(control)
+            self._set_time_bounds(control)
+            self._warm_start = control.get("restart_read") is not None
+
+            self._load_paths_to_data()
+
+            self._initialize_inputs_and_proceses()
+            del self._process_dict
+
+            # Warm start (construction-time option): restore the
+            # flagged prognostic state written by write_restart() and
+            # resume AFTER the file's state time. Cold start:
+            # _start_index = 0; the state is the init hooks' defaults
+            # overridden by any supplied state.
+            self._start_index = 0
+            restart_read = control.get("restart_read")
+            if restart_read is not None:
+                self._raise_if_supplied_state_with_restart()
+                self._read_restart(pl.Path(restart_read))
+            self._check_initial_state()
+
+            # the step cursor: step()/run() continue from here
+            self._next_index = self._start_index
+            self.current_time_index = np.array(
+                [self._start_index], dtype=np.int32
+            )
+            self.current_time = np.array(
+                [self.times[self._start_index].values], dtype="datetime64[D]"
+            )
+
+            # Optional output collector (serial path). Created when the
+            # control dict requests output. The MPI path streams output
+            # via mpixarray and overrides __init__, so it never reaches
+            # this block.
+            if (
+                "output_var_names" in control
+                or "output_serial_zarr" in control
+            ):
+                if (
+                    "output_var_names" not in control
+                    or "output_serial_zarr" not in control
+                ):
+                    raise ValueError(
+                        "output_var_names and output_serial_zarr must "
+                        "both be specified in the control dict."
+                    )
+                if "time_chunk_size" in control:
+                    time_chunk_size = control["time_chunk_size"]
+                else:
+                    time_chunk_size = 365
+                    warnings.warn(
+                        "time_chunk_size not specified in control dict, "
+                        "using default value of 365.",
+                        UserWarning,
+                    )
+                output = Output(
+                    time_chunk_size=time_chunk_size,
+                    variable_names=control["output_var_names"],
+                    output_store=pl.Path(control["output_serial_zarr"]),
+                    time_values=self.times.values,
+                )
+                # assigned only once its store exists: _release()
+                # finalizes self.output, and a store never created
+                # cannot be finalized
+                output.initialize_variable_tracking(self.model_dict)
+                self.output = output
+
+            # Optional collector of results in memory (serial path):
+            # one (n_time, space) array per named variable, allocated
+            # here.
+            if "collect_var_names" in control:
+                self.results = ResultCollector(
+                    list(control["collect_var_names"]),
+                    self.model_dict,
+                    self.ntime,
+                )
+        except BaseException:
+            # A constructor that raises never reaches __exit__, so
+            # what it opened is released here (as in ModelMPI).
+            self._release()
+            self._finalized = True
+            raise
+
+    def _load_paths_to_data(self) -> None:
+        """Convert file paths in process_dict to xarray objects."""
+        shared = self._load_shared_data_files()
+        for proc in self._process_dict.values():
+            for key in proc:
+                val = proc[key]
+                if isinstance(val, pl.Path):
+                    if val in shared:
+                        proc[key] = shared[val]
+                    else:
+                        opened = open_xr(val, load=self._load_all)
+                        proc[key] = opened
+                        self._opened_files.append(opened)
+
+    def _load_shared_data_files(
+        self,
+    ) -> Dict[pl.Path, Union[xr.DataArray, xr.Dataset]]:
+        """Open repeated file paths once, return {path: xarray_obj}."""
+        from collections import Counter
+
+        flat_paths = [
+            v
+            for outer in self._process_dict.values()
+            for v in outer.values()
+            if isinstance(v, pl.Path)
+        ]
+        shared = {}
+        for path, count in Counter(flat_paths).items():
+            if count > 1:
+                opened = open_xr(path, load=self._load_all)
+                shared[path] = opened
+                self._opened_files.append(opened)
+        return shared
+
+    @staticmethod
+    def _resolve_grid(entry: Dict[str, Any]) -> str:
+        """A process entry's home grid: process_dict override, else the class
+        default (`Process.discretization`), else the single grid "space"."""
+        grid = entry.get("discretization") or entry["class"].discretization
+        return grid if grid is not None else "space"
+
+    @classmethod
+    def input_spec(
+        cls,
+        process_dict: Dict[str, Any],
+        maps: Union[Dict[str, Any], None] = None,
+        include_optional: bool = False,
+    ) -> Dict[str, Dict[str, Any]]:
+        """The model's INPUT CONTRACT, from declarations alone -- a DRY
+        RUN of assembly's resolution logic: no data are loaded, only
+        each entry's "class" and "discretization" are read (all other
+        entry keys -- parameters, forcings -- are ignored), and map
+        objects contribute only their grid/variable wiring.
+
+        The contract is about what must be SUPPLIED, so the top level
+        is required-vs-optional, then grid, then category:
+
+        spec["required"][grid]:
+        - "external_inputs": {name: {"consumers": [...]}} -- the
+          INPUTS proper: time-varying data served in model-time
+          lockstep (forcings/boundary data). A shared name is
+          supplied ONCE and shared structurally.
+        - "parameters": {name: [declaring processes]} -- AUTHORED
+          static supplied data (the modeler's data/calibration).
+          Where each name is PACKAGED (a grid's dis dataset --
+          consulted first at assembly -- vs a process parameters
+          dataset) is not resolved here: that is a data-preparation
+          decision, and assembly accepts either. Note PRMS
+          initial-condition parameters (`*_init*` by its own naming
+          convention, consumed by init_from_params()) are in this list --
+          they are ordinary supplied parameters.
+        - "derivable_parameters": {name: {"processes",
+          "derivation"}} -- REQUIRED at assembly exactly like
+          "parameters", but obtainable by the stated derivation (a
+          factory/formula over other supplied quantities; by
+          convention the string NAMES ITS INPUTS). PATENTLY DISTINCT
+          from ``kind="parameter_internal"``: internal parameters are
+          computed by init_from_params() and NEVER supplied (reported under
+          optional "internal_parameters"); derivable parameters ARE
+          supplied -- you may just generate them instead of authoring
+          them. (Under future compute-if-absent semantics this
+          category may become optional-with-default.)
+        - "initial_state": {process: [variables]} -- the RESTARTABLE
+          state: every ``restart=True`` variable is a settable initial
+          condition, supplied EITHER per variable under its own name in
+          the process's process_dict entry (optional; otherwise
+          init_from_params() sets it), OR all at once via
+          ``control["restart_read"]`` (see ``write_restart``) -- never
+          both. Optional supply, but part of the contract's surface.
+        - "required_initial_state": {process: [variables]} -- the
+          subset of "initial_state" with NO init_from_params() default
+          (``Process.required_initial_state``): supply it per variable, or
+          warm-start; the Model raises otherwise.
+
+        spec["maps"] (present when maps are given) -- REQUIRED supply
+        too, kept beside "required" because that dict's keys are
+        grids: each Map in the configuration implies ONE weights
+        matrix. Per map name: {"source_grid", "target_grid",
+        "source_var", "target_var", "weights_shape" (a
+        ("n_<target_grid>", "n_<source_grid>") tuple -- rows map INTO
+        the target), "derivation"} -- the derivation string (from
+        ``Map(derivation=...)``) says how the matrix is obtained when
+        the map's author knows (e.g. the translation layer derives
+        NHM aggregation weights); None means the modeler supplies it.
+
+        spec["optional"][grid] (informational; included only when
+        ``include_optional=True``):
+        - "internal_inputs": {name: {"producer", "consumers"}} --
+          inputs satisfied on-grid by structural sharing (another
+          process's variable or derived parameter, including
+          prior-step back-edges; or a same-named supplied parameter).
+        - "internal_parameters": {name: [processes]} -- computed by
+          init_from_params(); never supplied.
+        - "map_fed_inputs": {name: {"map", "source_grid",
+          "source_var", "consumers"}} -- satisfied by a Map's target
+          buffer.
+
+        This is the single source of truth for "what does this model
+        consume" -- consumers (the examples/00_input_contract.py notebook, the
+        PRMS translation layer) should call it rather than maintain
+        lists by hand. Schedule/order validity (writers before
+        consumers, map placement) is NOT checked here; real assembly
+        does that.
+        """
+        maps = maps or {}
+        proc_grid = {
+            kk: cls._resolve_grid(vv) for kk, vv in process_dict.items()
+        }
+        grid_procs: Dict[str, List[str]] = {}
+        for kk in process_dict:
+            grid_procs.setdefault(proc_grid[kk], []).append(kk)
+
+        spec: Dict[str, Dict[str, Any]] = {"required": {}}
+        if maps:
+            spec["maps"] = {
+                map_name: {
+                    "source_grid": mm.source_grid,
+                    "target_grid": mm.target_grid,
+                    "source_var": mm.source_var,
+                    "target_var": mm.target_var,
+                    "weights_shape": (
+                        f"n_{mm.target_grid}",
+                        f"n_{mm.source_grid}",
+                    ),
+                    "derivation": getattr(mm, "derivation", None),
+                }
+                for map_name, mm in maps.items()
+            }
+        if include_optional:
+            spec["optional"] = {}
+        for grid, proc_names in grid_procs.items():
+            parameters: Dict[str, List[str]] = {}
+            derivable: Dict[str, Dict[str, Any]] = {}
+            internal: Dict[str, List[str]] = {}
+            var_owner: Dict[str, str] = {}
+            initial_state: Dict[str, List[str]] = {}
+            required_initial_state: Dict[str, List[str]] = {}
+            for kk in proc_names:
+                pcls = process_dict[kk]["class"]
+                for name, meta in _dict_of_kind(pcls, "parameter").items():
+                    if meta.derivation is not None:
+                        entry = derivable.setdefault(
+                            name,
+                            {"processes": [], "derivation": meta.derivation},
+                        )
+                        entry["processes"].append(kk)
+                    else:
+                        parameters.setdefault(name, []).append(kk)
+                for name in pcls.get_parameters_internal():
+                    internal.setdefault(name, []).append(kk)
+                for name in pcls.get_variables():
+                    var_owner.setdefault(name, kk)
+                restartable = list(pcls.get_restart_variables())
+                if restartable:
+                    initial_state[kk] = restartable
+                if pcls.required_initial_state:
+                    required_initial_state[kk] = list(
+                        pcls.required_initial_state
+                    )
+            # a name declared derivable by ANY process is derivable
+            # (another process may declare it plain -- the derivation
+            # knowledge counts once)
+            for name in list(parameters):
+                if name in derivable:
+                    derivable[name]["processes"] = sorted(
+                        set(derivable[name]["processes"])
+                        | set(parameters.pop(name))
+                    )
+
+            consumers: Dict[str, List[str]] = {}
+            for kk in proc_names:
+                pcls = process_dict[kk]["class"]
+                for name in tuple(pcls.get_inputs()) + tuple(
+                    pcls.get_mutable_inputs()
+                ):
+                    consumers.setdefault(name, []).append(kk)
+            map_feed = {
+                mm.target_var: {
+                    "map": map_name,
+                    "source_grid": mm.source_grid,
+                    "source_var": mm.source_var,
+                }
+                for map_name, mm in maps.items()
+                if mm.target_grid == grid
+            }
+
+            inputs_internal: Dict[str, Any] = {}
+            inputs_map_fed: Dict[str, Any] = {}
+            inputs_external: Dict[str, Any] = {}
+            for name, cons in consumers.items():
+                if name in var_owner:
+                    inputs_internal[name] = {
+                        "producer": var_owner[name],
+                        "consumers": cons,
+                    }
+                elif name in internal:
+                    inputs_internal[name] = {
+                        "producer": internal[name][0],
+                        "consumers": cons,
+                    }
+                elif name in map_feed:
+                    inputs_map_fed[name] = {
+                        **map_feed[name],
+                        "consumers": cons,
+                    }
+                elif name in parameters or name in derivable:
+                    # a same-named supplied parameter satisfies the input
+                    # structurally (assembly adds it to the grid dataset)
+                    declarer = (
+                        parameters[name][0]
+                        if name in parameters
+                        else derivable[name]["processes"][0]
+                    )
+                    inputs_internal[name] = {
+                        "producer": f"(parameter of {declarer})",
+                        "consumers": cons,
+                    }
+                else:
+                    inputs_external[name] = {"consumers": cons}
+
+            spec["required"][grid] = {
+                "external_inputs": inputs_external,
+                "parameters": parameters,
+                "derivable_parameters": derivable,
+                "initial_state": initial_state,
+                "required_initial_state": required_initial_state,
+            }
+            if include_optional:
+                spec["optional"][grid] = {
+                    "internal_inputs": inputs_internal,
+                    "internal_parameters": internal,
+                    "map_fed_inputs": inputs_map_fed,
+                }
+        return spec
+
+    def _initialize_inputs_and_proceses(self) -> None:  # (sic)
+        """Assemble ONE shared dataset per grid from its processes' field specs,
+        then bind each process to it. Same-named vars are added once, so
+        cross-process sharing (param_shared_name, Upper.flow -> Lower.flow) is
+        structural. Each grid's Discretization owns the resulting dataset."""
+        grid_procs: Dict[str, List[str]] = {}
+        for kk in self._process_dict:
+            grid_procs.setdefault(self._proc_grid[kk], []).append(kk)
+
+        for grid, proc_names in grid_procs.items():
+            grid_ds = xr.Dataset()
+            for kk in proc_names:
+                self._add_process_fields(kk, grid, grid_ds)
+            self.discretizations[grid].dataset = grid_ds
+
+        self._validate_inputs_resolved()
+        # Bind in process_dict order (assembly above groups by grid, but the
+        # author's order IS the execution schedule).
+        for kk in self._process_dict:
+            grid_ds = self.discretizations[self._proc_grid[kk]].dataset
+            self.model_dict[kk] = self._process_dict[kk]["class"](grid_ds)
+        self._variable_fills = self._collect_variable_fills()
+        self._collect_parameter_arrays()
+
+        # the clock exists before the init hooks: init_state(time)
+        # receives it at index 0
+        self._set_time()
+        self._run_initialize_hooks()
+        self._apply_supplied_state()
+        self._resolve_maps()
+        warn_slow_order(self._slow_order_notes)
+
+    def _set_numba_threads(self, control: Dict[str, Any]) -> None:
+        """control["numba_n_threads"] (default 1): the number of numba
+        threads the hru kernels run on. The kernels are always compiled
+        threaded (parallel=True); this holds numba at the count with
+        numba.set_num_threads, here at build and again at the top of
+        run(). The setting belongs to the calling thread of this
+        process and is NOT restored: other numba code run afterwards
+        gets the same count. The maximum is numba's thread pool,
+        numba.config.NUMBA_NUM_THREADS, fixed when numba was imported
+        (the NUMBA_NUM_THREADS environment variable, else the cores
+        the process may use): a count above it raises."""
+        n_threads = int(control.get("numba_n_threads", 1))
+        # numba sets the attribute when it is imported: mypy cannot
+        # see it
+        n_max = int(numba.config.NUMBA_NUM_THREADS)  # type: ignore[attr-defined]
+        self._raise_if_bad_numba_threads(n_threads, n_max)
+        if "numba_n_threads" not in control:
+            self._warn_if_numba_threads_ignored(n_max)
+        self._numba_n_threads = n_threads
+        numba.set_num_threads(n_threads)
+
+    def _raise_if_bad_numba_threads(self, n_threads: int, n_max: int) -> None:
+        if not 1 <= n_threads <= n_max:
+            raise ValueError(
+                f"control['numba_n_threads'] = {n_threads}: must be "
+                f"between 1 and numba's maximum for this process, "
+                f"{n_max} (the NUMBA_NUM_THREADS environment variable "
+                f"when set, else the cores granted to the process)."
+            )
+
+    def _warn_if_numba_threads_ignored(self, n_max: int) -> None:
+        """The user set NUMBA_NUM_THREADS above 1 and gave no
+        control["numba_n_threads"]: say that the run uses 1 thread."""
+        if "NUMBA_NUM_THREADS" in os.environ and n_max > 1:
+            warnings.warn(
+                f"NUMBA_NUM_THREADS={n_max} is set but "
+                f"control['numba_n_threads'] is not: the kernels run "
+                f"on 1 thread. Set control['numba_n_threads'] (up to "
+                f"{n_max}) to use more.",
+                UserWarning,
+            )
+
+    def _set_budget_options(self, control: Dict[str, Any]) -> None:
+        """control["budget"]: None (default; budgets are still computed
+        and written, never judged), "warn" (per-rank warnings), or
+        "error" (per-rank warnings, then raise -- collectively under
+        MPI). Tolerances control["budget_rtol"/"budget_atol"] default to
+        1e-10 (pywatershed's are 1e-5): every port closes at 1e-12 except
+        the STARFIT family, whose storage term is a difference of
+        reservoir storages (MCM) -- roundoff of up to ~3e4 MCM, scaled
+        to flow units, puts its floor at max |res| / (1 + |rhs|) =
+        1.4e-12 (cms) / 1.0e-11 (cfs); measured Nov 2026."""
+        mode = control.get("budget")
+        if mode not in (None, "warn", "error"):
+            raise ValueError(
+                f"control['budget'] must be None, 'warn' or 'error'; "
+                f"got {mode!r}."
+            )
+        self._budget_mode = mode
+        self._budget_rtol = float(control.get("budget_rtol", 1e-10))
+        self._budget_atol = float(control.get("budget_atol", 1e-10))
+        self._set_units_options(control)
+
+    def _set_units_options(self, control: Dict[str, Any]) -> None:
+        """control["units"]: None (default; nothing checked, pint never
+        imported), "check" (every supplied parameter/input's units must
+        name the declared quantity; Map source/target declarations must
+        agree), or "convert" (as check, but data in compatible units
+        are converted). A parameter is the model's working buffer: it
+        is converted in place at build. Whatever the model copies is
+        converted in the model's copy, and the supplied data are never
+        edited: supplied initial state, the declared variables of a
+        restart_read file, and every input (in memory, file-backed or
+        streamed), whose one-step buffer is converted after each
+        refill -- one multiply over the row per converted input per
+        step, nothing when the units agree. control["units_patch"] =
+        {name: vocabulary key} overrides a supplied array's
+        attrs["units"] (a file without the attribute, or with a
+        spelling outside the vocabulary). See pws_phoenix/units.py."""
+        mode = control.get("units")
+        if mode not in units_mod.MODES:
+            raise ValueError(
+                f"control['units'] must be one of {units_mod.MODES}; "
+                f"got {mode!r}."
+            )
+        self._units_mode = mode
+        self._units_patch: Dict[str, str] = dict(
+            control.get("units_patch") or {}
+        )
+        # input name -> (first consumer, the units it declares); see
+        # _input_conversion
+        self._input_units: Dict[str, tuple[str, str]] = {}
+        if mode is not None:
+            units_mod.registry()  # import pint now: fail at build, not later
+
+    def _reconcile_units(
+        self, name: str, da: Any, declared: Union[str, None], **kw: Any
+    ) -> None:
+        """units_mod.reconcile with this model's mode + patch."""
+        units_mod.reconcile(
+            name, da, declared, self._units_mode, self._units_patch, **kw
+        )
+
+    def _input_units_settled(
+        self, name: str, declared: Union[str, None], *, context: str
+    ) -> bool:
+        """Has an earlier consumer of the external input `name` already
+        settled its units (see _input_conversion)? One buffer serves
+        every consumer, so this consumer must declare the same unit:
+        raises when it does not. False when control["units"] is off,
+        the declaration is unit-less, or no consumer came before."""
+        if self._units_mode is None or declared is None:
+            return False
+        first = self._input_units.get(name)
+        if first is None:
+            return False
+        first_proc, first_declared = first
+        if not units_mod.same(first_declared, declared):
+            raise ValueError(
+                f"{context}: '{name}' is declared {declared!r} here and "
+                f"{first_declared!r} by process '{first_proc}': one "
+                "input buffer cannot serve both."
+            )
+        return True
+
+    def _input_conversion(
+        self,
+        proc_name: str,
+        name: str,
+        attrs: Any,
+        declared: Union[str, None],
+        *,
+        context: str,
+    ) -> Union[tuple[float, float], None]:
+        """control["units"] for an external input, at one of its
+        consumers. The FIRST consumer's declaration judges the supplied
+        units (units_mod.conversion): the result is None, or under
+        "convert" the (scale, offset) to apply to the input's one-step
+        buffer. For a later consumer the result is None (nothing more
+        to apply; _input_units_settled raises if it declares another
+        unit)."""
+        if self._units_mode is None or declared is None:
+            return None
+        if self._input_units_settled(name, declared, context=context):
+            return None
+        self._input_units[name] = (proc_name, declared)
+        return units_mod.conversion(
+            name,
+            attrs,
+            declared,
+            self._units_mode,
+            self._units_patch,
+            context=context,
+        )
+
+    def _check_budgets(self, proc: Any) -> None:
+        """Run a process's budgets for the step just calculated; judge
+        the result per control["budget"] (see _raise_if_imbalanced)."""
+        if not proc._budgets:
+            return
+        # error mode warns too: the per-rank warning carries the date,
+        # max |residual| and first indices that the raise does not.
+        n_bad = proc.check_budgets(
+            self._budget_rtol,
+            self._budget_atol,
+            self._budget_mode in ("warn", "error"),
+            self.time,
+        )
+        if self._budget_mode == "error":
+            self._raise_if_imbalanced(n_bad, proc)
+
+    def _raise_if_imbalanced(self, n_bad: int, proc: Any) -> None:
+        """Serial: raise on a local imbalance. ModelMPI overrides to agree
+        across ranks first (a lone raising rank would hang the others at
+        the next collective)."""
+        if n_bad > 0:
+            raise ValueError(
+                f"{type(proc).__name__} budget imbalanced at "
+                f"{self.time.current}: {n_bad} location(s) outside "
+                f"rtol={self._budget_rtol}, atol={self._budget_atol}."
+            )
+
+    def _run_initialize_hooks(self) -> None:
+        """The three init hooks (Process docstrings), each over ALL
+        processes in author order before the next: allocate() ->
+        init_from_params() -> freeze derived parameters (read-only once
+        ALL hooks have run: a shared derived name is written by its
+        owner before the freeze) -> init_state(time) with the clock at
+        index 0. Budget accumulators are zeroed with the state (before
+        any supplied state or restart restore)."""
+        for proc in self.model_dict.values():
+            proc.allocate()
+        for proc in self.model_dict.values():
+            proc.init_from_params()
+        for kk, proc in self.model_dict.items():
+            grid_ds = self.discretizations[self._proc_grid[kk]].dataset
+            for name in proc.get_parameters_internal():
+                grid_ds[name].values.flags.writeable = False
+        self._init_state_all()
+
+    def _init_state_all(self) -> None:
+        """init_state(time) and initialize_budgets() over all
+        processes in author order, with the clock at index 0: the
+        build's last hook, and what reset() runs again."""
+        self.time.set_index(0)
+        for proc in self.model_dict.values():
+            proc.init_state(self.time)
+            proc.initialize_budgets()
+
+    def _collect_variable_fills(self) -> List[tuple[np.ndarray, Any]]:
+        """(array, allocation fill) for every variable, budget
+        variables included; a name shared by two processes of a grid
+        is ONE array and one entry. Built once after binding; reset()
+        refills from it."""
+        fills: Dict[tuple[str, str], tuple[np.ndarray, Any]] = {}
+        for kk, proc in self.model_dict.items():
+            grid = self._proc_grid[kk]
+            variables = proc.get_variables(include_budget=True)
+            for name, meta in variables.items():
+                fills.setdefault(
+                    (grid, name), (proc._refs[name], _FILL_VALUE[meta.dtype])
+                )
+        return list(fills.values())
+
+    def _collect_parameter_arrays(self) -> None:
+        """(grid, name) -> array for every supplied parameter, and
+        (grid, name) -> (array, allocation fill) for every
+        parameter_internal. Built once after binding;
+        set_parameters() writes through them."""
+        self._parameter_arrays: Dict[tuple[str, str], np.ndarray] = {}
+        self._parameter_internal_fills: Dict[
+            tuple[str, str], tuple[np.ndarray, Any]
+        ] = {}
+        for kk, proc in self.model_dict.items():
+            grid = self._proc_grid[kk]
+            for name in proc.get_parameters():
+                self._parameter_arrays[(grid, name)] = proc._refs[name]
+            for name, meta in proc.get_parameters_internal().items():
+                self._parameter_internal_fills[(grid, name)] = (
+                    proc._refs[name],
+                    _FILL_VALUE[meta.dtype],
+                )
+
+    def _apply_supplied_state(self) -> None:
+        """Write the supplied initial state (restart variables given in
+        process_dict under their own names) over init_from_params()'s
+        defaults. FULL-extent arrays; _restore_grid_var writes this
+        rank's block (the restart restore path)."""
+        for key, values in self._supplied_state.items():
+            self._restore_grid_var(
+                *key,
+                np.asarray(values),
+                affine=self._supplied_state_affine.get(key),
+            )
+
+    def _record_supplied_state(
+        self, proc_name: str, cls: Any, grid: str, name: str, values: Any
+    ) -> None:
+        """Record one supplied initial-state array (written later by
+        _apply_supplied_state) and judge its units per control["units"]:
+        as for a parameter, its attrs["units"] (or the units_patch entry)
+        must name the declared quantity -- a bare ndarray has none and
+        raises. Supplied state is COPIED into the model's buffer, so
+        under "convert" the model's copy is converted after the write
+        and the caller's array is left as supplied."""
+        self._supplied_state[(grid, name)] = values
+        conv = units_mod.conversion(
+            name,
+            getattr(values, "attrs", {}),
+            _resolved_fields(cls)[name].units,
+            self._units_mode,
+            self._units_patch,
+            context=f"process '{proc_name}' initial state",
+        )
+        if conv is not None:
+            self._supplied_state_affine[(grid, name)] = conv
+
+    def _raise_if_supplied_state_with_restart(self) -> None:
+        """One source of initial state: a restart and supplied state
+        together would silently let the restart win."""
+        if self._supplied_state:
+            raise ValueError(
+                "control['restart_read'] is set AND initial state is "
+                "supplied in process_dict "
+                f"({sorted(nn for _, nn in self._supplied_state)}): "
+                "use one source."
+            )
+
+    @staticmethod
+    def _raise_if_partial_state_group(
+        proc_name: str, cls: Any, entry: Dict[str, Any]
+    ) -> None:
+        """A process's state group (Process.state_groups) is supplied
+        whole or not at all: its init_from_params() computes some members
+        from the defaults of others, and supplied state lands after
+        that hook."""
+        for group in cls.state_groups:
+            missing = [nn for nn in group if nn not in entry]
+            if missing and len(missing) < len(group):
+                given = [nn for nn in group if nn in entry]
+                raise ValueError(
+                    f"process '{proc_name}' ({cls.__name__}): initial "
+                    f"state {given} is supplied without {missing}. "
+                    f"{list(group)} must be supplied together: "
+                    f"{cls.__name__}.init_from_params() computes some of them "
+                    "from the others."
+                )
+
+    def _raise_if_required_initial_state_missing(
+        self, proc_name: str, cls: Any, entry: Dict[str, Any]
+    ) -> None:
+        """A process's required state (Process.required_initial_state) has no
+        init_from_params() default: it is supplied, or comes from a restart."""
+        if self._warm_start:
+            return
+        missing = [nn for nn in cls.required_initial_state if nn not in entry]
+        if missing:
+            raise ValueError(
+                f"process '{proc_name}' ({cls.__name__}): initial state "
+                f"{missing} has no default; supply it in the process "
+                "entry or set control['restart_read']."
+            )
+
+    def _check_initial_state(self) -> None:
+        """Ask every process to check the starting state now in place
+        (defaults, then supplied state or a restart); raise on any
+        problem (see _raise_if_bad_initial_state)."""
+        problems = [
+            f"process '{kk}': {msg}"
+            for kk, proc in self.model_dict.items()
+            for msg in proc.check_initial_state()
+        ]
+        self._raise_if_bad_initial_state(len(problems), problems)
+
+    def _raise_if_bad_initial_state(
+        self, n_bad: int, problems: List[str]
+    ) -> None:
+        """Serial: raise on a local problem. ModelMPI overrides to agree
+        across ranks first."""
+        if n_bad:
+            raise ValueError(
+                "\n".join(problems)
+                or "initial state was rejected on another rank"
+            )
+
+    def _validate_inputs_resolved(self) -> None:
+        """Every declared process input must be present on its grid's shared
+        dataset after assembly -- supplied in the process_dict entry, produced
+        by a process on the same grid, or fed by a registered Map. Fail fast
+        here; a missing input would otherwise surface as a KeyError
+        mid-calculate (or silently read a stale variable). Runs BEFORE
+        binding: Process.__init__ captures every declared field's ndarray
+        and would raise a bare KeyError on the same gap."""
+        for proc_name, vv in self._process_dict.items():
+            cls = vv["class"]
+            grid = self._proc_grid[proc_name]
+            grid_ds = self.discretizations[grid].dataset
+            needed = cls.get_inputs() + cls.get_mutable_inputs()
+            missing = [ii for ii in needed if ii not in grid_ds]
+            if missing:
+                raise ValueError(
+                    f"process '{proc_name}' on grid '{grid}' has "
+                    f"unresolved input(s) {missing}: each input must be "
+                    "supplied in the process_dict entry, produced by a "
+                    "process on the same grid, or fed by a registered Map "
+                    f"targeting grid '{grid}' and that variable name."
+                )
+
+    def _add_process_fields(
+        self, proc_name: str, grid: str, grid_ds: xr.Dataset
+    ) -> None:
+        """Add a process's params / inputs / state vars to its grid's shared
+        dataset, skipping names already present (structural sharing)."""
+        vv = self._process_dict[proc_name]
+        cls = vv["class"]
+        init_dict = {
+            kkk: vvv
+            for kkk, vvv in vv.items()
+            if kkk not in ("class", "discretization")
+        }
+        self._raise_if_partial_state_group(proc_name, cls, init_dict)
+        self._raise_if_required_initial_state_missing(
+            proc_name, cls, init_dict
+        )
+
+        # -- parameters: sourced DIS-FIRST (grid-owned variables live on
+        # the Discretization's own dataset -- dis_hru/dis_seg style), then
+        # the process 'parameters' Dataset (or a Path opened here).
+        # Loaded once, read-only. A process still DECLARES the dis vars
+        # it reads; the declaration states the need, the dis is just the
+        # first-priority source. --
+        parameters: xr.Dataset | pl.Path | None = init_dict.get("parameters")
+        if isinstance(parameters, pl.Path):
+            parameters = xr.open_dataset(parameters)
+        dis_params = self.discretizations[grid].parameters
+        for pp in cls.get_parameters():
+            if pp in grid_ds:
+                continue
+            if dis_params is not None and pp in dis_params:
+                source = dis_params
+            elif parameters is not None and pp in parameters:
+                source = parameters
+            else:
+                raise ValueError(
+                    f"process '{proc_name}' declares parameter '{pp}' but "
+                    f"it is in neither grid '{grid}'s discretization "
+                    "parameters nor the supplied 'parameters'"
+                )
+            source[pp].load()
+            self._reconcile_units(
+                pp,
+                source[pp],
+                _resolved_fields(cls)[pp].units,
+                context=f"process '{proc_name}' parameter",
+            )
+            grid_ds[pp] = source[pp]
+            grid_ds[pp].values.flags.writeable = False
+
+        # -- inputs (read-only + mutable) --
+        real_dim = self.discretizations[grid].dims[0]
+        inputs_req = cls.get_inputs()
+        for ii in inputs_req + cls.get_mutable_inputs():
+            if ii in grid_ds:
+                # produced/added on this grid -> structural share. A
+                # later consumer of an external input must declare the
+                # first consumer's units (one buffer serves both).
+                self._input_units_settled(
+                    ii,
+                    _resolved_fields(cls)[ii].units,
+                    context=f"process '{proc_name}' input",
+                )
+                continue
+            if ii in init_dict:
+                if ii not in self.inputs_dict:
+                    data = init_dict[ii]
+                    if isinstance(data, xr.Dataset):
+                        # a combined file (or dataset) of several
+                        # inputs: this input is its variable of the
+                        # same name
+                        if ii not in data:
+                            raise KeyError(
+                                f"process '{proc_name}': input '{ii}' "
+                                "was given a dataset with no variable "
+                                f"of that name (it has "
+                                f"{sorted(map(str, data.data_vars))})."
+                            )
+                        data = data[ii]
+                    stored = data
+                    # judged before Input, which may load it
+                    on_disk = not stored.variable._in_memory
+                    data = self._time_window(ii, stored)
+                    self.inputs_dict[ii] = Input(
+                        data,
+                        read_only=(ii in inputs_req),
+                        load=self._load_all,
+                    )
+                    if on_disk:
+                        # read from its file: one day of the whole
+                        # grid per step, or the whole window once
+                        # (load_all)
+                        note = slow_order_note(
+                            ii,
+                            stored,
+                            n_days=data.sizes["time"] if self._load_all else 1,
+                        )
+                        if note is not None:
+                            self._slow_order_notes.append(note)
+                inp = self.inputs_dict[ii]
+                # control["units"] = "convert": the one-step buffer is
+                # converted, never the supplied data
+                conversion = self._input_conversion(
+                    proc_name,
+                    ii,
+                    inp.data.attrs,
+                    _resolved_fields(cls)[ii].units,
+                    context=f"process '{proc_name}' input",
+                )
+                if conversion is not None:
+                    inp.set_conversion(*conversion)
+                current = inp.current_values
+                if current.dims != (real_dim,):
+                    # A wrong-named spatial dim would silently ride along
+                    # as a SECOND dim on the grid dataset and only "work"
+                    # by size coincidence (e.g. pywatershed forcings on
+                    # "nhm_id" vs params on "nhru").
+                    raise ValueError(
+                        f"process '{proc_name}': input '{ii}' arrives on "
+                        f"dims {current.dims} but grid '{grid}' expects "
+                        f"('{real_dim}',) -- rename the input's spatial "
+                        "dim to the grid dim (xr .rename)."
+                    )
+                grid_ds[ii] = current
+            else:
+                # cross-grid input -> the feeding Map's target buffer
+                for mm in self.maps.values():
+                    if mm.target_grid == grid and mm.target_var == ii:
+                        grid_ds[ii] = mm.target_values
+                        break
+
+        # -- state variables + derived parameters: allocated (fill +
+        # optional initial), once. Derived parameters are computed by the
+        # process's init_from_params() hook and frozen after all hooks run.
+        # A process declares its spatial dim as the placeholder "space"; bind
+        # it to this grid's real dim (the grid key; `real_dim` above).
+        # Params/inputs already arrive on the real dim (inputs validated
+        # above), so only these need resolving. --
+        allocated = (
+            cls.get_variables(include_budget=True)
+            | cls.get_parameters_internal()
+        )
+        for name, meta in allocated.items():
+            if name in grid_ds:
+                continue
+            dims = tuple(real_dim if dd == "space" else dd for dd in meta.dims)
+            shape = tuple(grid_ds.sizes[dd] for dd in dims)
+            attrs = {"description": meta.description}
+            if meta.units is not None:
+                attrs["units"] = meta.units
+            da = xr.DataArray(
+                np.full(shape, _FILL_VALUE[meta.dtype], dtype=meta.dtype),
+                dims=dims,
+                attrs=attrs,
+            )
+            # supplied initial state: a restart variable given in the
+            # process_dict entry under its OWN name (optional). Recorded
+            # here, written AFTER init_from_params() (_apply_supplied_state)
+            # so it overrides init_from_params()'s defaults, as a restart does.
+            if meta.restart and name in init_dict:
+                self._record_supplied_state(
+                    proc_name, cls, grid, name, init_dict[name]
+                )
+            grid_ds[name] = da
+
+    def _resolve_maps(
+        self, grid_sizes: Union[Dict[str, int], None] = None
+    ) -> None:
+        """Assign each Map to its FIRST consumer in the execution order and
+        validate the one-pass schedule. A mapped value is a per-step constant
+        after its single apply -- guaranteed statically here (one variable
+        owner; all declared source-grid writers precede the first consumer),
+        not by runtime tracking. Later consumers re-read the same target
+        buffer. Raises ValueError on: unknown grids, missing source variable,
+        weights shape vs grid sizes, an unused map, an ambiguous (multi-owner)
+        source variable, or a writer ordered at/after the first consumer."""
+        position = {kk: ii for ii, kk in enumerate(self.model_dict)}
+        self._proc_maps: Dict[str, List[Any]] = {
+            kk: [] for kk in self.model_dict
+        }
+        for map_name, mm in self.maps.items():
+            for gg in (mm.source_grid, mm.target_grid):
+                if gg not in self.discretizations:
+                    raise ValueError(
+                        f"Map '{map_name}': grid '{gg}' is not a grid of "
+                        f"any process (grids: {list(self.discretizations)})."
+                    )
+            source_ds = self.discretizations[mm.source_grid].dataset
+            target_ds = self.discretizations[mm.target_grid].dataset
+            if mm.source_var not in source_ds:
+                raise ValueError(
+                    f"Map '{map_name}': source variable '{mm.source_var}' "
+                    f"not found on grid '{mm.source_grid}'."
+                )
+            mm.bind(source_ds)
+            # grid_sizes overrides a grid's dataset size for the weights
+            # shape check (ModelMPI passes the GLOBAL size of the
+            # decomposed grid; its dataset only knows the rank-local
+            # extent).
+            sizes_override = grid_sizes or {}
+            n_target = sizes_override.get(
+                mm.target_grid, target_ds.sizes.get(mm.target_grid)
+            )
+            n_source = sizes_override.get(
+                mm.source_grid, source_ds.sizes.get(mm.source_grid)
+            )
+            if mm.weights.shape != (n_target, n_source):
+                raise ValueError(
+                    f"Map '{map_name}': weights shape {mm.weights.shape} != "
+                    f"(n_target, n_source) = ({n_target}, {n_source}) for "
+                    f"'{mm.source_grid}' -> '{mm.target_grid}'."
+                )
+            if (
+                mm.target_var not in target_ds
+                or target_ds[mm.target_var].values
+                is not mm.target_values.values
+            ):
+                raise ValueError(
+                    f"Map '{map_name}' is unused: '{mm.target_var}' on grid "
+                    f"'{mm.target_grid}' is not fed by this map (it was "
+                    "supplied directly or produced on that grid)."
+                )
+
+            # The source variable's declared write set: its (single) owner
+            # plus any mutable_input declarers, all on the source grid.
+            owners = [
+                kk
+                for kk, proc in self.model_dict.items()
+                if self._proc_grid[kk] == mm.source_grid
+                and mm.source_var in proc.get_var_names()
+            ]
+            if len(owners) > 1:
+                raise ValueError(
+                    f"Map '{map_name}': source variable '{mm.source_var}' "
+                    f"has multiple owners on grid '{mm.source_grid}' "
+                    f"{owners}; the once-per-step apply needs one."
+                )
+            writers = owners + [
+                kk
+                for kk, proc in self.model_dict.items()
+                if self._proc_grid[kk] == mm.source_grid
+                and mm.source_var in proc.get_mutable_inputs()
+            ]
+            consumers = [
+                kk
+                for kk, proc in self.model_dict.items()
+                if self._proc_grid[kk] == mm.target_grid
+                and mm.target_var
+                in proc.get_inputs() + proc.get_mutable_inputs()
+            ]
+            first_consumer = min(consumers, key=lambda kk: position[kk])
+            if self._units_mode is not None and owners:
+                # a Map carries ONE quantity: the owner's declaration and
+                # every consumer's must name the same units
+                src_units = _resolved_fields(type(self.model_dict[owners[0]]))[
+                    mm.source_var
+                ].units
+                for kk in consumers:
+                    tgt_units = _resolved_fields(type(self.model_dict[kk]))[
+                        mm.target_var
+                    ].units
+                    if src_units != tgt_units and not (
+                        src_units is not None
+                        and tgt_units is not None
+                        and units_mod.same(tgt_units, src_units)
+                    ):
+                        raise ValueError(
+                            f"Map '{map_name}': source '{mm.source_var}' "
+                            f"is declared {src_units!r} by '{owners[0]}' "
+                            f"but target '{mm.target_var}' is declared "
+                            f"{tgt_units!r} by '{kk}' -- a Map carries "
+                            "one quantity."
+                        )
+            late = [
+                ww
+                for ww in writers
+                if position[ww] >= position[first_consumer]
+            ]
+            if late:
+                raise ValueError(
+                    f"Map '{map_name}': source-grid writer(s) {late} of "
+                    f"'{mm.source_var}' run at or after the map's first "
+                    f"consumer '{first_consumer}' -- a one-pass order must "
+                    "finish computing (and mutating) a mapped variable "
+                    "before it crosses the grid boundary."
+                )
+            self._proc_maps[first_consumer].append(mm)
+
+    def _set_time_bounds(self, control: Dict[str, Any]) -> None:
+        """control["start_time"] / control["end_time"]: the first and
+        the last model time step, both included (a date string or a
+        datetime64). One that is absent leaves that end at the inputs'
+        own."""
+        start = control.get("start_time")
+        end = control.get("end_time")
+        self._start_time = None if start is None else np.datetime64(start, "D")
+        self._end_time = None if end is None else np.datetime64(end, "D")
+        if (
+            self._start_time is not None
+            and self._end_time is not None
+            and self._start_time > self._end_time
+        ):
+            raise ValueError(
+                f"control['start_time'] ({self._start_time}) is after "
+                f"control['end_time'] ({self._end_time})."
+            )
+
+    def _time_window[TT: (xr.DataArray, xr.Dataset)](
+        self, name: str, data: TT
+    ) -> TT:
+        """The input `data` (one input, or a dataset of inputs: the
+        file ModelMPI streams) between control's start_time and
+        end_time (see _set_time_bounds); `data` itself when the
+        control gives neither. No copy: the slice of an in-memory
+        array is a view of it, and a file-backed array stays on
+        disk."""
+        if self._start_time is None and self._end_time is None:
+            return data
+        times = data["time"].values
+        for key, bound in (
+            ("start_time", self._start_time),
+            ("end_time", self._end_time),
+        ):
+            if bound is not None and not (times == bound).any():
+                raise ValueError(
+                    f"control[{key!r}] = {bound}: input {name!r} has no "
+                    f"such time (its {times.size} times run from "
+                    f"{times[0]} to {times[-1]})."
+                )
+        return data.sel(time=slice(self._start_time, self._end_time))
+
+    def _set_time(self) -> None:
+        """Set time dimensions from the first input's `time` dim-coordinate."""
+        if not self.inputs_dict:
+            raise ValueError(
+                "The model has no time-dimensioned inputs to set the "
+                "clock from (inputs_dict is empty)."
+            )
+        kk0 = list(self.inputs_dict.keys())[0]
+        data = self.inputs_dict[kk0].data
+        self.ntime = data.sizes["time"]
+        self.times = data["time"]
+        self.time_index = data["time"]
+        self.time = Time(self.times)
+
+    def advance(self) -> None:
+        """Advance all inputs and processes."""
+        for ii in self.inputs_dict.values():
+            ii.advance()
+        for pp in self.model_dict.values():
+            pp.advance()
+
+    def calculate(self, dt: np.float64) -> None:
+        """Calculate each process in order. A Map is applied exactly once per
+        step, immediately before its first consumer (see _resolve_maps);
+        later consumers re-read the same target buffer."""
+        for proc_name, vv in self.model_dict.items():
+            for mm in self._proc_maps[proc_name]:
+                mm.apply()
+            vv.calculate(dt, self.time)
+            self._check_budgets(vv)
+
+    def step(self, dt: np.float64) -> None:
+        """Run ONE timestep: point the clock at it, advance, calculate
+        (budgets checked), collect output. Steps are numbered along
+        the inputs' time axis; the cursor starts at the cold/warm
+        start and run() is a loop of these."""
+        if self._finalized:
+            raise RuntimeError("Cannot step a finalized Model.")
+        if self._needs_reset:
+            raise RuntimeError(
+                "Parameters were set: call reset() before step() or "
+                "run() (the state in place belongs to the old "
+                "parameters)."
+            )
+        tt = self._next_index
+        if tt >= self.ntime:
+            raise ValueError(
+                f"step {tt} is past the end of the inputs' time axis "
+                f"({self.ntime} steps)."
+            )
+        self.current_time_index[0] = tt
+        self.time.set_index(tt)
+        self.current_time[0] = self.time.current
+        self.advance()
+        self.calculate(dt=dt)
+        if self.output is not None:
+            self.output.collect_current_timestep(tt)
+        if self.results is not None:
+            self.results.collect(tt)
+        self._next_index = tt + 1
+
+    def run(self, dt: np.float64, n_steps: np.int32) -> None:
+        """Run n_steps timesteps, continuing from the last step taken
+        (the restart resume point when warm-started; time zero
+        otherwise)."""
+        # this model's thread count: another Model built in this
+        # process since may have set a different one
+        numba.set_num_threads(self._numba_n_threads)
+        for _ in range(int(n_steps)):
+            self.step(dt)
+
+    def reset(self) -> None:
+        """Put a built model back to its state right after the build,
+        so it can be run again without a rebuild (the calibration
+        reuse loop). In order: every variable is refilled with its
+        allocation fill; the inputs are rewound and their current
+        values set to nan; Map target buffers are zeroed; then what
+        the build does after the freeze -- init_state(time) and
+        initialize_budgets() per process with the clock at index 0,
+        the supplied initial state, the initial-state check; last,
+        the step cursor returns to the start. A ResultCollector
+        (control["collect_var_names"]) keeps its buffers; only its
+        count of rows written returns to 0.
+
+        No copy of the starting state is stored: the defaults are
+        recomputed, and the supplied state is read again from the
+        caller's arrays (which may therefore be edited between runs).
+        Parameters and parameter_internal values are not touched.
+
+        Raises on a warm-started model (control["restart_read"]: the
+        restart state is not kept after the build -- supply the state
+        in process_dict instead) and on a model with a zarr Output
+        (a second run would overwrite the store)."""
+        self._raise_if_not_reusable("reset()")
+        if self._parameters_incomplete:
+            raise RuntimeError(
+                "The last set_parameters() raised inside "
+                "init_from_params(): the parameter_internal values are "
+                "incomplete. Call set_parameters() with valid values "
+                "before reset()."
+            )
+        for array, fill in self._variable_fills:
+            array[...] = fill
+        for inp in self.inputs_dict.values():
+            inp.reset()
+        for mm in self.maps.values():
+            mm.target_values.values[...] = 0.0
+        self._init_state_all()
+        self._apply_supplied_state()
+        self._check_initial_state()
+        self._next_index = self._start_index
+        self.current_time_index[0] = self._start_index
+        self.current_time[0] = self.time.current
+        if self.results is not None:
+            self.results.reset()
+        self._needs_reset = False
+
+    def _raise_if_not_reusable(self, what: str) -> None:
+        """The models reset() and set_parameters() refuse."""
+        if self._finalized:
+            raise RuntimeError(
+                f"{what} cannot be called on a finalized Model."
+            )
+        if self._warm_start:
+            raise NotImplementedError(
+                f"{what} of a model built with control['restart_read'] "
+                "is not implemented: the restart state is not kept "
+                "after the build. Supply the starting state in "
+                "process_dict instead."
+            )
+        if self.output is not None:
+            raise NotImplementedError(
+                f"{what} of a model with a zarr Output "
+                "(control['output_serial_zarr']) is not implemented: a "
+                "second run would overwrite the store."
+            )
+
+    def set_parameters(
+        self, values: Mapping[str, Any], grid: str | None = None
+    ) -> None:
+        """Write new values into the model's parameter arrays and
+        recompute what the model derives from parameters, so that the
+        built model can be run with them: set_parameters() -> reset()
+        -> run() (the calibration reuse loop).
+
+        `values` maps a parameter name to its new values, in the
+        parameter's DECLARED units (there is no units check). The
+        values are broadcast to the parameter's shape (a scalar; or
+        one value per element into a (month, space) parameter); a
+        float into an integer parameter raises. `grid` is needed only
+        for a name that is a parameter on two grids. Every name and
+        value is checked before anything is written.
+
+        Then every parameter_internal is refilled with its allocation
+        fill and init_from_params() runs over all processes, as at the
+        build. The state in place belongs to the old parameters, so
+        step() raises until reset() is called. If an
+        init_from_params() raises (a parameter check), the new values
+        STAY written, and reset() and step() raise until a later
+        set_parameters() succeeds.
+
+        Know before use:
+
+        - The arrays written are the caller's own (the model never
+          copied them): the dataset the model was built from changes,
+          and so does any other model built from it in this session
+          -- without its init_from_params() being run.
+        - Only init_from_params() is run again. What was derived from
+          parameters OUTSIDE the model is not: Map weights (in a
+          translated PRMS model, from hru_segment and hru_area), the
+          solar tables (from hru_slope, hru_aspect, hru_lat), supplied
+          initial state translated from a parameter. Recompute those
+          yourself; where the result is a parameter (the solar
+          tables), pass it in the same call.
+        - A parameter owned by a Discretization (tosegment, ...)
+          raises: the grid's topological order was built from it.
+
+        Raises unless the model was built with
+        control["calibration_mode"] = True (before any other check),
+        and where reset() does (a warm start, a zarr Output)."""
+        if not self._calibration_mode:
+            raise RuntimeError(
+                "set_parameters() is for calibration: build the model "
+                "with control['calibration_mode'] = True to allow it."
+            )
+        self._raise_if_not_reusable("set_parameters()")
+        targets = []
+        for name, value in values.items():
+            array = self._settable_parameter_array(name, grid)
+            targets.append((array, self._assignable(name, value, array)))
+
+        self._needs_reset = True
+        self._parameters_incomplete = True
+        for array, new in targets:
+            array.flags.writeable = True
+            array[...] = new
+            array.flags.writeable = False
+        internal = self._parameter_internal_fills.values()
+        for array, fill in internal:
+            array.flags.writeable = True
+            array[...] = fill
+        try:
+            for proc in self.model_dict.values():
+                proc.init_from_params()
+        finally:
+            for array, _ in internal:
+                array.flags.writeable = False
+        self._parameters_incomplete = False
+
+    def _settable_parameter_array(
+        self, name: str, grid: str | None
+    ) -> np.ndarray:
+        """The model's array of parameter `name`; raises when the name
+        is not a supplied parameter, is one on two grids and `grid`
+        does not choose, is owned by a Discretization, or cannot be
+        made writeable."""
+        where = "" if grid is None else f" on grid '{grid}'"
+        grids = [
+            gg
+            for gg, nn in self._parameter_arrays
+            if nn == name and grid in (None, gg)
+        ]
+        if not grids:
+            if any(
+                nn == name and grid in (None, gg)
+                for gg, nn in self._parameter_internal_fills
+            ):
+                raise ValueError(
+                    f"'{name}' is computed by init_from_params() "
+                    "(parameter_internal): set the parameters it is "
+                    "computed from."
+                )
+            raise ValueError(
+                f"'{name}' is not a parameter of this model{where}."
+            )
+        if len(grids) > 1:
+            raise ValueError(
+                f"'{name}' is a parameter on grids {grids}: pass grid=."
+            )
+        dis_params = self.discretizations[grids[0]].parameters
+        if dis_params is not None and name in dis_params:
+            raise ValueError(
+                f"'{name}' is owned by the Discretization of grid "
+                f"'{grids[0]}' and cannot be set: grid structure (its "
+                "topological order) was built from the grid's "
+                "parameters."
+            )
+        array = self._parameter_arrays[(grids[0], name)]
+        try:
+            array.flags.writeable = True
+        except ValueError:
+            raise ValueError(
+                f"parameter '{name}' cannot be set: the array the model "
+                "was built with is a view of a read-only array."
+            ) from None
+        array.flags.writeable = False
+        return array
+
+    @staticmethod
+    def _assignable(name: str, value: Any, array: np.ndarray) -> np.ndarray:
+        """`value` as an array that can be written into `array`; raises
+        on a dtype of another kind (a float into an integer
+        parameter) or a shape that does not broadcast."""
+        # no copy of an ndarray or a DataArray; a list or a scalar
+        # becomes a temporary of the caller's making
+        new = np.asarray(value)
+        if not np.can_cast(new.dtype, array.dtype, casting="same_kind"):
+            raise TypeError(
+                f"parameter '{name}': dtype {new.dtype} cannot be written "
+                f"into its {array.dtype} array."
+            )
+        try:
+            np.broadcast_to(new, array.shape)
+        except ValueError:
+            raise ValueError(
+                f"parameter '{name}': shape {new.shape} does not fit "
+                f"its shape {array.shape}."
+            ) from None
+        return new
+
+    # -- restart ---------------------------------------------------------
+
+    def write_restart(self, directory: Union[str, pl.Path]) -> None:
+        """Write per-grid restart files for the LAST COMPLETED step:
+        every process's flagged prognostic variables
+        (``DataArrayMeta(restart=True)`` -> ``get_restart_variables()``)
+        plus any python-attr restart state (``get_restart_state()``,
+        namespaced ``{process}__{name}``), stamped with the state's
+        timestamp (attrs["state_time"]) -- the file is self-locating:
+        a warm-started model resumes at the FOLLOWING step of its own
+        time axis. Grids with no restart content write no file.
+        Files: ``{date}_restart_{grid}.nc``."""
+        dd = pl.Path(directory)
+        dd.mkdir(parents=True, exist_ok=True)
+        tt = int(self.current_time_index[0])
+        state_time = self.times[tt].values
+        date_str = np.datetime_as_string(state_time.astype("datetime64[D]"))
+        for grid, disc in self.discretizations.items():
+            assert disc.dataset is not None
+            ds_out = xr.Dataset()
+            for proc_name, proc in self.model_dict.items():
+                if self._proc_grid[proc_name] != grid:
+                    continue
+                for name in type(proc).get_restart_variables():
+                    if name not in ds_out:
+                        ds_out[name] = disc.dataset[name]
+                for key, arr in proc.get_restart_state().items():
+                    full = f"{proc_name}__{key}"
+                    ds_out[full] = xr.DataArray(
+                        arr,
+                        dims=[f"{full}_d{ii}" for ii in range(arr.ndim)],
+                    )
+            if not ds_out.data_vars:
+                continue
+            ds_out.attrs["state_time"] = str(state_time)
+            ds_out.to_netcdf(dd / f"{date_str}_restart_{grid}.nc")
+
+    def _read_restart(self, directory: pl.Path) -> None:
+        """Restore state from write_restart() files and set the resume
+        index. Validates: exactly one file per grid-with-restart-content
+        (and none for grids without), the file's variable set == the
+        current flag set (a flag change between write and read fails
+        loudly), consistent state_time across grids, and that the state
+        time exists on this model's time axis with steps remaining."""
+        state_times = set()
+        for grid in self.discretizations:
+            expected: set = set()
+            declared_units: Dict[str, Union[str, None]] = {}
+            hook_procs = []
+            for proc_name, proc in self.model_dict.items():
+                if self._proc_grid[proc_name] != grid:
+                    continue
+                fields = _resolved_fields(type(proc))
+                for name in type(proc).get_restart_variables():
+                    expected.add(name)
+                    declared_units.setdefault(name, fields[name].units)
+                hook_procs.append(proc_name)
+            found = sorted(directory.glob(f"*_restart_{grid}.nc"))
+            if not expected and not found:
+                continue
+            if len(found) != 1:
+                raise ValueError(
+                    f"restart_read: grid '{grid}' needs exactly one "
+                    f"*_restart_{grid}.nc in {directory}; found "
+                    f"{[ff.name for ff in found]}."
+                )
+            ds_in = xr.load_dataset(found[0])
+            state_times.add(str(ds_in.attrs["state_time"]))
+            all_names = [str(nn) for nn in ds_in.data_vars]
+            file_vars = {nn for nn in all_names if "__" not in nn}
+            if file_vars != expected:
+                raise ValueError(
+                    f"restart file {found[0].name}: variable set "
+                    f"{sorted(file_vars)} != this model's flagged set "
+                    f"{sorted(expected)} (flags changed since the file "
+                    "was written?)."
+                )
+            # units per control["units"]: a restart file is a netCDF
+            # file anyone can write, so it is judged like supplied state
+            # (the python-attr hook state below has no declaration and
+            # is NOT checked)
+            for name in sorted(file_vars):
+                conv = units_mod.conversion(
+                    name,
+                    ds_in[name].attrs,
+                    declared_units[name],
+                    self._units_mode,
+                    self._units_patch,
+                    context=f"restart file {found[0].name}",
+                )
+                self._restore_grid_var(
+                    grid, name, ds_in[name].values, affine=conv
+                )
+            for proc_name in hook_procs:
+                prefix = f"{proc_name}__"
+                state = {
+                    nn[len(prefix) :]: ds_in[nn].values
+                    for nn in all_names
+                    if nn.startswith(prefix)
+                }
+                if state:
+                    self.model_dict[proc_name].set_restart_state(state)
+        if not state_times:
+            raise ValueError(
+                f"restart_read: no restart files found in {directory} "
+                "and no process declares restart variables."
+            )
+        if len(state_times) != 1:
+            raise ValueError(
+                f"restart_read: inconsistent state times across grid "
+                f"files: {sorted(state_times)}."
+            )
+        state_time = np.datetime64(state_times.pop())
+        where = np.where(self.times.values == state_time)[0]
+        if where.size != 1:
+            raise ValueError(
+                f"restart state time {state_time} not found on this "
+                "model's time axis (inputs must cover the restart "
+                "time)."
+            )
+        self._start_index = int(where[0]) + 1
+        if self._start_index >= self.ntime:
+            raise ValueError(
+                f"restart state time {state_time} is this model's "
+                "final step: nothing to run."
+            )
+        for inp in self.inputs_dict.values():
+            inp.set_index(self._start_index)
+
+    def _restore_grid_var(
+        self,
+        grid: str,
+        name: str,
+        values: np.ndarray,
+        affine: Union[tuple[float, float], None] = None,
+    ) -> None:
+        """Restore one restart variable into its grid dataset (the
+        subclass seam: restart files are FULL-extent, and ModelMPI
+        restores only its rank's block of the distributed grid).
+        `affine` = (scale, offset) converts the model's buffer in place
+        after the write (control["units"] = "convert")."""
+        grid_ds = self.discretizations[grid].dataset
+        assert grid_ds is not None
+        buffer = grid_ds[name].values
+        buffer[:] = values
+        if affine is not None:
+            units_mod.apply_affine(buffer, *affine, where=f"state '{name}'")
+
+    def _release(self) -> None:
+        """Close what the build opened: the inputs, the files opened
+        from paths, and the zarr Output. Called by finalize(), and by
+        __init__ when the build raises (each is empty or None until
+        it exists). After a raise the zarr store is left with no time
+        steps."""
+        for inp in self.inputs_dict.values():
+            inp.close()
+        for ff in self._opened_files:
+            ff.close()
+        if self.output is not None:
+            self.output.finalize()
+
+    def finalize(self) -> None:
+        """Close all file handles opened during initialization."""
+        if self._finalized:
+            return
+        self._release()
+        self._finalized = True
+
+    def __enter__(self) -> "Model":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Any,
+        exc_val: Any,
+        exc_tb: Any,
+    ) -> Literal[False]:
+        self.finalize()
+        return False
+
+
+class ModelMPI(Model):
+    """MPI streaming model: a distributed grid time-streamed via mpixarray,
+    plus optional serial grids built on every rank and run on rank 0,
+    coupled by Maps.
+
+    The distributed grid (``control["mpi_grid"]``, default ``"space"``)
+    keeps the Phase 1 pipeline:
+
+        open_dataset -> parallelize(dims=[mpi_grid]) -> as_iterable("time")
+        -> open_writer -> declare buffers -> create -> iterate -> write
+
+    ONE decomposed dataset (``ds_mpi_stream``) carries the distributed
+    grid's state, parameters, per-step input buffers, and streaming outputs
+    -- cross-process buffer sharing there is *structural* (the same named
+    variable). Serial grids (Step B) are assembled by the SERIAL machinery
+    (``_add_process_fields`` + ``Input``), identically on every rank; their
+    processes and inputs RUN on rank 0 only unless
+    ``control["serial_grids_all_ranks"]`` (see run()); their data
+    never enter the mpixarray dataset. A Map whose source is the distributed
+    grid must be a ``MapMPI`` (distributed mat-vec: local partial product +
+    Allreduce fills the target buffer on every rank). Serial->distributed
+    maps (scatter) are not implemented. This hand-rolled cross-grid comm is
+    the INTERIM implementation; the mpixarray streaming-datatree work is
+    expected to absorb it.
+
+    control dict:
+        input_file        the DISTRIBUTED grid's input file: its streamed
+                          inputs, on (time, mpi_grid) or
+                          (mpi_grid, time), and any of its parameters
+                          not supplied in process_dict (see below).
+                          It must hold a coordinate for mpi_grid and
+                          one for time; without the first the build
+                          raises
+        output_var_names  state vars to write, routed by OWNING grid:
+                          distributed-grid vars stream to
+                          output_parallel_netcdf (see note below);
+                          serial-grid vars are collected by a rank-0 zarr
+                          Output (everyone computes, one writes).
+                          Optional: absent or empty = the run writes
+                          nothing, opens no writer and holds no output
+                          buffers. A store given without this key
+                          raises.
+        output_parallel_netcdf
+                          the parallel-NetCDF file streamed by the
+                          mpixarray writer (distributed grid); required
+                          iff distributed-grid output vars are
+                          requested, and created only then
+        output_serial_zarr
+                          the serial zarr store path itself (".zarr"
+                          suffix, used verbatim); required iff serial-grid
+                          output vars are requested, and created only
+                          then
+        time_chunk_size   serial-grid Output time chunking (default 365)
+        mpi_grid          name of the distributed grid/dim (default "space")
+        mpi_window_steps  depth of the time window in steps (default 1;
+                          None = the whole stream). The streamed inputs
+                          are read once per window and the streamed
+                          outputs written once per window, so each rank
+                          holds depth x its block of every streamed
+                          input and output. The answers do not depend
+                          on it.
+        serial_grids_all_ranks
+                          run the serial grids' processes and inputs
+                          on EVERY rank (default False: on rank 0
+                          only, see run()). The answers on rank 0 and
+                          both outputs do not depend on it.
+        numba_n_threads   numba threads PER RANK for the hru kernels
+                          (default 1; see Model._set_numba_threads).
+                          ranks x threads must fit the cores.
+        start_time, end_time
+                          the first and the last model time step, both
+                          included and each optional, as in Model:
+                          input_file and every serial-grid input are
+                          sliced to them (nothing is read; a bound
+                          that is not a time in one of them raises).
+                          The model's time axis is the window: step 0
+                          is start_time, and the outputs hold the
+                          window's steps only. With restart_read the
+                          restart's state time must be in the window.
+        restart_read      directory of write_restart() files to warm-start
+                          from: saved state restores over the cold init
+                          and the stream is time-sliced to BEGIN at the
+                          resume step. Takes the SAME (superset)
+                          input_file as the original run -- it need only
+                          COVER the restart time; restart files are
+                          serial/MPI interchangeable (see the Model
+                          docstring).
+
+    process_dict is as in Model (order = schedule; serial-grid entries carry
+    "discretization" + their data). A distributed-grid entry needs only
+    {"class": ...} when input_file holds its parameters. It may instead
+    carry "parameters", an xr.Dataset at FULL extent as in serial: each
+    rank keeps a copy of its block (a dataset still on disk is read by
+    block). A parameter given in both places raises. Initial state is
+    supplied as in Model, never in input_file.
+
+    Any number of distributed-grid variables may stream to disk. (The
+    pre-1.0.0 "one ``to_file=True`` var" deepcopy limit, and its 1.0.0
+    successor -- a 2nd ``(time, grid)`` declaration replaced the ``time``
+    coord with a copy lacking ``__mpi_parent`` in mpixarray's
+    ``MPI_Dataset.__setitem__`` -- were both fixed in mpixarray by
+    Oct 28, 2026; ``tests/test_prms_groundwater_mpi.py`` streams two.)
+
+    Usage:
+        with ModelMPI(process_dict, control, maps=maps) as model:
+            model.run(dt)
+    """
+
+    def __init__(
+        self,
+        process_dict: dict,
+        control: dict,
+        maps: Union[Dict[str, Any], None] = None,
+        discretizations: Union[Dict[str, Discretization], None] = None,
+    ) -> None:
+        # Structure-only copy, as in Model (serial-grid Path values are
+        # replaced in place by _load_paths_to_data).
+        self._process_dict = {kk: dict(vv) for kk, vv in process_dict.items()}
+        # Caller-supplied Discretizations (dis-owned parameters): SERIAL
+        # grids only -- the distributed grid's data ride in input_file.
+        self._provided_discs: Dict[str, Discretization] = discretizations or {}
+        self._control = control
+        self._warm_start = control.get("restart_read") is not None
+        self.maps: Dict[str, Any] = maps or {}
+        self._proc_grid: Dict[str, str] = {
+            kk: self._resolve_grid(vv) for kk, vv in self._process_dict.items()
+        }
+        self._finalized = False
+        self.model_dict: dict = {}  # proc_name -> bound Process instance
+        # Serial-grid Inputs, advanced in lockstep with the stream (the
+        # distributed grid's inputs stream from step.mpi.src instead).
+        self.inputs_dict: Dict[str, Input] = {}
+        # (grid, name) -> the caller's supplied initial-state array
+        self._supplied_state: Dict[tuple[str, str], Any] = {}
+        # (scale, offset) for supplied state in compatible units under
+        # control["units"] = "convert" (see _record_supplied_state)
+        self._supplied_state_affine: Dict[
+            tuple[str, str], tuple[float, float]
+        ] = {}
+        self._opened_files: List[Union[xr.DataArray, xr.Dataset]] = []
+        # lines of the build's one warning (see Model.__init__)
+        self._slow_order_notes: List[str] = []
+        self._load_all = True  # serial-grid data are small; keep in memory
+        # the rank-0 zarr Output, set in _build() once its store exists
+        self.output: Union[Output, None] = None
+        self._set_budget_options(control)
+        self._set_time_bounds(control)
+        try:
+            self._build()
+        except BaseException:
+            # A constructor that raises never reaches __exit__, so
+            # what _build() opened is released here. The closes are
+            # collective, and safe: every rank raises together (the
+            # rule for a raise under MPI).
+            self._release()
+            self._finalized = True
+            raise
+
+    # -- construction ---------------------------------------------------
+
+    def _build(self) -> None:
+        f64 = np.float64
+        control = self._control
+        if "collect_var_names" in control:
+            # the same control on every rank: all ranks raise
+            raise NotImplementedError(
+                "control['collect_var_names'] (the in-memory "
+                "ResultCollector) is not implemented under MPI."
+            )
+        input_file = str(control["input_file"])
+        # Output is optional: no names (the key absent, or an empty
+        # list) = nothing is written. A store given without the key
+        # is a mistake, as in the serial Model.
+        if "output_var_names" not in control:
+            stores = [
+                kk
+                for kk in ("output_parallel_netcdf", "output_serial_zarr")
+                if kk in control
+            ]
+            if stores:
+                # the same control on every rank: all ranks raise
+                raise ValueError(
+                    f"control gives {stores} and no output_var_names: "
+                    "name the variables to write, or drop "
+                    f"{' and '.join(stores)} for a run with no output."
+                )
+        out_var_names = list(control.get("output_var_names", ()))
+        mpi_grid = control.get("mpi_grid", "space")
+        # rank-0 progress bar over the streamed time loop (mpixarray's)
+        self._progress = bool(control.get("progress", False))
+        self._serial_grids_all_ranks = bool(
+            control.get("serial_grids_all_ranks", False)
+        )
+        self._mpi_grid = mpi_grid
+
+        serial_grids = {
+            gg for gg in self._proc_grid.values() if gg != mpi_grid
+        }
+        bad_discs = [
+            gg for gg in self._provided_discs if gg not in serial_grids
+        ]
+        if bad_discs:
+            raise ValueError(
+                f"discretizations {bad_discs}: pass Discretizations for "
+                f"SERIAL grids only ({sorted(serial_grids)}); the "
+                f"distributed grid '{mpi_grid}' takes its data from "
+                "input_file."
+            )
+
+        mpi_classes = {
+            kk: vv["class"]
+            for kk, vv in self._process_dict.items()
+            if self._proc_grid[kk] == mpi_grid
+        }
+
+        # Taxonomy guard (all grids): a parameter on the model `time` axis
+        # is really an input. A true time-varying parameter lives on its own
+        # axis (e.g. `month`) and stays resident. See pws_phoenix/CLAUDE.md.
+        for proc_name, vv in self._process_dict.items():
+            for pname, meta in _dict_of_kind(vv["class"], "parameter").items():
+                if "time" in meta.dims:
+                    raise ValueError(
+                        f"Parameter {pname!r} on process {proc_name!r} has "
+                        f"the model 'time' dim {meta.dims}: a variable on "
+                        "model time is an input, not a parameter. Use a "
+                        "non-'time' axis (e.g. 'month') for a time-varying "
+                        "parameter."
+                    )
+
+        # ---- Distributed grid: open + decompose once over mpi_grid ----
+        # 1.0.0: open_dataset no longer returns a comm; bind the world comm
+        # here and pass it explicitly to every mpixarray call downstream.
+        try:
+            import mpix
+            from mpixarray import open_dataset as mpi_open_dataset
+        except ImportError as err:
+            raise ImportError(
+                "ModelMPI requires mpix + mpixarray (README 'Installation')"
+            ) from err
+        comm = mpix.world_comm()
+        ds_input = mpi_open_dataset(input_file, comm=comm)
+        # the opened file: what _release() closes
+        self._ds_input = ds_input
+        if mpi_grid in ds_input.dims and mpi_grid not in ds_input.coords:
+            # without one, mpixarray makes a coordinate on each rank
+            # after the split, and that is what the streamed output
+            # file would get. The same file on every rank: all raise.
+            raise ValueError(
+                f"input_file {input_file!r} has no coordinate for the "
+                f"distributed grid '{mpi_grid}': write one, the "
+                f"positions 0 to {int(ds_input.sizes[mpi_grid]) - 1} "
+                "(write_mpi_input_file and write_cbh_netcdf do)."
+            )
+        # control["start_time"] / control["end_time"]: the model's
+        # time axis is the window, as in serial (index 0 = the first
+        # step of the window). A lazy slice of the opened dataset, no
+        # read; the stream, the clock, the restart index and the
+        # outputs below are all built from it. A bound that is not a
+        # time of the file raises: the same control and file on
+        # every rank, so all ranks raise.
+        ds_window = self._time_window(input_file, ds_input)
+        n_time = int(ds_window.sizes["time"])
+        self._ntime = n_time
+        self.time = Time(ds_window["time"])
+        # restart machinery (shared with the serial base): the
+        # model's time axis + the last-computed-step tracker
+        self.times = ds_window["time"]
+        self.ntime = n_time
+        self.current_time_index = np.zeros(1, dtype=np.int64)
+
+        # ---- Restart (warm start), part 1 of 2: locate the resume
+        #      index BEFORE the stream is built, and LAZILY time-slice
+        #      the input dataset so the stream simply BEGINS at the
+        #      resume step (the superset input file serves any restart
+        #      -- no duplicate files, no fast-forward). Model time
+        #      stays GLOBALLY indexed (run() offsets by the start
+        #      index), so istep0-gated blocks cannot re-fire. Full
+        #      validation + the state restore are part 2, at the end
+        #      of _build once the buffers exist. ----
+        self._start_index = 0
+        restart_read = control.get("restart_read")
+        if restart_read is not None:
+            self._start_index = self._peek_restart_resume_index(
+                pl.Path(restart_read)
+            )
+        if self._start_index:
+            ds_source = ds_window.isel(time=slice(self._start_index, None))
+        else:
+            ds_source = ds_window
+
+        # WORKAROUND for an mpixarray limit (reported upstream Nov 20,
+        # 2026): at every window mpixarray slices the opened
+        # dataset by EVERY dim of the stream dataset (MPI_Object.src),
+        # so a dim that only a parameter supplied in process_dict has
+        # (month, ...) must exist on the opened dataset too. It is
+        # given a coordinate of that length here: no parameter data.
+        # Remove when MPI_Object.src ignores a dim its parent lacks.
+        extra_dims: Dict[str, int] = {}
+        for kk in mpi_classes:
+            supplied = self._process_dict[kk].get("parameters")
+            # anything but a Dataset raises below, where it is placed
+            if isinstance(supplied, xr.Dataset):
+                for dd, size in supplied.sizes.items():
+                    if dd != mpi_grid and dd not in ds_source.dims:
+                        extra_dims[str(dd)] = int(size)
+        if extra_dims:
+            ds_source = ds_source.assign_coords(
+                {dd: np.arange(nn) for dd, nn in extra_dims.items()}
+            )
+
+        self.discretizations = {
+            mpi_grid: Discretization([mpi_grid], comm=comm)
+        }
+        ds_mpi = self.discretizations[mpi_grid].decompose(ds_source)
+        comm = self.discretizations[mpi_grid].comm  # parallelize may refine
+        self._comm = comm
+        # here, not in __init__: the check agrees across ranks first
+        self._set_numba_threads(control)
+
+        # ---- Stream over time. as_iterable windows the time-dimensioned
+        #      input vars to control["mpi_window_steps"] steps (default 1;
+        #      None = the whole stream, which begins at the resume index
+        #      on a warm start). They stay on the dataset, lazy; the
+        #      (hru,) input buffers declared below shadow them and are
+        #      refilled per step in run(), from ONE read of step.mpi.src
+        #      per window. mpixarray has one window: the streamed output
+        #      buffers declared below have the same depth and are
+        #      written once per window. The space-only static params
+        #      stay whole on ds_mpi_stream. Every step lands on disk (no
+        #      values_on_disk subset). ----
+        n_stream = n_time - self._start_index
+        window_steps = control.get("mpi_window_steps", 1)
+        if window_steps is None:
+            window_steps = n_stream
+        # the same control and input file on every rank: all ranks raise
+        if (
+            not isinstance(window_steps, (int, np.integer))
+            or not 1 <= window_steps <= n_stream
+        ):
+            raise ValueError(
+                f"control['mpi_window_steps'] = {window_steps!r}: give an "
+                f"integer from 1 to the number of streamed steps "
+                f"({n_stream}), or None for all of them."
+            )
+        self._window_steps = int(window_steps)
+        ds_mpi_stream = ds_mpi.mpi.as_iterable(
+            "time", chunk_size=self._window_steps, comm=comm
+        )
+        # here, before the writer is opened on it: a build that raises
+        # further down closes the writer through this (_release)
+        self._ds_mpi_stream = ds_mpi_stream
+
+        # Realize the static (space-only) vars -- params + ICs -- in memory.
+        # Otherwise they stay lazy file-backed and each `.values` re-reads, so
+        # buffer sharing (param_shared_name is ...) would not hold. The
+        # time-windowed inputs are left lazy (see above).
+        for name in list(ds_mpi_stream.data_vars):
+            if "time" not in ds_mpi_stream[name].dims:
+                ds_mpi_stream[name] = ds_mpi_stream[name].load()
+
+        # The decomposed extent: an allgather of local sizes (scheme
+        # "single" = contiguous rank-ordered blocks). This rank's block
+        # of the global extent is the arithmetic for the parameters
+        # supplied in process_dict (just below), for supplied state,
+        # restarts, and the Maps' parallel boundary.
+        local_n = int(ds_mpi_stream.sizes[mpi_grid])
+        sizes = comm.allgather(local_n)
+        start = int(sum(sizes[: comm.rank]))
+        n_global = int(sum(sizes))
+        self._decomp_slice = (start, start + local_n)
+
+        # Parameters supplied in process_dict, at FULL extent as in
+        # serial: each rank keeps its block. The same process_dict and
+        # input file on every rank: all ranks raise together.
+        for kk, cls in mpi_classes.items():
+            # popped: the model's copy of the entry must not keep the
+            # full-extent dataset alive
+            supplied = self._process_dict[kk].pop("parameters", None)
+            if supplied is None:
+                continue
+            if not isinstance(supplied, xr.Dataset):
+                raise TypeError(
+                    f"process '{kk}': 'parameters' on the distributed "
+                    f"grid '{mpi_grid}' must be an xr.Dataset, got "
+                    f"{type(supplied).__name__}."
+                )
+            for pp in cls.get_parameters():
+                if pp not in supplied:
+                    continue
+                if pp in ds_input.data_vars:
+                    raise ValueError(
+                        f"process '{kk}': parameter '{pp}' is given in "
+                        "process_dict and is also in input_file "
+                        f"{input_file!r}: give it once."
+                    )
+                if pp in ds_mpi_stream:
+                    # placed by an earlier process: one array per name,
+                    # as in serial (_add_process_fields)
+                    continue
+                da = supplied[pp]
+                if mpi_grid in da.dims:
+                    if da.sizes[mpi_grid] != n_global:
+                        raise ValueError(
+                            f"process '{kk}': parameter '{pp}' has "
+                            f"{da.sizes[mpi_grid]} along '{mpi_grid}', "
+                            f"the distributed grid has {n_global}: "
+                            "supply it at full extent."
+                        )
+                    in_memory = da.variable._in_memory
+                    da = da.isel({mpi_grid: slice(start, start + local_n)})
+                    # In memory: a COPY of the block, because a view
+                    # would keep the full-extent array alive on every
+                    # rank. On disk: load() reads the block only.
+                    da = da.copy() if in_memory else da.load()
+                # the Variable, not the DataArray: no alignment with
+                # the block's coordinate
+                ds_mpi_stream[pp] = da.variable
+
+        # File-backed inputs: shadowed below by (hru,) buffers, refilled
+        # from src each step.
+        # Distributed grid only -- an input there is file-backed (vs.
+        # produced upstream) if no distributed-grid process owns a variable
+        # of that name. Serial-grid inputs go through Input objects instead.
+        mpi_var_names: set = set()
+        for cls in mpi_classes.values():
+            mpi_var_names |= set(cls.get_var_names(include_budget=True))
+        file_input_names: list = []
+        for cls in mpi_classes.values():
+            for ii in tuple(cls.get_inputs()) + tuple(
+                cls.get_mutable_inputs()
+            ):
+                if ii not in mpi_var_names and ii not in file_input_names:
+                    file_input_names.append(ii)
+        self._file_input_names = file_input_names
+
+        # Fail fast if a file-backed input is absent from the input file --
+        # it would otherwise KeyError mid-run on the first src refill.
+        missing = [
+            name for name in file_input_names if name not in ds_input.data_vars
+        ]
+        if missing:
+            raise ValueError(
+                f"input(s) {missing} are not produced by any process on "
+                f"grid '{mpi_grid}' and were not found in input_file "
+                f"{input_file!r}."
+            )
+        # ... and fail fast on wrong dims: decompose() splits mpi_grid
+        # only, so an input on another spatial dim (e.g. pywatershed's
+        # "nhm_id" vs "nhru") stays FULL extent and broadcast-errors on
+        # the first src refill, mid-collective.
+        # Either order of the two dims is taken, per input: mpixarray
+        # hands each window back in the file's order, and run() takes
+        # a day out of it by that order.
+        bad_dims = {
+            name: ds_input[name].dims
+            for name in file_input_names
+            if ds_input[name].dims
+            not in (("time", mpi_grid), (mpi_grid, "time"))
+        }
+        if bad_dims:
+            raise ValueError(
+                f"input_file streamed input(s) must have dims "
+                f"('time', '{mpi_grid}') or ('{mpi_grid}', 'time'); got "
+                f"{bad_dims}. Rename the offending dim(s) to the "
+                "distributed grid dim when assembling the input file."
+            )
+        # name -> True when the file holds it on ("time", mpi_grid)
+        self._stream_time_first: Dict[str, bool] = {
+            name: ds_input[name].dims[0] == "time" for name in file_input_names
+        }
+
+        # Units at the distributed grid's boundary (control["units"]):
+        # identical metadata on every rank, so every rank takes the
+        # same branch -- no collective needed and none hidden. Static
+        # parameters are resident (loaded above): checked, or converted
+        # in place. A streamed input is checked, or its conversion is
+        # kept for run(), which applies it to the one-step buffer
+        # after each refill.
+        self._stream_conversions: Dict[str, tuple[float, float]] = {}
+        if self._units_mode is not None:
+            for proc_name, cls in mpi_classes.items():
+                fields = _resolved_fields(cls)
+                for pp in cls.get_parameters():
+                    if pp in ds_mpi_stream:
+                        self._reconcile_units(
+                            pp,
+                            ds_mpi_stream[pp],
+                            fields[pp].units,
+                            context=f"process '{proc_name}' parameter",
+                        )
+                for ii in file_input_names:
+                    if ii in fields:
+                        conversion = self._input_conversion(
+                            proc_name,
+                            ii,
+                            ds_input[ii].attrs,
+                            fields[ii].units,
+                            context=f"process '{proc_name}' streamed input",
+                        )
+                        if conversion is not None:
+                            self._stream_conversions[ii] = conversion
+
+        # Split requested outputs by OWNING grid (the process declaring the
+        # var as a state variable): distributed-grid vars stream via the
+        # mpixarray writer; serial-grid vars are collected by a rank-0 zarr
+        # Output (created at the end of _build).
+        serial_var_grid: Dict[str, str] = {}
+        for kk, vv in self._process_dict.items():
+            if self._proc_grid[kk] == mpi_grid:
+                continue
+            for name in vv["class"].get_var_names(include_budget=True):
+                serial_var_grid[name] = self._proc_grid[kk]
+        ambiguous = [
+            nn
+            for nn in out_var_names
+            if nn in mpi_var_names and nn in serial_var_grid
+        ]
+        bad_out = [
+            nn
+            for nn in out_var_names
+            if nn not in mpi_var_names and nn not in serial_var_grid
+        ]
+        if ambiguous or bad_out:
+            raise ValueError(
+                f"output_var_names: {ambiguous} are owned on multiple grids "
+                f"and {bad_out} are owned on none -- each output var must "
+                "be a state variable of exactly one grid's processes."
+            )
+        stream_out_names = [nn for nn in out_var_names if nn in mpi_var_names]
+        serial_out_names = [
+            nn for nn in out_var_names if nn in serial_var_grid
+        ]
+
+        # ---- Open writer: only when a distributed-grid variable is
+        #      streamed. A store exists when a name is routed to it
+        #      (the rank-0 zarr below follows the same rule). ----
+        if stream_out_names:
+            if "output_parallel_netcdf" not in control:
+                # the same control on every rank: all ranks raise
+                raise ValueError(
+                    f"output_var_names {stream_out_names} live on the "
+                    f"distributed grid '{mpi_grid}': "
+                    "control['output_parallel_netcdf'] (a NetCDF path) "
+                    "is required for the streamed output."
+                )
+            ds_mpi_stream.mpi.open_writer(
+                str(control["output_parallel_netcdf"]), comm=comm
+            )
+
+        # ---- Declare buffers: to_file=False first, to_file=True last, then
+        #      create(). (1.0.0 authors a to_file var into the open writer at
+        #      declaration, creating its dims as needed; create() then
+        #      writes attrs + coords.) ----
+        def _declare(name, dims, fill, to_file):
+            ds_mpi_stream.mpi[name] = {
+                "dims": dims,
+                "dtype": f64,
+                "fill_value": f64(fill),
+                "to_file": to_file,
+                "comm": comm,
+            }
+
+        declared: set = set()
+        # (a) state variables -- one buffer per name across processes
+        for cls in mpi_classes.values():
+            for name in cls.get_var_names(include_budget=True):
+                if name not in declared:
+                    _declare(name, (mpi_grid,), np.nan, False)
+                    declared.add(name)
+        # (a2) derived parameters -- computed by init_from_params() pre-loop.
+        # Dims resolve like the serial path: "space" -> the distributed
+        # grid dim; other declared dims (e.g. PRMSSnow's "nmonth") pass
+        # through -- they exist on ds_mpi_stream via the static params
+        # that carry them and replicate whole (only mpi_grid is
+        # decomposed).
+        # NOTE: non-f64 dtypes (e.g. int64) are untested against the
+        # mpixarray buffer declaration until a distributed process
+        # declares one.
+        for cls in mpi_classes.values():
+            for name, meta in cls.get_parameters_internal().items():
+                if name not in declared:
+                    dims = tuple(
+                        mpi_grid if dd == "space" else dd for dd in meta.dims
+                    )
+                    ds_mpi_stream.mpi[name] = {
+                        "dims": dims,
+                        "dtype": meta.dtype,
+                        "fill_value": meta.dtype(_FILL_VALUE[meta.dtype]),
+                        "to_file": False,
+                        "comm": comm,
+                    }
+                    declared.add(name)
+        # (b) per-step input buffers (refilled from src)
+        for name in file_input_names:
+            if name not in declared:
+                _declare(name, (mpi_grid,), np.nan, False)
+                declared.add(name)
+        # (c) streaming output buffers (to_file=True) -- declared LAST
+        output_map: dict = {}  # state var name -> on-disk output buffer name
+        for name in stream_out_names:
+            buf = f"{name}_out"
+            _declare(buf, ("time", mpi_grid), 0.0, True)
+            output_map[name] = buf
+        self._output_map = output_map
+
+        # create() writes the open writer's file (attrs, coords) and
+        # raises without one; with no streamed output there is no
+        # file, and iterate() and finalize() need none.
+        if stream_out_names:
+            ds_mpi_stream.mpi.create(verbose=False)
+
+        self.discretizations[mpi_grid].dataset = ds_mpi_stream
+
+        # A streamed input stored in the slower order of its dims for
+        # this window depth: a line of the build's one warning, raised
+        # below on rank 0 (its block stands for every rank's).
+        for name in file_input_names:
+            note = slow_order_note(
+                name,
+                ds_input[name],
+                n_days=self._window_steps,
+                n_block=local_n,
+            )
+            if note is not None:
+                self._slow_order_notes.append(note)
+
+        # ---- Serial grids (Step B): built on every rank. Assembled
+        #      by the serial machinery, identically on each rank (from
+        #      deterministic/shared inputs). Their processes RUN on
+        #      rank 0 only by default (run()). Their data never enter
+        #      the mpixarray dataset. ----
+        serial_grid_procs: Dict[str, List[str]] = {}
+        for kk, grid in self._proc_grid.items():
+            if grid != mpi_grid:
+                serial_grid_procs.setdefault(grid, []).append(kk)
+        for grid in serial_grid_procs:
+            self.discretizations[grid] = self._provided_discs.get(
+                grid
+            ) or Discretization([grid])
+        self._load_paths_to_data()
+        for grid, proc_names in serial_grid_procs.items():
+            grid_ds = xr.Dataset()
+            for kk in proc_names:
+                self._add_process_fields(kk, grid, grid_ds)
+            self.discretizations[grid].dataset = grid_ds
+        # one warning for the run, not one per rank
+        if comm.rank == 0:
+            warn_slow_order(self._slow_order_notes)
+
+        # ---- Supplied initial state (distributed grid): a restart
+        #      variable given in its process_dict entry under its OWN
+        #      name, FULL extent (a file path was opened just above).
+        #      Recorded here (serial grids: in _add_process_fields, as
+        #      in Model), written after the init hooks; each rank
+        #      restores its own block. ----
+        for kk, cls in mpi_classes.items():
+            entry = self._process_dict[kk]
+            # deterministic from process_dict: every rank raises together
+            self._raise_if_partial_state_group(kk, cls, entry)
+            self._raise_if_required_initial_state_missing(kk, cls, entry)
+            for name in cls.get_restart_variables():
+                if name in entry:
+                    self._record_supplied_state(
+                        kk, cls, mpi_grid, name, entry[name]
+                    )
+
+        self._validate_inputs_resolved()
+        # ---- Bind in process_dict (author) order; distributed-grid
+        #      processes are rebound to each streaming step in run(). ----
+        for kk, vv in self._process_dict.items():
+            self.model_dict[kk] = vv["class"](
+                self.discretizations[self._proc_grid[kk]].dataset
+            )
+
+        # Per-process init hooks are LOCAL (collective-free) by contract,
+        # so running them inside SPMD assembly is safe.
+        self._run_initialize_hooks()
+        self._apply_supplied_state()
+
+        # ---- Maps: configure the parallel boundary (the decomposed
+        #      extent computed above), then resolve. ----
+        for map_name, mm in self.maps.items():
+            if mm.target_grid == mpi_grid:
+                raise ValueError(
+                    f"Map '{map_name}' targets the distributed grid "
+                    f"'{mpi_grid}': serial->distributed maps (scatter) "
+                    "are not implemented (Step B is distributed->serial)."
+                )
+            if mm.source_grid == mpi_grid:
+                if not hasattr(mm, "set_decomposition"):
+                    raise ValueError(
+                        f"Map '{map_name}' crosses the parallel boundary "
+                        f"from '{mpi_grid}': use MapMPI, not Map."
+                    )
+                mm.set_decomposition(comm, start, start + local_n)
+        self._resolve_maps(grid_sizes={mpi_grid: n_global})
+
+        # ---- Serial-grid output: rank 0 collects to a zarr Output --
+        #      rank 0 always runs the serial grids, and it writes. The
+        #      rank branch is safe by construction: Output holds NO
+        #      collectives (local buffering + disk IO only).
+        if serial_out_names:
+            if "output_serial_zarr" not in control:
+                raise ValueError(
+                    f"output_var_names {serial_out_names} live on serial "
+                    "grids: control['output_serial_zarr'] (a .zarr path) "
+                    "is required for the rank-0 zarr Output."
+                )
+            if comm.rank == 0:
+                output = Output(
+                    time_chunk_size=control.get("time_chunk_size", 365),
+                    variable_names=serial_out_names,
+                    output_store=pl.Path(control["output_serial_zarr"]),
+                    time_values=ds_window["time"].values,
+                )
+                # Track serial-grid processes only: their _obj is
+                # persistent. (Distributed-grid procs are rebound to each
+                # step, so refs captured here would go stale.)
+                output.initialize_variable_tracking(
+                    {
+                        kk: proc
+                        for kk, proc in self.model_dict.items()
+                        if self._proc_grid[kk] != mpi_grid
+                    }
+                )
+                # assigned only once its store exists (see Model)
+                self.output = output
+
+        # ---- Restart (warm start), part 2 of 2: full validation +
+        #      the state restore, AFTER the init hooks so the saved
+        #      state overwrites init_from_params()'s cold state. EVERY rank
+        #      reads the full-extent files and restores its own block
+        #      (SPMD-uniform, no collectives). Recomputes the same
+        #      start index located by part 1. ----
+        if restart_read is not None:
+            self._raise_if_supplied_state_with_restart()
+            self._read_restart(pl.Path(restart_read))
+        self._check_initial_state()
+
+    # -- run ------------------------------------------------------------
+
+    def step(self, dt: np.float64) -> None:
+        """Not available under MPI: mpixarray owns the time loop (see
+        run()), so there is no per-step entry point."""
+        raise NotImplementedError(
+            "ModelMPI has no step(): the streaming time loop belongs to "
+            "mpixarray; use run()."
+        )
+
+    def reset(self) -> None:
+        """Not implemented under MPI: the mpixarray stream owns the
+        time loop, and rewinding it is undecided."""
+        raise NotImplementedError(
+            "ModelMPI.reset() is not implemented: rewinding the "
+            "mpixarray time stream is undecided."
+        )
+
+    def set_parameters(
+        self, values: Mapping[str, Any], grid: str | None = None
+    ) -> None:
+        """Not implemented under MPI (it needs reset())."""
+        raise NotImplementedError(
+            "ModelMPI.set_parameters() is not implemented: it needs "
+            "ModelMPI.reset()."
+        )
+
+    def run(self, dt: np.float64, n_steps: np.int32 | None = None) -> None:
+        """Stream the time loop via iterate(); n_steps is ignored (the
+        streaming source defines the count). iterate() yields one window
+        of control["mpi_window_steps"] steps at a time: the streamed
+        inputs are read once per window, the steps of the window run in
+        an inner loop, and the streamed outputs are written once per
+        window. Serial-grid inputs advance in
+        lockstep with the stream; a Map is applied exactly once per step,
+        immediately before its first consumer (see Model._resolve_maps).
+
+        A serial grid's processes and inputs run on rank 0 ONLY, unless
+        control["serial_grids_all_ranks"]: nothing on the distributed
+        grid reads them, and rank 0 writes their output and their
+        restart state. On the other ranks their variables keep the
+        values of the build. Every collective is still made by every
+        rank: each Map is applied on all of them (a MapMPI ends in an
+        Allreduce), and so is the agreement of a budget raise. Any
+        other raise from what rank 0 runs alone ends the MPI job
+        (_call_alone)."""
+        if self._finalized:
+            raise RuntimeError("Cannot run a finalized Model.")
+        numba.set_num_threads(self._numba_n_threads)
+        ds_mpi_stream = self._ds_mpi_stream
+        mpi_grid = self._mpi_grid
+        mpi_procs = [
+            proc
+            for kk, proc in self.model_dict.items()
+            if self._proc_grid[kk] == mpi_grid
+        ]
+        serial_here = self._serial_grids_all_ranks or self._comm.rank == 0
+        proc_runs_here = [
+            serial_here or self._proc_grid[kk] == mpi_grid
+            for kk in self.model_dict
+        ]
+        # What rank 0 runs ALONE: a raise there is no other rank's
+        # (see _call_alone).
+        alone = (
+            serial_here
+            and not self._serial_grids_all_ranks
+            and self._comm.size > 1
+        )
+        proc_runs_alone = [
+            alone and self._proc_grid[kk] != mpi_grid for kk in self.model_dict
+        ]
+        # warm start: the stream was time-sliced at build to BEGIN at
+        # the resume index; model time stays GLOBALLY indexed, so
+        # `gtt` starts there (istep0-gated blocks must not re-fire at
+        # the resume step).
+        gtt = self._start_index
+        for step in ds_mpi_stream.mpi.iterate(
+            comm=self._comm, progress=self._progress
+        ):
+            src = step.mpi.src
+            # ONE read per window and input: this window's depth by
+            # this rank's block, in the file's order of the two dims
+            # and in the file's dtype. The read allocates the array,
+            # so it is new each window (one array for the run when the
+            # window is the whole stream). Each entry: the input's
+            # (grid,) float64 buffer, its window, whether the window
+            # is (depth, block) or (block, depth), its
+            # control["units"] = "convert" conversion or None.
+            windows = [
+                (
+                    step[name].values,
+                    src[name].values,
+                    self._stream_time_first[name],
+                    self._stream_conversions.get(name),
+                )
+                for name in self._file_input_names
+            ]
+            # Each entry: a streamed output buffer (depth, grid) and
+            # the (grid,) state it records.
+            out_rows = [
+                (step[buf].values, step[src_name].values)
+                for src_name, buf in self._output_map.items()
+            ]
+            # Rebind distributed-grid processes (and their disc's dataset)
+            # to the current window -- shares the persistent state
+            # buffers, so the Markov chain carries across windows.
+            # Serial-grid processes stay bound to their persistent grid
+            # dataset.
+            self.discretizations[mpi_grid].dataset = step
+            for proc in mpi_procs:
+                proc._obj = step
+            # The last window is shallower when the depth does not
+            # divide the stream: the day count is this window's.
+            for dd in range(step.sizes["time"]):
+                self.current_time_index[0] = gtt
+                self.time.set_index(gtt)
+                # Refill this step's input buffers from the window;
+                # the conversion follows the refill.
+                for values, window, time_first, conversion in windows:
+                    if time_first:
+                        values[:] = window[dd, :]
+                    else:
+                        values[:] = window[:, dd]
+                    if conversion is not None:
+                        values *= conversion[0]
+                        if conversion[1] != 0.0:
+                            values += conversion[1]
+                # Serial-grid inputs advance in lockstep with the stream.
+                for inp in self.inputs_dict.values():
+                    if alone:
+                        self._call_alone(inp.advance)
+                    elif serial_here:
+                        inp.advance()
+                for proc, runs_here, runs_alone in zip(
+                    self.model_dict.values(), proc_runs_here, proc_runs_alone
+                ):
+                    if runs_alone:
+                        self._call_alone(proc.advance)
+                    elif runs_here:
+                        proc.advance()
+                for (proc_name, proc), runs_here, runs_alone in zip(
+                    self.model_dict.items(), proc_runs_here, proc_runs_alone
+                ):
+                    # every rank: a MapMPI ends in an Allreduce
+                    for mm in self._proc_maps[proc_name]:
+                        mm.apply()
+                    if runs_alone:
+                        self._call_alone(proc.calculate, dt, self.time)
+                        self._check_budgets(proc)
+                    elif runs_here:
+                        proc.calculate(dt, self.time)
+                        self._check_budgets(proc)
+                    elif proc._budgets and self._budget_mode == "error":
+                        # no check on this rank, but the ranks that
+                        # made one agree in an Allreduce: join it
+                        self._raise_if_imbalanced(0, proc)
+                # Record state into this step's row of the streamed
+                # output buffer(s).
+                for out, state in out_rows:
+                    out[dd, :] = state
+                # Serial-grid output: rank 0 only (collective-free branch).
+                if self.output is not None:
+                    self.output.collect_current_timestep(gtt)
+                gtt += 1
+            # One write per window: all of its rows, at the window's
+            # position in the file. Every step lands on disk (no
+            # values_on_disk subset at as_iterable).
+            for buf in self._output_map.values():
+                step[buf].mpi.write()
+
+    def _raise_if_bad_numba_threads(self, n_threads: int, n_max: int) -> None:
+        """Agree across ranks before raising: numba's maximum can
+        differ by rank (the cores each rank was granted), so the
+        count is judged against the smallest one (one Allreduce(MIN))
+        and every rank raises together."""
+        from mpi4py import MPI
+
+        n_max = self._comm.allreduce(int(n_max), op=MPI.MIN)
+        super()._raise_if_bad_numba_threads(n_threads, n_max)
+
+    def _warn_if_numba_threads_ignored(self, n_max: int) -> None:
+        """Rank 0 only: one warning for the run, not one per rank."""
+        if self._comm.rank == 0:
+            super()._warn_if_numba_threads_ignored(n_max)
+
+    def _call_alone(self, call: Callable[..., None], *args: Any) -> None:
+        """Make a call that this rank ALONE makes (by default a serial
+        grid's processes and inputs run on rank 0 only). If it raises,
+        no other rank does: they would wait forever at the next
+        collective (a MapMPI's Allreduce). So the traceback is printed
+        and the whole MPI job is ended (comm.Abort); nothing is
+        closed."""
+        try:
+            call(*args)
+        except Exception:
+            traceback.print_exc()
+            print(
+                f"ModelMPI: the error above was raised on rank "
+                f"{self._comm.rank} alone, in a serial grid's process "
+                "or input (they run on rank 0 only unless "
+                "control['serial_grids_all_ranks']). Ending the MPI job.",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._comm.Abort(1)
+
+    def _raise_if_imbalanced(self, n_bad: int, proc: Any) -> None:
+        """Agree across ranks before raising: one scalar Allreduce(MAX) of
+        the local count, so every rank raises together (the budget check
+        itself is local; a lone raising rank would hang the others at the
+        next collective). Only runs in control["budget"] == "error"."""
+        from mpi4py import MPI
+
+        n_bad = self._comm.allreduce(int(n_bad), op=MPI.MAX)
+        super()._raise_if_imbalanced(n_bad, proc)
+
+    def _raise_if_bad_initial_state(
+        self, n_bad: int, problems: List[str]
+    ) -> None:
+        """Agree across ranks before raising (one Allreduce(MAX) of the
+        local count), so every rank raises together."""
+        from mpi4py import MPI
+
+        n_bad = self._comm.allreduce(int(n_bad), op=MPI.MAX)
+        super()._raise_if_bad_initial_state(n_bad, problems)
+
+    # -- restart ---------------------------------------------------------
+
+    def _peek_restart_resume_index(self, directory: pl.Path) -> int:
+        """Locate the resume index BEFORE the stream is built (part 1
+        of the warm start; the input dataset is time-sliced to start
+        there): read state_time from every restart file's attrs and
+        find the following step on the FULL time axis. Full per-grid
+        validation and the state restore are _read_restart's job (part
+        2), once the buffers exist -- it recomputes this same index."""
+        found = sorted(directory.glob("*_restart_*.nc"))
+        if not found:
+            raise ValueError(
+                f"restart_read: no restart files found in {directory}."
+            )
+        state_times = set()
+        for ff in found:
+            with xr.open_dataset(ff) as ds_in:
+                state_times.add(str(ds_in.attrs["state_time"]))
+        if len(state_times) != 1:
+            raise ValueError(
+                f"restart_read: inconsistent state times across grid "
+                f"files: {sorted(state_times)}."
+            )
+        state_time = np.datetime64(state_times.pop())
+        where = np.where(self.times.values == state_time)[0]
+        if where.size != 1:
+            raise ValueError(
+                f"restart state time {state_time} not found on this "
+                "model's time axis (inputs must cover the restart "
+                "time)."
+            )
+        start = int(where[0]) + 1
+        if start >= self.ntime:
+            raise ValueError(
+                f"restart state time {state_time} is this model's "
+                "final step: nothing to run."
+            )
+        return start
+
+    def write_restart(self, directory: Union[str, pl.Path]) -> None:
+        """Serial-FORMAT full-extent restart files, written by rank 0
+        (gather-then-write, mirroring the rank-0 zarr Output stance):
+        the distributed grid's flagged variables are allgathered
+        (contiguous rank-ordered blocks -> concatenate = global order);
+        serial grids write from rank 0's copy, the one that ran.
+        The files are format-identical to serial Model.write_restart,
+        so serial and MPI runs can warm-start each other. The loop is
+        collective-uniform (every rank joins every allgather; only the
+        writes are rank-branched, and they hold no collectives) and
+        ends on a Barrier so the files are complete before any rank
+        proceeds -- e.g. straight into a warm-started model."""
+        comm = self._comm
+        dd = pl.Path(directory)
+        if comm.rank == 0:
+            dd.mkdir(parents=True, exist_ok=True)
+        tt = int(self.current_time_index[0])
+        state_time = self.times[tt].values
+        date_str = np.datetime_as_string(state_time.astype("datetime64[D]"))
+        for grid, disc in self.discretizations.items():
+            distributed = grid == self._mpi_grid
+            ds_out = xr.Dataset()
+            for proc_name, proc in self.model_dict.items():
+                if self._proc_grid[proc_name] != grid:
+                    continue
+                for name in type(proc).get_restart_variables():
+                    if name in ds_out:
+                        continue
+                    if distributed:
+                        parts = comm.allgather(
+                            self._ds_mpi_stream[name].values.copy()
+                        )
+                        # units from the declaration: the gathered
+                        # array has no attrs, and restart_read judges
+                        # them under control["units"]
+                        units = _resolved_fields(type(proc))[name].units
+                        ds_out[name] = (
+                            (grid,),
+                            np.concatenate(parts),
+                            {} if units is None else {"units": units},
+                        )
+                    else:
+                        assert disc.dataset is not None
+                        ds_out[name] = disc.dataset[name]
+                state = proc.get_restart_state()
+                if distributed and state:
+                    raise NotImplementedError(
+                        f"process '{proc_name}': python-attr restart "
+                        "state (get_restart_state) on the DISTRIBUTED "
+                        "grid is not implemented -- no distributed "
+                        "process carries hook state today."
+                    )
+                for key, arr in state.items():
+                    full = f"{proc_name}__{key}"
+                    ds_out[full] = xr.DataArray(
+                        arr,
+                        dims=[f"{full}_d{ii}" for ii in range(arr.ndim)],
+                    )
+            if not ds_out.data_vars:
+                continue
+            ds_out.attrs["state_time"] = str(state_time)
+            if comm.rank == 0:
+                ds_out.to_netcdf(dd / f"{date_str}_restart_{grid}.nc")
+        comm.Barrier()
+
+    def _restore_grid_var(
+        self,
+        grid: str,
+        name: str,
+        values: np.ndarray,
+        affine: Union[tuple[float, float], None] = None,
+    ) -> None:
+        """Distributed grid: restore this rank's contiguous block of
+        the full-extent restart variable; serial grids restore whole
+        (replicated), as in the base."""
+        if grid == self._mpi_grid:
+            aa, bb = self._decomp_slice
+            buffer = self._ds_mpi_stream[name].values
+            buffer[:] = values[aa:bb]
+            if affine is not None:
+                units_mod.apply_affine(
+                    buffer, *affine, where=f"state '{name}'"
+                )
+        else:
+            super()._restore_grid_var(grid, name, values, affine)
+
+    # -- finalize -------------------------------------------------------
+
+    def _release(self) -> None:
+        """Close what the build opened: what Model._release() closes
+        (the serial-grid inputs and files, the rank-0 zarr Output),
+        then the stream (with its NetCDF writer) and the input
+        dataset. Called by finalize(), and by __init__ when _build()
+        raises: a build can stop before the last two exist, so each
+        is looked up with a default."""
+        super()._release()
+        for attr in ("_ds_mpi_stream", "_ds_input"):
+            dataset = getattr(self, attr, None)
+            if dataset is not None:
+                dataset.mpi.finalize()
+
+    def finalize(self) -> None:
+        if self._finalized:
+            return
+        self._release()
+        self._finalized = True

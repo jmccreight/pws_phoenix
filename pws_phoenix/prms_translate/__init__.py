@@ -1,0 +1,94 @@
+"""prms_translate: legacy PRMS files -> pws_phoenix model inputs.
+
+ONE-WAY street (PRMS native -> pws_phoenix; never back) and modularly
+DISTINCT from the core: the core framework/process code never imports
+this package (the dependency is strictly prms_translate -> core).
+
+DEPENDENCY RULE: file-format decoding leans on **pyPRMS** exclusively
+(plus numpy/xarray) -- NEVER pywatershed. The intent (JLM, Aug 2026)
+is that the generic PRMS-file capabilities here migrate INTO pyPRMS
+over time, so they must not drag pywatershed along:
+
+- migratable-to-pyPRMS half: the float64-parse shim + monthly-dim
+  convention (readers.py), the dynamic-parameter reader
+  (dyn_param.py), CBH windowing/widening (cbh.py).
+- pws_phoenix-specific half (stays here): control-driven CLASS
+  resolution (control.py) and contract-driven parameter packaging.
+
+Upstream asks for pyPRMS (evaluated Aug 2026 on 0.9.10, the latest
+release; see readers.py/dyn_param.py for the details):
+
+1. an option to parse PRMS type-F parameters as float64
+   (ParameterFile parses them float32 at the text line -- a ~1e-9
+   truncation that breaks bitwise parity with a float64 parse);
+2. a dynamic-parameter (.param/.dyn) file reader.
+"""
+
+from pws_phoenix.prms_translate.assemble import (
+    ModelKit,
+    assemble_from_control,
+    assemble_from_translation,
+    insert_flow_graph,
+    model_from_control,
+    model_from_translation,
+    prms_initial_state,
+    prms_parameter_defaults,
+    seg_inflow_from_segment_flow_init,
+    verify_translation,
+)
+from pws_phoenix.prms_translate.assemble_mpi import (
+    mpi_model_from_control,
+    mpi_model_from_translation,
+    write_mpi_input_file,
+)
+from pws_phoenix.prms_translate.cbh import load_cbh, write_cbh_netcdf
+from pws_phoenix.prms_translate.control import (
+    PrmsRunConfig,
+    from_control,
+    resolve_classes,
+)
+from pws_phoenix.prms_translate.dyn_param import load_dynamic_parameter
+from pws_phoenix.prms_translate.preprocess import (
+    digest_array,
+    verify_preprocessed,
+    write_preprocessed,
+)
+from pws_phoenix.prms_translate.parameters import (
+    package_parameters,
+    volume_map_weights,
+)
+from pws_phoenix.prms_translate.readers import (
+    load_control,
+    load_parameters,
+    prms_metadata,
+)
+
+__all__ = [
+    "ModelKit",
+    "PrmsRunConfig",
+    "assemble_from_control",
+    "assemble_from_translation",
+    "from_control",
+    "insert_flow_graph",
+    "model_from_control",
+    "model_from_translation",
+    "load_cbh",
+    "load_control",
+    "load_dynamic_parameter",
+    "load_parameters",
+    "mpi_model_from_control",
+    "mpi_model_from_translation",
+    "digest_array",
+    "package_parameters",
+    "prms_initial_state",
+    "prms_parameter_defaults",
+    "prms_metadata",
+    "resolve_classes",
+    "seg_inflow_from_segment_flow_init",
+    "verify_preprocessed",
+    "verify_translation",
+    "volume_map_weights",
+    "write_cbh_netcdf",
+    "write_mpi_input_file",
+    "write_preprocessed",
+]

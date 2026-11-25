@@ -1,0 +1,135 @@
+name: pwpx_mpi
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  # ASV (airspeed velocity) performance benchmarks -- asv.conf.json
+  # + benchmarks/ at the repo root; run against THIS env with
+  # `asv run --python=same` (environment_type "existing"), no
+  # ASV-managed envs. (Entry inherited from pywatershed's env, Apr
+  # 2026; put to use Oct 2026.)
+  - asv
+  - click != 8.1.0
+  # contextily + tqdm: pywatershed import-chain deps (parity tests;
+  # contextily feeds only its plotting) -- pyPRMS stays pip-only
+  - contextily
+  # epiweeks4cf is the conda-forge name for the `epiweeks` module
+  # (Time.current_epiweek -- STARFIT seasonal release)
+  - epiweeks4cf
+  - geopandas
+  - git
+  - make
+  - ipython
+  # notebooks (examples/); rides
+  # into CI/HPC builds too -- accepted (JLM Aug 2026) over a separate
+  # env or the lab-from-base + ipykernel pattern. jupytext opens
+  # py:percent files AS notebooks (right-click -> Open With ->
+  # Notebook) with edits round-tripping to the .py
+  - jupyterlab
+  - jupytext
+  # ---- IO-stack + numba pins: every pin here is load-bearing and
+  # gated by the full test sweep (serial + MPI + a notebook
+  # script-run). History: the Jul/Aug 2026 pins encoded env surgery
+  # that a re-solve once silently undid; the Aug 2026 modernization
+  # pass then adopted zarr 3 + xarray 2026.7 DELIBERATELY (validated
+  # in a fresh scratch env before landing here). Do not relax or bump
+  # without the sweep. ----
+  # 1.7.3 pinned (rev-2 surgery downgraded 1.7.4 -> 1.7.3); also
+  # matches pyPRMS's !=1.7.4 requirement so its pip install does NOT
+  # replace the conda build with a PyPI wheel (ABI mismatch with
+  # conda numpy -> "numpy.ndarray size changed" RuntimeWarning);
+  # revisit when pyPRMS lands on conda-forge.
+  # README "pwpx_mpi on Hovenweep" deletes these two lines BY PATTERN
+  # ('^  - netCDF4=', '^  - libnetcdf='): keep that form.
+  - netCDF4=1.7.3
+  - libnetcdf=4.9.*
+  - networkx  # Discretization.topological_order (pywatershed-identical)
+  # numba's ceiling, NOT ours: numba 0.66.0 (latest, Aug 2026) still
+  # declares numpy<2.5 (also the mypy hook's pin)
+  - numpy>=2.0.0,<2.5
+  - numba
+  # graphviz layout for ModelContractGraph.to_dot (notebook 00;
+  # falls back to mermaid without it) -- was an ad hoc install in
+  # the old env, now on the record
+  - python-graphviz
+  - xarray=2026.7.*  # the zarr-3 era pair (zarr pin below)
+  - pandas>=1.4.0
+  # units vocabulary (pws_phoenix/units.py): declared `units` strings are
+  # checked against pint in tests/test_units.py; at runtime pint is
+  # imported only when control["units"] turns the checks on (stage 2)
+  - pint
+  - pip
+  - mypy
+  - pre-commit
+  - pytest!=8.1.0
+  - pytest-cov
+  - pytest-env
+  - pytest-order
+  - pytest-xdist
+  - python>=3.14
+  - pyyaml
+  - ruff
+  - safety
+  - sphinx
+  - sphinx-book-theme>=0.3.3
+  - sphinx-autodoc-typehints>=2.2.1
+  - sphinx-autosummary-accessors
+  - sphinx-copybutton
+  - tqdm
+  # zarr 3 adopted deliberately (Aug 2026 modernization; paired with
+  # xarray 2026.7 above -- the historical breakage was the MISMATCHED
+  # pair, xarray 2026.4 + zarr 3.3). Back on conda: the old
+  # zarr-as-pip arrangement existed only to defend the v2 line
+  # against conda re-solves and is obsolete. (pyPRMS 0.9.10's
+  # zarr<3 pin used to downgrade this on a fresh create; pyPRMS
+  # >=0.10.0 has no such pin -- verified on a from-scratch build,
+  # Oct 2026.)
+  - zarr=3.3.*
+  # ---- BEGIN parallel-io ----------------------------------------
+  # The MPI + parallel-HDF5/NetCDF stack (mirrors the mpix meta-repo
+  # environment_parallel_io.yaml) hosting the mpixarray ecosystem
+  # (installed separately, in dependency order -- see the meta-repo
+  # setup_environment.sh or the CI workflow). This block is the ONLY
+  # difference from the serial environment.yaml (env pwpx):
+  # tests/test_environment_files.py checks that this file minus the
+  # block and the `name:` line equals environment.yaml, so edit both
+  # files together. Serial pws_phoenix runs never need the block
+  # (the mpixarray import is optional).
+  # ---- BEGIN mpi-binaries ---------------------------------------
+  # MPI, parallel HDF5, their python bindings, and the packages that
+  # depend on those bindings. On a machine that provides its own MPI
+  # and parallel HDF5 (README "pwpx on Hovenweep") this sub-block is
+  # deleted: mpi4py and h5py are compiled there against the system
+  # libraries and the three packages after them are pip-installed
+  # afterwards, so conda never puts its own h5py / mpi4py over the
+  # compiled ones.
+  - mpich
+  - mpi4py
+  - hdf5=1.14.*=mpi*  # rev-2 surgery: 2.1.0 -> 1.14.6 (netcdf 4.9 compat)
+  - h5py=*=mpi*
+  - h5netcdf  # depends on h5py
+  - hdf5plugin  # depends on h5py (an ecosystem requirement, see below)
+  - pytest-mpi  # kept beside mpi4py
+  # ---- END mpi-binaries -----------------------------------------
+  # ecosystem requirements: the union of mpix/requirements.txt and
+  # mpixarray/requirements.txt (Oct 2026) not already listed above,
+  # floors copied from mpix, so `pip install -e` of the two clones
+  # pulls nothing from PyPI (mpix: tiff/las/gpkg file_io readers,
+  # prange; mpixarray: netcdf/zarr/tiff file_io)
+  - imagecodecs>=2024.6.1
+  - progressbar2>=4.4.0
+  - pyproj>=3.7.0
+  - rasterio>=1.4.0
+  - rioxarray
+  - scipy>=1.15.3
+  - shapely>=2.0.4
+  - zstandard>=0.22.0
+  # ---- END parallel-io ------------------------------------------
+  - pip:
+      - pytest-error-for-skips
+      # pywatershed import-chain dep for the A/B parity tests
+      # (pywatershed itself is used from the mpix-root repo clone via
+      # sys.path); contextily + tqdm ride in the conda section above.
+      # >=0.10.0: fixes the MetaData() crash under packaging 26.3
+      # (UPSTREAM_ASKS item 0) and drops the zarr<3 pin
+      - pyPRMS>=0.10.0

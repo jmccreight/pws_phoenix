@@ -1,0 +1,180 @@
+"""
+processes_concrete.py
+=====================
+Upper and Lower: concrete Process subclasses for the toy Upper/Lower model.
+
+  - No decorator -- Upper/Lower subclass Process directly.
+  - Auto-registered in Process._registry via __init_subclass__.
+  - Instantiated by the Model with the grid's shared dataset: cls(grid_ds).
+  - advance(self) / calculate(self, dt, time) are instance methods using
+    self._refs (the fields' ndarrays, captured once at bind).
+  - _calculate is a @staticmethod taking raw numpy arrays, compiled with
+    @numba.njit (nopython -- uncompilable code raises, no silent
+    object-mode fallback). Convention: the output buffer(s) come first
+    and are written IN PLACE; no return, no per-step allocation (numba
+    fuses the array expressions, eliminating the temporaries).
+"""
+
+import numba
+import numpy as np
+from pws_phoenix import NUMBA_CACHE
+from pws_phoenix.clock import Time
+from pws_phoenix.process import DataArrayMeta, Process
+
+
+class Upper(Process):
+    # ------------------------------------------------------------------
+    # Field declarations
+    # ------------------------------------------------------------------
+    param_up_0 = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Upper zone parameter 0",
+    )
+    param_up_1 = DataArrayMeta(
+        kind="parameter",
+        dims=("month", "space"),
+        dtype=np.float64,
+        units="fraction",
+        description="Upper zone parameter 1 (time-varying: cyclic monthly)",
+    )
+    param_shared_name = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Parameter shared with Lower",
+    )
+    forcing_up = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Primary forcing (read-only)",
+    )
+    flow = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Flow (public -- shared downstream with Lower)",
+        restart=True,  # prognostic; flow_previous regenerates at advance
+    )
+    flow_previous = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Flow at previous time step",
+    )
+
+    # ------------------------------------------------------------------
+    # Computation
+    # ------------------------------------------------------------------
+
+    def advance(self) -> None:
+        self._refs["flow_previous"][:] = self._refs["flow"]
+
+    @staticmethod
+    @numba.njit(cache=NUMBA_CACHE)
+    def _calculate(
+        flow: np.ndarray,
+        flow_previous: np.ndarray,
+        forcing_up: np.ndarray,
+        param_up_1: np.ndarray,
+        dt: np.float64,
+    ) -> None:
+        flow[:] = flow_previous * np.float64(0.95) + forcing_up * param_up_1
+
+    def calculate(self, dt: np.float64, time: Time) -> None:
+        # param_up_1 is cyclic-monthly; index by current month (a view)
+        param_up_1_now = self._refs["param_up_1"][time.month - 1]
+        self._calculate(
+            self._refs["flow"],
+            self._refs["flow_previous"],
+            self._refs["forcing_up"],
+            param_up_1_now,
+            dt,
+        )
+
+
+class Lower(Process):
+    # ------------------------------------------------------------------
+    # Field declarations
+    # ------------------------------------------------------------------
+    param_low_0 = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Lower zone parameter 0",
+    )
+    param_shared_name = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="fraction",
+        description="Parameter shared with Upper",
+    )
+    flow = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Flow from Upper (read-only input)",
+    )
+    forcing_low = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Lower zone's own forcing (read-only)",
+    )
+    storage = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Storage",
+        restart=True,  # prognostic; storage_previous regenerates
+    )
+    storage_previous = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Storage at previous time step",
+    )
+
+    # ------------------------------------------------------------------
+    # Computation
+    # ------------------------------------------------------------------
+
+    def advance(self) -> None:
+        self._refs["storage_previous"][:] = self._refs["storage"]
+
+    @staticmethod
+    @numba.njit(cache=NUMBA_CACHE)
+    def _calculate(
+        storage: np.ndarray,
+        storage_previous: np.ndarray,
+        flow: np.ndarray,
+        forcing_low: np.ndarray,
+        dt: np.float64,
+    ) -> None:
+        storage[:] = (
+            storage_previous * np.float64(0.95)
+            + flow * np.float64(0.12)
+            + forcing_low * np.float64(0.10)
+        )
+
+    def calculate(self, dt: np.float64, time: Time) -> None:
+        self._calculate(
+            self._refs["storage"],
+            self._refs["storage_previous"],
+            self._refs["flow"],
+            self._refs["forcing_low"],
+            dt,
+        )

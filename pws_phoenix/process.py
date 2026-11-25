@@ -1,0 +1,501 @@
+"""
+process.py
+==========
+The Process framework for pws_phoenix: the DataArrayMeta field
+descriptor and the Process ABC. Concrete processes (Upper, Lower, ...)
+subclass Process in processes_concrete.py; the orchestrators (Model,
+ModelMPI) live in model.py.
+
+What is a Process?
+------------------
+A Process is a stateful, accessor-style view of its grid's ONE shared
+dataset: it stores self._obj (the dataset) and self._refs (one ndarray
+reference per declared field, captured once at bind -- what advance()
+and calculate(dt, time) read) and exposes those as instance methods. It does not own or build its
+dataset -- the Model assembles one shared dataset per grid
+(discretization) from its processes' field declarations and binds each
+process to it directly (serial: Model._add_process_fields; MPI:
+ModelMPI._build, where _obj is rebound to each streaming step).
+Same-named variables are added to the grid dataset once, so
+cross-process buffer sharing (param_shared_name, Upper.flow ->
+Lower.flow) is structural -- the same named variable in the one dataset.
+
+Fields are declared as class attributes with DataArrayMeta (kind:
+parameter / input / mutable_input / variable); the introspection
+classmethods (get_parameters, get_inputs, ...) read those declarations
+and are what the Model assembles from.
+
+Heavy computation is delegated to a @staticmethod _calculate(...) that
+takes raw numpy arrays -- no xarray overhead -- compiled with
+@numba.njit (nopython: uncompilable code raises, no silent object-mode
+fallback). Convention: the output buffer(s) come first and are written
+IN PLACE; _calculate returns nothing and allocates nothing per step
+(numba fuses the array expressions, eliminating the temporaries).
+
+Run tests with: pytest tests/ -v
+"""
+
+import dataclasses
+from abc import ABC, abstractmethod
+from typing import Literal
+
+import numpy as np
+import xarray as xr
+
+from pws_phoenix import budget
+from pws_phoenix.clock import Time
+
+# ---------------------------------------------------------------------------
+# DataArrayMeta -- field descriptor for Process subclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class DataArrayMeta:
+    """Metadata for a DataArray field declared on a Process subclass.
+
+    Example:
+        class Upper(Process):
+            param_up_0 = DataArrayMeta(kind="parameter", dims=("space",),
+                                       dtype=np.float64)
+            forcing_up  = DataArrayMeta(kind="input",     dims=("space",),
+                                       dtype=np.float64)
+            flow       = DataArrayMeta(kind="variable",  dims=("space",),
+                                       dtype=np.float64, restart=True)
+    """
+
+    kind: Literal[
+        "parameter",
+        "parameter_internal",
+        "input",
+        "mutable_input",
+        "variable",
+        # GENERATED per-location budget terms (see _budget_fields): a
+        # variable in every lifecycle respect (allocated, written,
+        # restartable) but never declared by hand -- kept distinct so
+        # "the process's variables" means the physics ones.
+        "budget_variable",
+    ]
+    dims: tuple[str, ...]
+    dtype: type
+    description: str = ""
+    # PROGNOSTIC state marker (kind="variable" only): the variable
+    # belongs in a restart file -- the minimal set that, restored at a
+    # time step, reproduces the continuous run exactly (the perfect-
+    # restart tests police completeness). It is also the INITIAL-STATE
+    # surface: at a cold start init_from_params() sets each restart
+    # variable's DEFAULT, and a value supplied in the process_dict
+    # entry under the variable's OWN name overrides it (Nov 2026;
+    # replaced the `initial=` seams). Not checked for nan: nan is a
+    # legitimate state value for some (e.g. stream temp's
+    # never-has-flow marker, FlowGraph union rows). Flag CURRENT state
+    # variables only, never their *_prev copies: advance() runs before
+    # any calculate(), so restored currents regenerate the prevs. Also
+    # the natural cut at the prognostic variables for state-updating
+    # techniques (JLM, Aug 2026).
+    restart: bool = False
+    # SUPPLY-OR-DERIVE provenance (kind="parameter" only). THE
+    # PARAMETER TAXONOMY, to be kept patently clear (JLM, Aug 2026):
+    #
+    # 1. AUTHORED (kind="parameter", derivation=None): data or
+    #    calibration the modeler supplies. Required.
+    # 2. DERIVABLE (kind="parameter", derivation=<str>): STILL
+    #    REQUIRED at assembly, but obtainable by the stated
+    #    factory/formula from other supplied quantities (e.g. the
+    #    solar tables from slope/aspect/latitude). By convention the
+    #    string NAMES ITS INPUTS -- that list is what pre-processing
+    #    provenance stamps digest to detect stale artifacts. May
+    #    become optional under future compute-if-absent semantics.
+    # 3. INTERNAL (kind="parameter_internal", no derivation):
+    #    computed by init_from_params(), NEVER supplied, never part of the
+    #    contract's required half. "Internal" and "derivable" are
+    #    deliberately distinct words for distinct lifecycles.
+    derivation: str | None = None
+    # Physical units, free text (e.g. "inches", "cubic feet"). Optional
+    # in general; REQUIRED on every term of a declared budget, and all
+    # terms of one budget must agree (checked when the class's fields
+    # are first resolved). Descriptions may still spell units in prose.
+    units: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Spec class introspection helpers
+# ---------------------------------------------------------------------------
+
+
+def _proc_subclass_mro(cls: type) -> tuple[type, ...]:
+    """Return the MRO of cls excluding Process, ABC, and object.
+
+    Reversed so base class fields are yielded before subclass fields,
+    giving consistent ordering when walking the hierarchy.
+    """
+    _exclude = {"Process", "ABC", "object"}
+    return tuple(
+        cc for cc in reversed(cls.__mro__) if cc.__name__ not in _exclude
+    )
+
+
+def _resolved_fields(cls: type) -> dict[str, DataArrayMeta]:
+    """Return the FINAL DataArrayMeta per field name for a Process subclass.
+
+    Walks the full MRO base-first, so a subclass redeclaration of a
+    name OVERRIDES the base's declaration entirely -- including its
+    kind (e.g. an Ag variant turning a frozen ``parameter_internal``
+    geometry field into a per-step ``variable``). A field keeps the
+    ordering position of its FIRST declaration; subclass-new fields
+    follow the base's.
+    """
+    fields: dict[str, DataArrayMeta] = {}
+    for cc in _proc_subclass_mro(cls):
+        for name, val in vars(cc).items():
+            if isinstance(val, DataArrayMeta):
+                fields[name] = val
+    fields.update(_budget_fields(cls, fields))
+    return fields
+
+
+def _budget_fields(
+    cls: type[Process], fields: dict[str, DataArrayMeta]
+) -> dict[str, DataArrayMeta]:
+    """Generated variables for the class's declared ``budgets``: per
+    budget, a ``*_sum`` per present component plus ``residual`` and
+    ``residual_accum`` (``restart=True``). Derived from the FINAL
+    class's ``budgets`` (a variant redeclaring ``budgets`` replaces the
+    base's; nothing is inherited twice). Validates here -- at first
+    introspection, before assembly -- that every term is a declared
+    field with units, and that one budget's units agree."""
+    generated: dict[str, DataArrayMeta] = {}
+    for bname, terms in cls.budgets.items():
+        unknown = set(terms) - set(budget.COMPONENTS)
+        missing = set(budget.REQUIRED_COMPONENTS) - set(terms)
+        if unknown or missing:
+            raise ValueError(
+                f"{cls.__name__}.budgets['{bname}']: components must be "
+                f"{budget.REQUIRED_COMPONENTS} (+ optional 'exchanges'); "
+                f"unknown {sorted(unknown)}, missing {sorted(missing)}."
+            )
+        units: set[str | None] = set()
+        for cc, names in terms.items():
+            for name in names:
+                if name not in fields:
+                    raise ValueError(
+                        f"{cls.__name__}.budgets['{bname}'] {cc} term "
+                        f"'{name}' is not a declared field."
+                    )
+                units.add(fields[name].units)
+        if None in units or len(units) != 1:
+            raise ValueError(
+                f"{cls.__name__}.budgets['{bname}']: every term needs "
+                f"units and they must agree; found {sorted(map(str, units))}."
+            )
+        (unit,) = units
+        bb = budget.Budget(cls.__name__, bname, terms)
+        prefix = budget.field_name(cls.__name__, bname, "")
+        for name in bb.field_names:
+            if name in fields:
+                raise ValueError(
+                    f"{cls.__name__}: generated budget field '{name}' "
+                    "collides with a declared field."
+                )
+            generated[name] = DataArrayMeta(
+                kind="budget_variable",
+                dims=("space",),
+                dtype=np.float64,
+                description=(
+                    f"{bname} budget {name.removeprefix(prefix)} "
+                    f"of {cls.__name__}"
+                ),
+                restart=name == bb.residual_accum_name,
+                units=unit,
+            )
+    return generated
+
+
+def _keys_of_kind(cls: type, kind: str) -> tuple[str, ...]:
+    """Return field names whose RESOLVED declaration has a given kind.
+
+    Walks the full MRO so fields declared on intermediate base classes
+    are included; a redeclared name is counted once, under its final
+    (most-derived) kind only.
+    """
+    return tuple(
+        name for name, val in _resolved_fields(cls).items() if val.kind == kind
+    )
+
+
+def _dict_of_kind(cls: type, kind: str) -> dict[str, DataArrayMeta]:
+    """Return {name: DataArrayMeta} for resolved fields of a given kind.
+
+    Walks the full MRO so fields declared on intermediate base classes
+    are included; a redeclared name is counted once, under its final
+    (most-derived) kind only.
+    """
+    return {
+        name: val
+        for name, val in _resolved_fields(cls).items()
+        if val.kind == kind
+    }
+
+
+# ---------------------------------------------------------------------------
+# Process ABC
+# ---------------------------------------------------------------------------
+
+_FILL_VALUE: dict[type, object] = {
+    np.float64: np.nan,
+    # ints have no nan; use a glaringly-invalid sentinel
+    np.int64: np.iinfo(np.int64).min,
+    # bools have no invalid value; init_from_params() must fully set them
+    np.bool_: False,
+}
+
+
+class Process(ABC):
+    """Accessor-style ABC: a view of its grid's shared dataset.
+
+    Stores self._obj (the dataset, bound by the Model) and self._refs
+    (its fields' ndarrays, captured once) and dispatches
+    advance()/calculate(). Subclasses declare fields as DataArrayMeta
+    class attributes and auto-register in Process._registry via
+    __init_subclass__.
+
+    Numba:
+        Heavy inner computation should be delegated to a @staticmethod
+        _calculate(...) receiving raw numpy arrays, decorated with
+        @numba.njit. The output buffer(s) come first and are written in
+        place (no return, no per-step allocation):
+
+        class Upper(Process):
+            @staticmethod
+            @numba.njit
+            def _calculate(flow, flow_previous, forcing):
+                flow[:] = flow_previous * 0.95 + forcing
+
+            def calculate(self, dt: np.float64, time: Time) -> None:
+                refs = self._refs
+                self._calculate(
+                    refs["flow"], refs["flow_previous"], refs["forcing_up"]
+                )
+    """
+
+    # Registry of concrete subclasses by class name, populated by
+    # __init_subclass__. Used by config.load_model_yaml to resolve
+    # process classes named as strings in a yaml configuration (import
+    # the defining module first -- importing registers). The other
+    # anticipated consumer is restart/checkpoint rehydration
+    # (serialized state can only record a process *name*).
+    _registry: dict[str, type["Process"]] = {}
+
+    # Home grid (co-registration). None = the model's single/default grid; a
+    # subclass may set a default, a process_dict entry can override it.
+    discretization: str | None = None
+
+    # Conservation budgets, by name (pywatershed's get_mass_budget_terms,
+    # generalized to any number of named quantities -- "mass", "energy",
+    # ...). Each value maps the components "inputs" / "outputs" /
+    # "storage_changes" (+ optional "exchanges", for fluxes of either
+    # sign) to tuples of this class's declared field names, all carrying
+    # the same `units`. Declaring one generates the `*_sum` / `residual`
+    # / `residual_accum` variables (see _budget_fields and budget.py);
+    # the Model runs check_budgets() after each calculate() (ONLY the
+    # Model: a process driven by hand computes no budget -- run a lone
+    # process as a one-process Model). A variant redeclares the whole
+    # dict.
+    budgets: dict[str, dict[str, tuple[str, ...]]] = {}
+
+    # Restart variables that must be SUPPLIED TOGETHER as initial state
+    # (the Model raises on part of a group; none of it, or a restart,
+    # is fine). Declare a group when init_from_params() computes some of its
+    # members from the DEFAULTS of others (e.g. soil_lower =
+    # soil_moist - soil_rechr): supplied state is written after
+    # init_from_params(), so supplying one member alone would leave the rest
+    # computed from a default that was then replaced. A variant
+    # inherits the tuple or redeclares it whole.
+    state_groups: tuple[tuple[str, ...], ...] = ()
+
+    # Restart variables with NO default: init_from_params() leaves them
+    # unset, so they must be supplied as initial state or come from a
+    # restart. The Model raises at assembly when one is missing.
+    required_initial_state: tuple[str, ...] = ()
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        Process._registry[cls.__name__] = cls
+
+    def __init__(self, xarray_obj: xr.Dataset) -> None:
+        self._obj = xarray_obj
+        # One ndarray reference per declared field, captured ONCE at bind
+        # (DEVELOPER.md "Per-step data access"): advance()/calculate()
+        # read these, never `self._obj[name].values` (an xr.Dataset
+        # lookup, ~20 us each). The MPI rebind (ModelMPI.run) does NOT
+        # recapture -- the arrays behind the names never move.
+        self._refs: dict[str, np.ndarray] = {
+            name: xarray_obj[name].values
+            for name in _resolved_fields(type(self))
+        }
+        cls = type(self)
+        self._budgets = {
+            bname: budget.Budget(cls.__name__, bname, terms)
+            for bname, terms in cls.budgets.items()
+        }
+
+    def initialize_budgets(self) -> None:
+        """Zero the budget accumulators. Called by the Model with the
+        init_state() hooks, before any restart restore."""
+        for bb in self._budgets.values():
+            bb.initialize(self._refs)
+
+    def check_budgets(
+        self, rtol: float, atol: float, warn: bool, time: Time
+    ) -> int:
+        """Evaluate every declared budget for the step just calculated;
+        returns the LOCAL number of imbalanced locations summed over the
+        budgets (0 when none declared). Warns per budget when ``warn``;
+        raising is the Model's call (collective under MPI)."""
+        n_bad = 0
+        for bb in self._budgets.values():
+            n_bad += bb.calculate(self._refs, rtol, atol, warn, time)
+        return n_bad
+
+    def __getitem__(self, key: str) -> xr.DataArray:
+        """Subscript delegates to the bound dataset (a process is a view of its
+        grid's shared dataset)."""
+        return self._obj[key]
+
+    # The three init hooks (all default to no-ops; all LOCAL -- no
+    # collectives). The Model calls them in this order, each over ALL
+    # processes before the next:
+    #   allocate()          once per model
+    #   init_from_params()  then parameter_internal is frozen
+    #   init_state(time)    then supplied state | restart overrides it
+
+    def allocate(self) -> None:
+        """Run ONCE per model, after binding: create private arrays
+        (scratch, lookup tables, state held outside the dataset) and
+        tuples of array references. The ONLY hook that may allocate;
+        the other two fill in place, so they are safe to run again."""
+
+    def init_from_params(self) -> None:
+        """Compute everything that is a function of the PARAMETERS:
+        `kind="parameter_internal"` fields in place (e.g. Muskingum
+        coefficients from mann_n + dis variables) and private
+        parameter-derived values; raise on invalid parameters. The
+        Model freezes parameter_internal (read-only) after all
+        processes' hooks run. Contract: writes NO variable, allocates
+        nothing, no Time; reads params/dis vars off self._refs. Safe
+        to run again after the parameters change."""
+
+    def init_state(self, time: Time) -> None:
+        """Write the cold-start DEFAULT of every variable this process
+        needs defined before the first step (restart variables above
+        all), and of any private state. `time` is the clock at index 0
+        (the start date). Runs after the freeze: a write to a
+        parameter_internal raises. Supplied state or a restart then
+        overrides these defaults. Contract: writes variables only,
+        allocates nothing. Safe to run again."""
+
+    def check_initial_state(self) -> list[str]:
+        """Called ONCE by the Model after the starting state is in place
+        (init_from_params() defaults, then supplied state or a restart).
+        Returns this rank's problems as messages (default: none).
+        Contract: LOCAL (no collectives), never raises -- the Model
+        raises, on every rank under MPI."""
+        return []
+
+    @abstractmethod
+    def advance(self) -> None:
+        """Copy current state to *_previous variables for the next timestep."""
+
+    @abstractmethod
+    def calculate(self, dt: np.float64, time: Time) -> None:
+        """Update state variables for one timestep of length dt."""
+
+    # ------------------------------------------------------------------
+    # Introspection -- reads field-kind metadata from the class definition
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_parameters(cls) -> tuple[str, ...]:
+        return _keys_of_kind(cls, "parameter")
+
+    @classmethod
+    def get_parameters_internal(cls) -> dict[str, DataArrayMeta]:
+        """Parameters COMPUTED by init_from_params() rather than supplied
+        (read-only after; metas returned for allocation)."""
+        return _dict_of_kind(cls, "parameter_internal")
+
+    @classmethod
+    def get_inputs(cls) -> tuple[str, ...]:
+        return _keys_of_kind(cls, "input")
+
+    @classmethod
+    def get_mutable_inputs(cls) -> tuple[str, ...]:
+        return _keys_of_kind(cls, "mutable_input")
+
+    @classmethod
+    def get_variables(
+        cls, include_budget: bool = False
+    ) -> dict[str, DataArrayMeta]:
+        """The process's declared variables; ``include_budget=True``
+        appends the generated budget terms (the framework's view:
+        everything allocated and writable as a variable)."""
+        out = _dict_of_kind(cls, "variable")
+        if include_budget:
+            out |= _dict_of_kind(cls, "budget_variable")
+        return out
+
+    @classmethod
+    def get_var_names(cls, include_budget: bool = False) -> tuple[str, ...]:
+        return tuple(cls.get_variables(include_budget=include_budget))
+
+    @classmethod
+    def get_budget_variables(cls) -> dict[str, DataArrayMeta]:
+        """The GENERATED budget terms (``kind="budget_variable"``):
+        ``{Class}_{budget}_{inputs_sum, outputs_sum,
+        storage_changes_sum, [exchanges_sum], residual,
+        residual_accum}`` per declared budget; empty when the class
+        declares none."""
+        return _dict_of_kind(cls, "budget_variable")
+
+    @classmethod
+    def get_budget_var_names(cls) -> tuple[str, ...]:
+        return _keys_of_kind(cls, "budget_variable")
+
+    @classmethod
+    def get_restart_variables(cls) -> tuple[str, ...]:
+        """Names of the PROGNOSTIC state variables (declared
+        ``restart=True``) -- the restart-file set, derived from the
+        declarations (pywatershed's hand-maintained
+        get_restart_variables() lists are the cross-check during
+        flagging). The declaration-override seam applies: a variant's
+        redeclaration replaces the base's flag. Budget accumulators
+        are included (restart is the COMPLETE state)."""
+        return tuple(
+            name
+            for name, meta in cls.get_variables(include_budget=True).items()
+            if meta.restart
+        )
+
+    # ------------------------------------------------------------------
+    # Restart state hooks -- for the few processes carrying EVOLVING
+    # python-attribute state outside the grid dataset (e.g. stream
+    # temp's gw/ss silos + circular-buffer indices). Static attrs
+    # (topology, lookup tables) are rebuilt by init_from_params() and do NOT
+    # belong here; within-step scratch does not either.
+    # ------------------------------------------------------------------
+
+    def get_restart_state(self) -> dict[str, np.ndarray]:
+        """Evolving python-attribute state for the restart file
+        (default: none). Keys are attr-local names; the Model
+        namespaces them per process on disk."""
+        return {}
+
+    def set_restart_state(self, state: dict[str, np.ndarray]) -> None:
+        """Restore what get_restart_state() returned (default: none
+        expected -- raises if state arrives for a process that
+        declares no python-attr restart state)."""
+        if state:
+            raise ValueError(
+                f"{type(self).__name__} received restart state "
+                f"{sorted(state)} but implements no set_restart_state."
+            )

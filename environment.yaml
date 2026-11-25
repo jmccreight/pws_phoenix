@@ -3,6 +3,11 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
+  # ASV (airspeed velocity) performance benchmarks -- asv.conf.json
+  # + benchmarks/ at the repo root; run against THIS env with
+  # `asv run --python=same` (environment_type "existing"), no
+  # ASV-managed envs. (Entry inherited from pywatershed's env, Apr
+  # 2026; put to use Oct 2026.)
   - asv
   - click != 8.1.0
   # contextily + tqdm: pywatershed import-chain deps (parity tests;
@@ -15,7 +20,7 @@ dependencies:
   - git
   - make
   - ipython
-  # notebooks (incarnations/mpixarray/examples/); rides
+  # notebooks (examples/); rides
   # into CI/HPC builds too -- accepted (JLM Aug 2026) over a separate
   # env or the lab-from-base + ipykernel pattern. jupytext opens
   # py:percent files AS notebooks (right-click -> Open With ->
@@ -33,7 +38,9 @@ dependencies:
   # matches pyPRMS's !=1.7.4 requirement so its pip install does NOT
   # replace the conda build with a PyPI wheel (ABI mismatch with
   # conda numpy -> "numpy.ndarray size changed" RuntimeWarning);
-  # revisit when pyPRMS lands on conda-forge
+  # revisit when pyPRMS lands on conda-forge.
+  # README "pwpx_mpi on Hovenweep" deletes these two lines BY PATTERN
+  # ('^  - netCDF4=', '^  - libnetcdf='): keep that form.
   - netCDF4=1.7.3
   - libnetcdf=4.9.*
   - networkx  # Discretization.topological_order (pywatershed-identical)
@@ -41,19 +48,16 @@ dependencies:
   # declares numpy<2.5 (also the mypy hook's pin)
   - numpy>=2.0.0,<2.5
   - numba
-  # pyPRMS 0.9.10 is UNUSABLE under packaging 26.3 (Version(None)
-  # now raises InvalidVersion; pyPRMS's metadata filter catches only
-  # TypeError -> every MetaData() call dies). Fix offered upstream
-  # (pyPRMS branch ask/packaging-version-none; see
-  # prms_translate/UPSTREAM_ASKS.md item 0); drop this pin when it
-  # lands in the installed pyPRMS
-  - packaging=26.2
   # graphviz layout for ModelContractGraph.to_dot (notebook 00;
   # falls back to mermaid without it) -- was an ad hoc install in
   # the old env, now on the record
   - python-graphviz
   - xarray=2026.7.*  # the zarr-3 era pair (zarr pin below)
   - pandas>=1.4.0
+  # units vocabulary (pws_phoenix/units.py): declared `units` strings are
+  # checked against pint in tests/test_units.py; at runtime pint is
+  # imported only when control["units"] turns the checks on (stage 2)
+  - pint
   - pip
   - mypy
   - pre-commit
@@ -76,35 +80,16 @@ dependencies:
   # xarray 2026.7 above -- the historical breakage was the MISMATCHED
   # pair, xarray 2026.4 + zarr 3.3). Back on conda: the old
   # zarr-as-pip arrangement existed only to defend the v2 line
-  # against conda re-solves and is obsolete. KNOWN TWO-STEP on a
-  # fresh env create: pyPRMS 0.9.10's pip install (below, runs last)
-  # declares zarr<3 and WILL downgrade zarr to 2.18 -- restore with
-  #   conda install -n <env> zarr=3.3.* --freeze-installed
-  # (the validated build path). Harmless otherwise: pyPRMS's zarr
-  # use is an optional Cbh engine we never touch, and its
-  # development branch has already relaxed the pin -- this two-step
-  # dies when pyPRMS >0.9.10 is picked up.
+  # against conda re-solves and is obsolete. (pyPRMS 0.9.10's
+  # zarr<3 pin used to downgrade this on a fresh create; pyPRMS
+  # >=0.10.0 has no such pin -- verified on a from-scratch build,
+  # Oct 2026.)
   - zarr=3.3.*
-  # ---- BEGIN parallel-io ----------------------------------------
-  # The MPI + parallel-HDF5/NetCDF stack (mirrors the mpix meta-repo
-  # environment_parallel_io.yaml) hosting the mpixarray ecosystem
-  # (installed separately, in dependency order -- see the meta-repo
-  # setup_environment.sh or the CI workflow). This block is the ONLY
-  # parallel/serial difference: a serial env (or a platform conda
-  # cannot solve, e.g. Windows has no conda-forge mpich/parallel
-  # hdf5) is derived by DELETING this block -- CI does exactly that
-  # for its Windows cell. Serial pws_phoenix runs never need it
-  # (the mpixarray import is optional).
-  - mpich
-  - mpi4py
-  - hdf5=1.14.*=mpi*  # rev-2 surgery: 2.1.0 -> 1.14.6 (netcdf 4.9 compat)
-  - h5py=*=mpi*
-  - h5netcdf
-  - pytest-mpi
-  # ---- END parallel-io ------------------------------------------
   - pip:
       - pytest-error-for-skips
       # pywatershed import-chain dep for the A/B parity tests
       # (pywatershed itself is used from the mpix-root repo clone via
-      # sys.path); contextily + tqdm ride in the conda section above
-      - pyPRMS
+      # sys.path); contextily + tqdm ride in the conda section above.
+      # >=0.10.0: fixes the MetaData() crash under packaging 26.3
+      # (UPSTREAM_ASKS item 0) and drops the zarr<3 pin
+      - pyPRMS>=0.10.0

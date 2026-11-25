@@ -1,0 +1,333 @@
+"""
+hydrology/prms_groundwater.py
+=============================
+PRMSGroundwaterNoDprst + PRMSGroundwater: the PRMS groundwater
+reservoir, ported from pywatershed
+(pywatershed/hydrology/prms_groundwater.py; PRMS 5.2.1 physics, PRMS-IV
+documentation: Markstrom et al. 2015, USGS TM 6-B7).
+
+First REAL process port (July 2026). Ported: the field declarations
+(names verbatim -- the goal-4 pathway) and the numerics of
+_calculate_numpy, rewritten to this framework's in-place, out-first,
+zero-per-step-allocation kernel convention. The kernel is an explicit
+element loop with SCALAR temporaries: pywatershed's staged array
+expressions would materialize named intermediate arrays every step,
+even under numba (expression fusion does not eliminate named arrays).
+Per element the operation order is identical, so results match
+pywatershed's to within its own autotest tolerance (1e-13).
+
+**Variant structure (ADDITIVE -- see PORTS.md "How variants are done
+here")**: pywatershed derives PRMSGroundwaterNoDprst FROM
+PRMSGroundwater by subtraction (re-declared interface, a per-step zero
+array fed to the shared kernel). Here the hierarchy points the right
+way: ``PRMSGroundwaterNoDprst`` is the minimal core (soil_to_gw +
+ssr_to_gw inflows) and ``PRMSGroundwater`` EXTENDS it by adding the
+``dprst_seep_hru`` input and the kernel term that consumes it. Each
+class owns its kernel; the core never touches dprst.
+
+Deliberately NOT ported:
+- Budget / ConservativeProcess machinery -- FLAGGED for a later design
+  pass; when it comes, scrutinize its design (e.g. the separation /
+  combination of mass and energy budgets).
+- adapters (adaptable / adapter_factory) -- the Model wires inputs.
+- restart read/write; verbose; the calc_method switch (numba is THE
+  compute path here); the dprst_flag=False zero-input hack (the
+  additive NoDprst base above replaces it).
+- gwstor_min: declared by pywatershed's get_parameters() but unused by
+  its kernel.
+
+Parameter provenance (pywatershed utils/separate_nhm_params.py):
+hru_area and hru_in_to_cf are DIS_HRU variables -- they belong to the
+hru discretization (parameters_dis_hru.nc), not to this process
+(parameters_PRMSGroundwater.nc). Both are declared as plain "parameter"
+fields (the declaration states the NEED); the Model sources declared
+parameters DIS-FIRST, so they arrive via
+``Discretization(..., parameters=parameters_dis_hru.nc)`` and land on
+the grid's shared dataset (structurally shared with any other process
+that declares them). Under MPI the distributed grid's dis variables
+ride in the combined input file instead.
+"""
+
+import numba
+import numpy as np
+
+from pws_phoenix import NUMBA_CACHE
+from pws_phoenix.clock import Time
+from pws_phoenix.process import DataArrayMeta, Process
+
+
+class PRMSGroundwaterNoDprst(Process):
+    """PRMS groundwater reservoir without depression storage: one
+    linear reservoir per HRU, fed by soil_to_gw + ssr_to_gw.
+
+    The minimal core of the groundwater family; PRMSGroundwater adds
+    the depression-storage seepage inflow.
+
+    Storage and fluxes are in inches over the HRU (PRMS convention);
+    the kernel works in volume (acre-inches) internally and
+    gwres_flow_vol is in cubic feet (via hru_in_to_cf).
+    """
+
+    # ------------------------------------------------------------------
+    # Field declarations (names verbatim from pywatershed)
+    # ------------------------------------------------------------------
+
+    # -- dis_hru variables (grid-owned; see module docstring) --
+    hru_area = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="acres",
+        description="HRU area [acres]",
+    )
+    hru_in_to_cf = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="cubic feet/inch",
+        description="Conversion of inches over the HRU to cubic feet",
+        derivation="hru_area * 43560.0 / 12.0",
+    )
+
+    # -- process parameters --
+    gwflow_coef = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="1/day",
+        description="Groundwater routing coefficient [1/day]",
+    )
+    gwsink_coef = DataArrayMeta(
+        kind="parameter",
+        dims=("space",),
+        dtype=np.float64,
+        units="1/day",
+        description="Groundwater sink coefficient [1/day]",
+    )
+
+    # -- inputs --
+    soil_to_gw = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        description=(
+            "Portion of excess capillary flow that drains to the GWR"
+        ),
+        units="inches",
+    )
+    ssr_to_gw = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        description="Drainage from the gravity reservoir to the GWR",
+        units="inches",
+    )
+
+    # -- variables --
+    gwres_stor = DataArrayMeta(
+        kind="variable",
+        restart=True,
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Groundwater reservoir storage [inches]",
+    )
+    gwres_stor_old = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="inches",
+        description="Groundwater reservoir storage, previous timestep",
+    )
+    gwres_flow = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        description="Groundwater discharge to the stream network [inches]",
+        units="inches",
+    )
+    gwres_sink = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        description="Groundwater loss to the sink (leaves the model) [inches]",
+        units="inches",
+    )
+    gwres_stor_change = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        description="Change in groundwater storage over the timestep [inches]",
+        units="inches",
+    )
+    gwres_flow_vol = DataArrayMeta(
+        kind="variable",
+        dims=("space",),
+        dtype=np.float64,
+        units="cubic feet",
+        description="Groundwater discharge volume [cubic feet]",
+    )
+
+    # -- budgets --
+    # pywatershed's get_mass_budget_terms lists only gwres_flow as an
+    # output; the kernel also removes gwres_sink from storage
+    # (`_gwres_stor -= _gwres_sink`), so it is an output here -- the
+    # budget closes to roundoff regardless of gwsink_coef.
+    budgets = {
+        "mass": {
+            "inputs": ("soil_to_gw", "ssr_to_gw"),
+            "outputs": ("gwres_flow", "gwres_sink"),
+            "storage_changes": ("gwres_stor_change",),
+        },
+    }
+
+    # ------------------------------------------------------------------
+    # Computation
+    # ------------------------------------------------------------------
+
+    def init_state(self, time: Time) -> None:
+        """Cold-start default: gwres_stor = 2.0 inches, PRMS's declared
+        default for gwstor_init (gwflow.f90 declparam, PRMS 5.2.1 and
+        PRMS 5.2.1.1; pywatershed declares none). A domain's own value
+        is SUPPLIED gwres_stor (prms_translate renames gwstor_init),
+        written after this hook."""
+        self._refs["gwres_stor"][:] = 2.0
+
+    def advance(self) -> None:
+        self._refs["gwres_stor_old"][:] = self._refs["gwres_stor"]
+
+    @staticmethod
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
+    def _calculate(
+        gwres_stor: np.ndarray,
+        gwres_flow: np.ndarray,
+        gwres_sink: np.ndarray,
+        gwres_stor_change: np.ndarray,
+        gwres_flow_vol: np.ndarray,
+        gwres_stor_old: np.ndarray,
+        soil_to_gw: np.ndarray,
+        ssr_to_gw: np.ndarray,
+        hru_area: np.ndarray,
+        hru_in_to_cf: np.ndarray,
+        gwflow_coef: np.ndarray,
+        gwsink_coef: np.ndarray,
+    ) -> None:
+        for ii in numba.prange(gwres_stor.shape[0]):
+            area = hru_area[ii]
+            # to volume (acre-inches); the dprst kernel below with a
+            # zero dprst_seep_hru reduces to exactly this sum
+            stor = gwres_stor[ii] * area
+            stor = stor + (soil_to_gw[ii] * area + ssr_to_gw[ii] * area)
+            flow = stor * gwflow_coef[ii]
+            stor = stor - flow
+            sink = stor * gwsink_coef[ii]
+            if sink > stor:
+                sink = stor
+            stor = stor - sink
+            # back to inches over the HRU
+            gwres_stor[ii] = stor / area
+            gwres_flow[ii] = flow / area
+            gwres_sink[ii] = sink / area
+            gwres_stor_change[ii] = gwres_stor[ii] - gwres_stor_old[ii]
+            gwres_flow_vol[ii] = gwres_flow[ii] * hru_in_to_cf[ii]
+
+    def calculate(self, dt: np.float64, time: Time) -> None:
+        self._calculate(
+            self._refs["gwres_stor"],
+            self._refs["gwres_flow"],
+            self._refs["gwres_sink"],
+            self._refs["gwres_stor_change"],
+            self._refs["gwres_flow_vol"],
+            self._refs["gwres_stor_old"],
+            self._refs["soil_to_gw"],
+            self._refs["ssr_to_gw"],
+            self._refs["hru_area"],
+            self._refs["hru_in_to_cf"],
+            self._refs["gwflow_coef"],
+            self._refs["gwsink_coef"],
+        )
+
+
+class PRMSGroundwater(PRMSGroundwaterNoDprst):
+    """PRMS groundwater reservoir with depression storage: adds the
+    dprst_seep_hru inflow to the NoDprst core.
+
+    Storage and fluxes are in inches over the HRU (PRMS convention);
+    the kernel works in volume (acre-inches) internally and
+    gwres_flow_vol is in cubic feet (via hru_in_to_cf).
+    """
+
+    # -- inputs (ADDED to the NoDprst core) --
+    dprst_seep_hru = DataArrayMeta(
+        kind="input",
+        dims=("space",),
+        dtype=np.float64,
+        description=("Seepage from surface-depression storage to the GWR"),
+        units="inches",
+    )
+
+    # The whole dict is redeclared (a variant replaces, never extends).
+    budgets = {
+        "mass": {
+            "inputs": ("soil_to_gw", "ssr_to_gw", "dprst_seep_hru"),
+            "outputs": ("gwres_flow", "gwres_sink"),
+            "storage_changes": ("gwres_stor_change",),
+        },
+    }
+
+    @staticmethod
+    @numba.njit(cache=NUMBA_CACHE, parallel=True)
+    def _calculate(
+        gwres_stor: np.ndarray,
+        gwres_flow: np.ndarray,
+        gwres_sink: np.ndarray,
+        gwres_stor_change: np.ndarray,
+        gwres_flow_vol: np.ndarray,
+        gwres_stor_old: np.ndarray,
+        soil_to_gw: np.ndarray,
+        ssr_to_gw: np.ndarray,
+        dprst_seep_hru: np.ndarray,
+        hru_area: np.ndarray,
+        hru_in_to_cf: np.ndarray,
+        gwflow_coef: np.ndarray,
+        gwsink_coef: np.ndarray,
+    ) -> None:
+        for ii in numba.prange(gwres_stor.shape[0]):
+            area = hru_area[ii]
+            # to volume (acre-inches); element-wise operation order
+            # matches pywatershed's _calculate_numpy exactly
+            stor = gwres_stor[ii] * area
+            stor = stor + (
+                soil_to_gw[ii] * area
+                + ssr_to_gw[ii] * area
+                + dprst_seep_hru[ii] * area
+            )
+            flow = stor * gwflow_coef[ii]
+            stor = stor - flow
+            sink = stor * gwsink_coef[ii]
+            if sink > stor:
+                sink = stor
+            stor = stor - sink
+            # back to inches over the HRU
+            gwres_stor[ii] = stor / area
+            gwres_flow[ii] = flow / area
+            gwres_sink[ii] = sink / area
+            gwres_stor_change[ii] = gwres_stor[ii] - gwres_stor_old[ii]
+            gwres_flow_vol[ii] = gwres_flow[ii] * hru_in_to_cf[ii]
+
+    def calculate(self, dt: np.float64, time: Time) -> None:
+        self._calculate(
+            self._refs["gwres_stor"],
+            self._refs["gwres_flow"],
+            self._refs["gwres_sink"],
+            self._refs["gwres_stor_change"],
+            self._refs["gwres_flow_vol"],
+            self._refs["gwres_stor_old"],
+            self._refs["soil_to_gw"],
+            self._refs["ssr_to_gw"],
+            self._refs["dprst_seep_hru"],
+            self._refs["hru_area"],
+            self._refs["hru_in_to_cf"],
+            self._refs["gwflow_coef"],
+            self._refs["gwsink_coef"],
+        )

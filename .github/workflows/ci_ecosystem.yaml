@@ -2,22 +2,22 @@
 # across platforms. Complements ci.yaml (fast ubuntu serial lint +
 # tests, no ecosystem):
 #
-# - ubuntu/macos: build the parallel env from environment.yaml, check
-#   out the four ecosystem repos (PRIVATE GITHUB MIRRORS of the
-#   code.usgs.gov originals) with a read-only PAT, install them in
-#   dependency order, then run the full suite -- serial + every MPI
+# - ubuntu/macos: build the parallel env from environment_mpi.yaml, check
+#   out the two ecosystem repos (PRIVATE GITHUB MIRRORS of the
+#   code.usgs.gov originals: mpix main, mpixarray 1.0.0) with a
+#   read-only PAT, install them in dependency order, then run the
+#   full suite -- serial + every MPI
 #   test file under mpirun (tests/run_tests.sh). Data-dependent
 #   suites (drb/starfit) skip cleanly: no domain data in CI.
-# - windows: DEMONSTRATE the serial derivation -- environment.yaml
-#   with the "parallel-io" block stripped (conda-forge has no mpich /
+# - windows: the serial environment.yaml (conda-forge has no mpich /
 #   parallel hdf5 on Windows), no ecosystem, serial tests only
 #   (mpixarray is an optional import; see model.py).
 #
 # Setup required once (see the session notes / CLAUDE.md):
-# 1. Mirror numba_stdlib, mpi4mpi4py, ncxarray, mpixarray to private
-#    GitHub repos under ECOSYSTEM_ORG (edit below).
+# 1. Mirror mpix and mpixarray to private GitHub repos under
+#    ECOSYSTEM_ORG (edit below).
 # 2. Create a fine-grained PAT, Contents: read-only, scoped to those
-#    four repos; store it as the ECOSYSTEM_READ_PAT repo secret.
+#    two repos; store it as the ECOSYSTEM_READ_PAT repo secret.
 # Note: fork PRs do not receive secrets -- the ecosystem checkout
 # fails there by design; run this workflow on push/internal PRs.
 
@@ -29,6 +29,10 @@ on:
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # EDIT ME: the GitHub org/user hosting the private mirrors
@@ -54,76 +58,58 @@ jobs:
         with:
           path: pws_phoenix
 
-      - name: Derive environment file
-        run: |
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            # the serial derivation the block markers promise
-            sed '/BEGIN parallel-io/,/END parallel-io/d' \
-              pws_phoenix/environment.yaml > environment_ci.yaml
-          else
-            cp pws_phoenix/environment.yaml environment_ci.yaml
-          fi
-
-      - name: Set up environment (pwpx)
+      - name: Set up environment (pwpx_mpi)
+        if: runner.os != 'Windows'
         uses: mamba-org/setup-micromamba@v2
         with:
-          environment-file: environment_ci.yaml
+          environment-file: pws_phoenix/environment_mpi.yaml
           cache-environment: true
 
-      - name: Check out numba_stdlib
-        if: runner.os != 'Windows'
-        uses: actions/checkout@v4
+      - name: Set up environment (pwpx, serial)
+        if: runner.os == 'Windows'
+        uses: mamba-org/setup-micromamba@v2
         with:
-          repository: ${{ env.ECOSYSTEM_ORG }}/numba_stdlib
-          token: ${{ secrets.ECOSYSTEM_READ_PAT }}
-          path: numba_stdlib
+          environment-file: pws_phoenix/environment.yaml
+          cache-environment: true
 
-      - name: Check out mpi4mpi4py
+      - name: Check out mpix
         if: runner.os != 'Windows'
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.ECOSYSTEM_ORG }}/mpi4mpi4py
+          repository: ${{ env.ECOSYSTEM_ORG }}/mpix
+          ref: main
           token: ${{ secrets.ECOSYSTEM_READ_PAT }}
-          path: mpi4mpi4py
-
-      - name: Check out ncxarray
-        if: runner.os != 'Windows'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.ECOSYSTEM_ORG }}/ncxarray
-          token: ${{ secrets.ECOSYSTEM_READ_PAT }}
-          path: ncxarray
+          path: mpix
 
       - name: Check out mpixarray
         if: runner.os != 'Windows'
         uses: actions/checkout@v4
         with:
           repository: ${{ env.ECOSYSTEM_ORG }}/mpixarray
+          ref: 1.0.0
           token: ${{ secrets.ECOSYSTEM_READ_PAT }}
           path: mpixarray
 
       - name: Install ecosystem (dependency order)
         if: runner.os != 'Windows'
         run: |
-          # comment_remote_deps.sh equivalent: fresh clones carry
-          # git+ lines pointing at code.usgs.gov (unreachable here);
-          # the side-by-side local clones supply those packages
-          sed -i.bak -E 's|^([^#].*git\+.*)$|# \1|' \
-            numba_stdlib/requirements.txt \
-            mpi4mpi4py/requirements.txt \
-            ncxarray/requirements.txt \
-            mpixarray/requirements.txt
-          pip install -e numba_stdlib
-          pip install -e mpi4mpi4py
-          pip install -e ncxarray
+          # mpixarray requires mpix by plain name: installing mpix
+          # first makes pip take the local clone. Every other
+          # requirement of both packages is already in the conda env
+          # (environment_mpi.yaml "ecosystem requirements"), so nothing
+          # is pulled from PyPI.
+          pip install -e mpix
           pip install -e mpixarray
+
+      - name: Install pws_phoenix (editable, no deps)
+        run: pip install -e pws_phoenix --no-deps
 
       # unix: the full sweep (serial suite + each MPI test file under
       # mpirun; exit code = number of failed suites)
       - name: Full test sweep (serial + MPI)
         if: runner.os != 'Windows'
         run: |
-          cd pws_phoenix/incarnations/mpixarray
+          cd pws_phoenix
           MPI_CMD="mpirun -n 4" bash tests/run_tests.sh
 
       # windows: serial only (no ecosystem; *_mpi.py files import
@@ -132,5 +118,5 @@ jobs:
       - name: Serial tests
         if: runner.os == 'Windows'
         run: |
-          cd pws_phoenix/incarnations/mpixarray
+          cd pws_phoenix
           python -m pytest tests/ -vv --ignore-glob='tests/*_mpi.py'
