@@ -52,7 +52,10 @@ PROCESS_PACKAGES = (pws_phoenix.hydrology, pws_phoenix.atmosphere)
 ABSTRACT_BASES = {"PRMSAtmosphereBase", "PRMSStreamTempBase"}
 
 # the shrinking lists -- the README ledger's remaining rows (none)
-PROCESSES_NOT_YET_COVERED: set[str] = set()  # all covered (Oct 2026)
+# PRMSChannelMPI (Nov 2026): PRMSChannel divided over MPI ranks; in a
+# serial Model it is PRMSChannel, which is covered, and the benchmarks
+# launch no ranks. Its timings are in dag_research.md.
+PROCESSES_NOT_YET_COVERED: set[str] = {"PRMSChannelMPI"}
 NODE_TYPES_NOT_YET_COVERED: set[str] = set()  # all covered (Oct 2026)
 
 

@@ -45,6 +45,13 @@ each only if its store (``output_parallel_netcdf``,
 neither store the run writes nothing. An explicit list wins verbatim.
 Dropped names are not reported here (no ModelKit is returned; see
 assemble_from_control). Both one-liners treat output this way.
+
+``replace_classes={slot: class}`` (both one-liners) puts another class
+in a ``process_dict`` slot after the kit is built: the caller's way
+to choose a class the control file cannot name, such as
+``{"prms_channel": PRMSChannelMPI}`` (the channel divided over the
+ranks, ``hydrology/prms_channel_mpi.py``). The entry's data are
+unchanged, so the class must take the same parameters and state.
 """
 
 import pathlib as pl
@@ -121,7 +128,10 @@ def write_mpi_input_file(
 
 
 def _mpi_model_from_kit(
-    kit: ModelKit, control: dict[str, Any], keep_parameters: bool
+    kit: ModelKit,
+    control: dict[str, Any],
+    keep_parameters: bool,
+    replace_classes: dict[str, type] | None = None,
 ) -> ModelMPI:
     """A (serial) ModelKit -> ModelMPI, on every rank. `control` is
     complete (``input_file``, ``mpi_grid``) and is edited here: the
@@ -131,8 +141,17 @@ def _mpi_model_from_kit(
     supplied initial state (full extent; each rank takes its block).
     `keep_parameters`: it also keeps its ``"parameters"`` dataset
     (ModelMPI copies each rank's block); otherwise they are dropped
-    with everything else it holds, because ``input_file`` has them."""
+    with everything else it holds, because ``input_file`` has them.
+    `replace_classes`: see the module docstring."""
     mpi_grid = control["mpi_grid"]
+    replace_classes = replace_classes or {}
+    unknown = sorted(set(replace_classes) - set(kit.process_dict))
+    if unknown:
+        # the same arguments on every rank: all ranks raise
+        raise ValueError(
+            f"replace_classes names {unknown}, which are not process "
+            f"slots of this model ({list(kit.process_dict)})."
+        )
     process_dict: dict[str, dict[str, Any]] = {}
     mpi_vars: set[str] = set()
     for slot, entry in kit.process_dict.items():
@@ -147,6 +166,9 @@ def _mpi_model_from_kit(
             mpi_vars |= set(entry["class"].get_var_names(include_budget=True))
         else:
             process_dict[slot] = entry
+    for slot, cls in replace_classes.items():
+        # a new entry: the kit's is not edited
+        process_dict[slot] = process_dict[slot] | {"class": cls}
 
     # The control file's output request, per destination (the mirror of
     # the serial gate "injected only when a store was supplied"): a
@@ -184,6 +206,7 @@ def _mpi_model_from_kit(
 def mpi_model_from_control(
     control_file: str | pl.Path,
     control: dict[str, Any],
+    replace_classes: dict[str, type] | None = None,
 ) -> ModelMPI:
     """The parallel one-liner (call it on EVERY rank, under mpirun).
     See the module docstring for the required control keys; the
@@ -199,13 +222,16 @@ def mpi_model_from_control(
             "produces it)."
         )
     kit = assemble_from_control(control_file)
-    return _mpi_model_from_kit(kit, control, keep_parameters=False)
+    return _mpi_model_from_kit(
+        kit, control, keep_parameters=False, replace_classes=replace_classes
+    )
 
 
 def mpi_model_from_translation(
     translation_yaml: str | pl.Path,
     control: dict[str, Any] | None = None,
     transposed: bool = False,
+    replace_classes: dict[str, type] | None = None,
 ) -> ModelMPI:
     """The parallel one-liner for a domain translated ahead of time
     (call it on EVERY rank, under mpirun). `translation_yaml` is the
@@ -228,6 +254,7 @@ def mpi_model_from_translation(
       ``end_time``; ones given in `control` take precedence.
     - Output is as in mpi_model_from_control (module docstring): with
       no store in `control` the run writes nothing.
+    - ``replace_classes``: see the module docstring.
 
     Every raise here comes from the same files on every rank, so all
     ranks raise."""
@@ -276,4 +303,6 @@ def mpi_model_from_translation(
                 "input), and ModelMPI streams the inputs of grid "
                 f"'{mpi_grid}' from the forcing file only."
             )
-    return _mpi_model_from_kit(kit, control, keep_parameters=True)
+    return _mpi_model_from_kit(
+        kit, control, keep_parameters=True, replace_classes=replace_classes
+    )

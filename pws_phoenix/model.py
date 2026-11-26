@@ -2437,6 +2437,94 @@ class ModelMPI(Model):
             self._raise_if_supplied_state_with_restart()
             self._read_restart(pl.Path(restart_read))
         self._check_initial_state()
+        # after the starting state is in place: a divided process
+        # copies its rows of it
+        self._decompose_processes(serial_out_names)
+
+    def _decompose_processes(self, serial_out_names: List[str]) -> None:
+        """A serial-grid process that has set_decomposition()
+        (PRMSChannelMPI) DIVIDES its work over the ranks and makes its
+        own messages, as a MapMPI does. It runs on every rank; the
+        rest of its grid stays on rank 0. Here it is told which of its
+        variables rank 0 reads at every step: requested output,
+        another process's input on its grid, a Map's source. Rank 0
+        holds all of them after gather_all() (the end of run(), and
+        write_restart()).
+
+        Every raise below is from process_dict, the maps and control,
+        the same on every rank: all ranks raise."""
+        mpi_grid = self._mpi_grid
+        self._divided: Dict[str, Any] = {
+            kk: proc
+            for kk, proc in self.model_dict.items()
+            if self._proc_grid[kk] != mpi_grid
+            and hasattr(proc, "set_decomposition")
+        }
+        for kk, proc in self._divided.items():
+            grid = self._proc_grid[kk]
+            what = f"process '{kk}' ({type(proc).__name__})"
+            if self._serial_grids_all_ranks:
+                raise NotImplementedError(
+                    f"{what} divides its work over the ranks: "
+                    "control['serial_grids_all_ranks'] is not "
+                    "implemented with it (only rank 0 is given its "
+                    "variables)."
+                )
+            if proc._budgets or proc.get_restart_state():
+                raise NotImplementedError(
+                    f"{what} divides its work over the ranks: a budget "
+                    "or python-attribute restart state on such a "
+                    "process is not implemented."
+                )
+            # Every rank needs the process's inputs. A MapMPI fills
+            # its target on every rank; anything else on a serial grid
+            # is computed or read on rank 0 only.
+            fed = {
+                mm.target_var
+                for mm in self.maps.values()
+                if mm.target_grid == grid and mm.source_grid == mpi_grid
+            }
+            inputs = proc.get_inputs() + proc.get_mutable_inputs()
+            rank0_only = [ii for ii in inputs if ii not in fed]
+            if rank0_only:
+                raise ValueError(
+                    f"{what} divides its work over the ranks, and its "
+                    f"input(s) {rank0_only} are not fed by a MapMPI from "
+                    f"the distributed grid '{mpi_grid}': only rank 0 "
+                    "would hold them."
+                )
+            others = [
+                other
+                for name, other in self.model_dict.items()
+                if name != kk and self._proc_grid[name] == grid
+            ]
+            own = proc.get_var_names(include_budget=True)
+            edited = sorted(
+                {
+                    name
+                    for other in others
+                    for name in other.get_mutable_inputs()
+                    if name in own
+                }
+            )
+            if edited:
+                raise NotImplementedError(
+                    f"{what} divides its work over the ranks, and "
+                    f"another process edits its variable(s) {edited} in "
+                    "place (mutable_input): the edit would not reach "
+                    "the ranks."
+                )
+            needed = set(serial_out_names)
+            for other in others:
+                needed |= set(other.get_inputs())
+            needed |= {
+                mm.source_var
+                for mm in self.maps.values()
+                if mm.source_grid == grid
+            }
+            proc.set_decomposition(
+                self._comm, tuple(name for name in own if name in needed)
+            )
 
     # -- run ------------------------------------------------------------
 
@@ -2495,8 +2583,10 @@ class ModelMPI(Model):
             if self._proc_grid[kk] == mpi_grid
         ]
         serial_here = self._serial_grids_all_ranks or self._comm.rank == 0
+        # a divided process (_decompose_processes) runs on every rank
+        divided = self._divided
         proc_runs_here = [
-            serial_here or self._proc_grid[kk] == mpi_grid
+            serial_here or self._proc_grid[kk] == mpi_grid or kk in divided
             for kk in self.model_dict
         ]
         # What rank 0 runs ALONE: a raise there is no other rank's
@@ -2507,7 +2597,8 @@ class ModelMPI(Model):
             and self._comm.size > 1
         )
         proc_runs_alone = [
-            alone and self._proc_grid[kk] != mpi_grid for kk in self.model_dict
+            alone and self._proc_grid[kk] != mpi_grid and kk not in divided
+            for kk in self.model_dict
         ]
         # warm start: the stream was time-sliced at build to BEGIN at
         # the resume index; model time stays GLOBALLY indexed, so
@@ -2607,6 +2698,11 @@ class ModelMPI(Model):
             # values_on_disk subset at as_iterable).
             for buf in self._output_map.values():
                 step[buf].mpi.write()
+        # After the last step rank 0 holds EVERY variable of a divided
+        # process, not only those it was given at each step
+        # (collective: every rank is here).
+        for proc in divided.values():
+            proc.gather_all()
 
     def _raise_if_bad_numba_threads(self, n_threads: int, n_max: int) -> None:
         """Agree across ranks before raising: numba's maximum can
@@ -2716,6 +2812,10 @@ class ModelMPI(Model):
         ends on a Barrier so the files are complete before any rank
         proceeds -- e.g. straight into a warm-started model."""
         comm = self._comm
+        # a divided process's state is on the ranks: rank 0 is given
+        # all of it first (collective)
+        for proc in self._divided.values():
+            proc.gather_all()
         dd = pl.Path(directory)
         if comm.rank == 0:
             dd.mkdir(parents=True, exist_ok=True)
